@@ -8,6 +8,13 @@
       "when": 1775712248567,
       "tag": "0000_calm_blonde_phantom",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1775725653026,
+      "tag": "0001_uneven_ricochet",
+      "breakpoints": true
     }
   ]
 }

@@ -11,6 +11,7 @@ import { getDb } from "./db.js";
 import { orders, orderItems } from "../drizzle/schema.js";
 import { getIncomingPayments, matchPaymentToOrder } from "./bunqService.js";
 import { sendOrderConfirmationEmail, sendShippingNotificationEmail } from "./emailService.js";
+import { partners, partnerTransactions } from "../drizzle/schema.js";
 
 // Zod schemas
 const createOrderSchema = z.object({
@@ -43,6 +44,11 @@ const createOrderSchema = z.object({
   total: z.number(),
   paymentMethod: z.enum(["bunq", "creditCard", "wise"]),
   date: z.string(),
+  // Partner fields
+  partnerCode: z.string().nullable().optional(),
+  partnerNumber: z.string().nullable().optional(),
+  partnerDiscount: z.number().optional(),
+  creditUsed: z.number().optional(),
 });
 
 const updateStatusSchema = z.object({
@@ -60,6 +66,84 @@ export const orderRouter = router({
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
+
+      // ── Partner logic: validate code, calculate discount & commission ──
+      let partnerCode = input.partnerCode || null;
+      let partnerNumber = input.partnerNumber || null;
+      let partnerDiscountAmount = input.partnerDiscount || 0;
+      let partnerCommissionAmount = 0;
+      let creditUsed = input.creditUsed || 0;
+
+      if (partnerCode) {
+        const { and: andOp } = await import("drizzle-orm");
+        const [partner] = await db.select().from(partners)
+          .where(andOp(eq(partners.code, partnerCode.toUpperCase()), eq(partners.isActive, 1)))
+          .limit(1);
+
+        if (partner) {
+          // Calculate commission on product subtotal after discount (not on shipping)
+          const productSubtotalAfterDiscount = input.subtotal - partnerDiscountAmount;
+          const commissionRate = parseFloat(partner.commissionPercent) / 100;
+          partnerCommissionAmount = Math.round(productSubtotalAfterDiscount * commissionRate * 100) / 100;
+
+          // Book commission: update partner balance
+          const currentBalance = parseFloat(partner.creditBalance);
+          const newBalance = currentBalance + partnerCommissionAmount;
+
+          await db.update(partners).set({
+            creditBalance: newBalance.toFixed(2),
+            updatedAt: new Date(),
+          }).where(eq(partners.id, partner.id));
+
+          // Record provision transaction
+          await db.insert(partnerTransactions).values({
+            partnerId: partner.id,
+            type: "provision",
+            amount: partnerCommissionAmount.toFixed(2),
+            balanceAfter: newBalance.toFixed(2),
+            orderId: input.orderId,
+            customerName: `${input.customer.firstName} ${input.customer.lastName}`,
+            description: `Provision f\u00fcr Bestellung ${input.orderId} (${input.customer.firstName} ${input.customer.lastName})`,
+          });
+
+          console.log(`[Orders] Partner commission: ${partnerCommissionAmount.toFixed(2)} EUR for ${partner.name}`);
+        }
+      }
+
+      // ── Partner credit redemption ──
+      if (partnerNumber && creditUsed > 0) {
+        const { and: andOp } = await import("drizzle-orm");
+        const [partner] = await db.select().from(partners)
+          .where(andOp(eq(partners.partnerNumber, partnerNumber), eq(partners.isActive, 1)))
+          .limit(1);
+
+        if (partner) {
+          const currentBalance = parseFloat(partner.creditBalance);
+          const actualCreditUsed = Math.min(creditUsed, currentBalance);
+
+          if (actualCreditUsed > 0) {
+            const newBalance = currentBalance - actualCreditUsed;
+
+            await db.update(partners).set({
+              creditBalance: newBalance.toFixed(2),
+              updatedAt: new Date(),
+            }).where(eq(partners.id, partner.id));
+
+            // Record redemption transaction
+            await db.insert(partnerTransactions).values({
+              partnerId: partner.id,
+              type: "einloesung",
+              amount: (-actualCreditUsed).toFixed(2),
+              balanceAfter: newBalance.toFixed(2),
+              orderId: input.orderId,
+              description: `Guthaben eingel\u00f6st f\u00fcr Bestellung ${input.orderId}`,
+            });
+
+            creditUsed = actualCreditUsed;
+            console.log(`[Orders] Partner credit redeemed: ${actualCreditUsed.toFixed(2)} EUR by ${partner.name}`);
+          }
+        }
+      }
 
       // Insert order
       await db.insert(orders).values({
@@ -83,6 +167,11 @@ export const orderRouter = router({
         paymentMethod: input.paymentMethod,
         status: "offen",
         orderDate: new Date(input.date),
+        partnerCode: partnerCode ? partnerCode.toUpperCase() : null,
+        partnerNumber: partnerNumber || null,
+        partnerDiscount: partnerDiscountAmount.toFixed(2),
+        partnerCommission: partnerCommissionAmount.toFixed(2),
+        creditUsed: creditUsed.toFixed(2),
       });
 
       // Insert order items

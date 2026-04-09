@@ -149,6 +149,13 @@ export const orders = pgTable("orders", {
   // Shipping label URL
   shippingLabelUrl: text("shipping_label_url"),
 
+  // Partner / Affiliate
+  partnerCode: varchar("partner_code", { length: 50 }),
+  partnerNumber: varchar("partner_number", { length: 50 }),
+  partnerDiscount: decimal("partner_discount", { precision: 10, scale: 2 }).default("0"),
+  partnerCommission: decimal("partner_commission", { precision: 10, scale: 2 }).default("0"),
+  creditUsed: decimal("credit_used", { precision: 10, scale: 2 }).default("0"),
+
   // Bunq payment matching
   bunqPaymentId: varchar("bunq_payment_id", { length: 100 }),
   bunqMatchedAt: timestamp("bunq_matched_at"),
@@ -192,3 +199,81 @@ export const orderItems = pgTable("order_items", {
 
 export type OrderItem = typeof orderItems.$inferSelect;
 export type InsertOrderItem = typeof orderItems.$inferInsert;
+
+/**
+ * Partners / Affiliates – partner management
+ * Each partner has:
+ * - A unique code (e.g. "ALEX10") that customers enter at checkout for a discount
+ * - A unique partner number (e.g. "P-1001") that the partner uses to redeem credit
+ * - A configurable customer discount % (only on product subtotal, not shipping)
+ * - A configurable commission % (on the discounted product subtotal)
+ * - A running credit balance from earned commissions
+ */
+export const partners = pgTable("partners", {
+  id: serial("id").primaryKey(),
+  name: varchar("name", { length: 200 }).notNull(),
+  email: varchar("email", { length: 320 }),
+  phone: varchar("phone", { length: 50 }),
+  company: varchar("company", { length: 200 }),
+
+  // Unique affiliate code (entered by customers at checkout)
+  code: varchar("code", { length: 50 }).notNull().unique(),
+
+  // Unique partner number (used by partner to redeem credit)
+  partnerNumber: varchar("partner_number", { length: 50 }).notNull().unique(),
+
+  // Commission: % the partner earns on discounted product subtotal
+  commissionPercent: decimal("commission_percent", { precision: 5, scale: 2 }).notNull().default("10"),
+
+  // Customer discount: % discount for customers using this partner's code (only on products, not shipping)
+  customerDiscountPercent: decimal("customer_discount_percent", { precision: 5, scale: 2 }).notNull().default("10"),
+
+  // Running credit balance (sum of all commissions minus redemptions)
+  creditBalance: decimal("credit_balance", { precision: 10, scale: 2 }).notNull().default("0"),
+
+  // Active flag
+  isActive: integer("is_active").default(1).notNull(),
+
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type Partner = typeof partners.$inferSelect;
+export type InsertPartner = typeof partners.$inferInsert;
+
+/**
+ * Partner transactions – tracks all credit movements
+ * Types:
+ * - "provision"  → commission earned from a referred order
+ * - "einloesung" → credit redeemed at checkout by the partner
+ * - "korrektur"  → manual adjustment by admin
+ */
+export const partnerTransactionTypeEnum = pgEnum("partner_transaction_type", ["provision", "einloesung", "korrektur"]);
+
+export const partnerTransactions = pgTable("partner_transactions", {
+  id: serial("id").primaryKey(),
+  partnerId: integer("partner_id").notNull(),
+
+  type: partnerTransactionTypeEnum("type").notNull(),
+
+  // Amount (positive for provision/korrektur+, negative for einloesung/korrektur-)
+  amount: decimal("amount", { precision: 10, scale: 2 }).notNull(),
+
+  // Balance after this transaction
+  balanceAfter: decimal("balance_after", { precision: 10, scale: 2 }).notNull(),
+
+  // Reference to order (if applicable)
+  orderId: varchar("order_id", { length: 32 }),
+
+  // Customer name (for provision tracking)
+  customerName: varchar("customer_name", { length: 200 }),
+
+  // Description
+  description: text("description"),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export type PartnerTransaction = typeof partnerTransactions.$inferSelect;
+export type InsertPartnerTransaction = typeof partnerTransactions.$inferInsert;
