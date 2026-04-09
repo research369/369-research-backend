@@ -1,8 +1,9 @@
 /**
  * Auth module – JWT-based authentication for WaWi admin
  * No external OAuth dependency – fully self-contained
+ * Uses jsonwebtoken (works with Node 18+)
  */
-import { SignJWT, jwtVerify } from "jose";
+import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import { eq } from "drizzle-orm";
 import { ENV } from "./env.js";
@@ -10,26 +11,17 @@ import { getDb } from "./db.js";
 import { users } from "../drizzle/schema.js";
 import type { Request, Response } from "express";
 
-const JWT_ALG = "HS256";
 const TOKEN_EXPIRY = "7d"; // 7 days
 const COOKIE_NAME = "369_session";
 
-function getSecret() {
-  return new TextEncoder().encode(ENV.jwtSecret);
+export function createToken(userId: number, role: string): string {
+  return jwt.sign({ userId, role }, ENV.jwtSecret, { expiresIn: TOKEN_EXPIRY });
 }
 
-export async function createToken(userId: number, role: string): Promise<string> {
-  return new SignJWT({ userId, role })
-    .setProtectedHeader({ alg: JWT_ALG })
-    .setIssuedAt()
-    .setExpirationTime(TOKEN_EXPIRY)
-    .sign(getSecret());
-}
-
-export async function verifyToken(token: string): Promise<{ userId: number; role: string } | null> {
+export function verifyToken(token: string): { userId: number; role: string } | null {
   try {
-    const { payload } = await jwtVerify(token, getSecret());
-    return { userId: payload.userId as number, role: payload.role as string };
+    const payload = jwt.verify(token, ENV.jwtSecret) as { userId: number; role: string };
+    return { userId: payload.userId, role: payload.role };
   } catch {
     return null;
   }
@@ -55,7 +47,7 @@ export async function getUserFromRequest(req: Request) {
 
   if (!token) return null;
 
-  const payload = await verifyToken(token);
+  const payload = verifyToken(token);
   if (!payload) return null;
 
   const db = await getDb();
@@ -98,7 +90,7 @@ export async function handleLogin(req: Request, res: Response) {
   // Update last signed in
   await db.update(users).set({ lastSignedIn: new Date() }).where(eq(users.id, user.id));
 
-  const token = await createToken(user.id, user.role);
+  const token = createToken(user.id, user.role);
 
   // Set cookie
   res.cookie(COOKIE_NAME, token, {
