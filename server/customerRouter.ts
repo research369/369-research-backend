@@ -95,7 +95,7 @@ export const customerRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
-      const result = await db.insert(customers).values({
+      const [inserted] = await db.insert(customers).values({
         name: input.name,
         phone: input.phone || null,
         email: input.email || null,
@@ -105,9 +105,9 @@ export const customerRouter = router({
         city: input.city || null,
         country: input.country || null,
         notes: input.notes || null,
-      });
+      }).returning();
 
-      return { success: true, id: result[0].insertId };
+      return { success: true, id: inserted.id };
     }),
 
   // Update customer

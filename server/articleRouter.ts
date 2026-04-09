@@ -128,7 +128,7 @@ export const articleRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
-      const result = await db.insert(articles).values({
+      const [inserted] = await db.insert(articles).values({
         sku: input.sku,
         name: input.name,
         category: input.category || null,
@@ -140,13 +140,12 @@ export const articleRouter = router({
         maxStock: input.maxStock || 100,
         shopProductId: input.shopProductId || null,
         notes: input.notes || null,
-      });
+      }).returning();
 
       // Log initial stock
       if (input.stock && input.stock > 0) {
-        const insertId = result[0].insertId;
         await db.insert(stockHistory).values({
-          articleId: insertId,
+          articleId: inserted.id,
           changeType: "wareneingang",
           quantityBefore: 0,
           quantityChange: input.stock,
@@ -156,7 +155,7 @@ export const articleRouter = router({
         });
       }
 
-      return { success: true, id: result[0].insertId };
+      return { success: true, id: inserted.id };
     }),
 
   // Update article
@@ -206,7 +205,7 @@ export const articleRouter = router({
       const [original] = await db.select().from(articles).where(eq(articles.id, input.id)).limit(1);
       if (!original) throw new Error("Article not found");
 
-      const result = await db.insert(articles).values({
+      const [cloned] = await db.insert(articles).values({
         sku: `${original.sku}-KOPIE`,
         name: `${original.name} (Kopie)`,
         category: original.category,
@@ -218,12 +217,11 @@ export const articleRouter = router({
         maxStock: original.maxStock,
         shopProductId: original.shopProductId,
         notes: original.notes,
-      });
-
-      return { success: true, id: result[0].insertId };
+      }).returning();
+      return { success: true, id: cloned.id };
     }),
 
-  // Adjust stock (Wareneingang / Korrektur)
+  // Update article(Wareneingang / Korrektur)
   adjustStock: adminProcedure
     .input(z.object({
       id: z.number(),
