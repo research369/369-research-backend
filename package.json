@@ -1,0 +1,40 @@
+{
+  "name": "369-research-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch server/index.ts",
+    "start": "tsx server/index.ts",
+    "build": "echo 'No build step needed with tsx'",
+    "db:push": "drizzle-kit generate && drizzle-kit migrate",
+    "db:seed": "tsx server/seed.ts"
+  },
+  "dependencies": {
+    "@trpc/server": "^11.6.0",
+    "bcryptjs": "^2.4.3",
+    "cookie": "^1.0.2",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.2",
+    "drizzle-orm": "^0.44.5",
+    "express": "^4.21.2",
+    "jose": "6.1.0",
+    "nanoid": "^5.1.5",
+    "pg": "^8.13.1",
+    "superjson": "^1.13.3",
+    "tsx": "^4.19.4",
+    "zod": "^3.24.4"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cookie": "^0.6.0",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.15.2",
+    "@types/pg": "^8.11.10",
+    "drizzle-kit": "^0.31.4",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
