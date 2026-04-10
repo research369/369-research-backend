@@ -433,6 +433,27 @@ export const orderRouter = router({
       return payments;
     }),
 
+  // ADMIN: Migrate payment_method enum to add new values
+  migratePaymentEnum: adminProcedure
+    .mutation(async () => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      const newValues = ["SEPA", "Bar", "Kreditkarte", "PayPal", "Crypto", "Guthaben", "Sonstige"];
+      const results: string[] = [];
+
+      for (const val of newValues) {
+        try {
+          await db.execute(`ALTER TYPE payment_method ADD VALUE IF NOT EXISTS '${val}'`);
+          results.push(`Added: ${val}`);
+        } catch (err: any) {
+          results.push(`Skipped ${val}: ${err.message}`);
+        }
+      }
+
+      return { success: true, results };
+    }),
+
   // ADMIN: Add internal note
   addNote: adminProcedure
     .input(z.object({

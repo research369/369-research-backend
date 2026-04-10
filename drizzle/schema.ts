@@ -5,7 +5,7 @@ import { integer, pgTable, text, timestamp, varchar, decimal, pgEnum, serial } f
  */
 export const userRoleEnum = pgEnum("user_role", ["user", "admin"]);
 export const stockChangeTypeEnum = pgEnum("stock_change_type", ["wareneingang", "verkauf", "korrektur", "retoure", "bestellung"]);
-export const paymentMethodEnum = pgEnum("payment_method", ["bunq", "creditCard", "wise"]);
+export const paymentMethodEnum = pgEnum("payment_method", ["bunq", "creditCard", "wise", "SEPA", "Bar", "Kreditkarte", "PayPal", "Crypto", "Guthaben", "Sonstige"]);
 export const orderStatusEnum = pgEnum("order_status", ["offen", "bezahlt", "gepackt", "versendet", "zugestellt", "storniert"]);
 
 /**
