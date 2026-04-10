@@ -8,7 +8,7 @@ import { z } from "zod";
 import { eq, desc, inArray } from "drizzle-orm";
 import { router, publicProcedure, adminProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
-import { orders, orderItems } from "../drizzle/schema.js";
+import { orders, orderItems, articles, stockHistory } from "../drizzle/schema.js";
 import { getIncomingPayments, matchPaymentToOrder } from "./bunqService.js";
 import { sendOrderConfirmationEmail, sendShippingNotificationEmail } from "./emailService.js";
 import { partners, partnerTransactions } from "../drizzle/schema.js";
@@ -452,6 +452,54 @@ export const orderRouter = router({
       }
 
       return { success: true, results };
+    }),
+
+  // ADMIN: Delete order with stock restoration
+  delete: adminProcedure
+    .input(z.object({ orderId: z.string() }))
+    .mutation(async ({ input, ctx }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      // Get the order
+      const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1);
+      if (!order) throw new Error("Bestellung nicht gefunden");
+
+      // Get order items
+      const items = await db.select().from(orderItems).where(eq(orderItems.orderId, input.orderId));
+
+      // Restore stock for each item that has an articleId
+      for (const item of items) {
+        if (item.articleId) {
+          const [article] = await db.select().from(articles).where(eq(articles.id, item.articleId)).limit(1);
+          if (article) {
+            const newStock = article.stock + item.quantity;
+            await db.update(articles).set({ stock: newStock }).where(eq(articles.id, item.articleId));
+
+            // Log stock restoration
+            await db.insert(stockHistory).values({
+              articleId: item.articleId,
+              changeType: "retoure",
+              quantityBefore: article.stock,
+              quantityChange: item.quantity,
+              quantityAfter: newStock,
+              reason: `Bestellung ${input.orderId} gel\u00f6scht`,
+              orderId: input.orderId,
+              userName: ctx.user?.name || "Admin",
+            });
+          }
+        }
+      }
+
+      // Delete order items first
+      await db.delete(orderItems).where(eq(orderItems.orderId, input.orderId));
+
+      // Delete the order
+      await db.delete(orders).where(eq(orders.orderId, input.orderId));
+
+      console.log(`[Orders] Deleted order ${input.orderId} with stock restoration`);
+
+      return { success: true, restoredItems: items.length };
     }),
 
   // ADMIN: Add internal note
