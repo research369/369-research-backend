@@ -14,6 +14,10 @@ export const ENV = {
   // Resend (E-Mail)
   resendApiKey: process.env.RESEND_API_KEY || "",
 
+  // Forge LLM API (for KI-Bestellerfassung)
+  forgeApiKey: process.env.FORGE_API_KEY || "",
+  forgeApiUrl: process.env.FORGE_API_URL || "https://api.manus.im/internal-api",
+
   // Admin credentials (set via env vars)
   adminUsername: process.env.ADMIN_USERNAME || "admin",
   adminPassword: process.env.ADMIN_PASSWORD || "",
