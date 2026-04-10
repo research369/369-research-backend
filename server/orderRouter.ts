@@ -42,7 +42,7 @@ const createOrderSchema = z.object({
   shipping: z.number(),
   shippingCountry: z.string(),
   total: z.number(),
-  paymentMethod: z.enum(["bunq", "creditCard", "wise"]),
+  paymentMethod: z.enum(["bunq", "creditCard", "wise", "SEPA", "Bar", "Kreditkarte", "PayPal", "Crypto", "Guthaben", "Sonstige"]),
   date: z.string(),
   // Partner fields
   partnerCode: z.string().nullable().optional(),

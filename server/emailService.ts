@@ -37,8 +37,15 @@ interface OrderEmailData {
 function getPaymentMethodLabel(method: string): string {
   switch (method) {
     case "bunq": return "SEPA-Überweisung (Bunq)";
+    case "SEPA": return "SEPA-Überweisung";
     case "creditCard": return "Kreditkarte (Bunq)";
+    case "Kreditkarte": return "Kreditkarte";
     case "wise": return "Internationale Überweisung (Wise)";
+    case "Bar": return "Barzahlung";
+    case "PayPal": return "PayPal";
+    case "Crypto": return "Kryptowährung";
+    case "Guthaben": return "Partner-Guthaben";
+    case "Sonstige": return "Sonstige Zahlungsart";
     default: return method;
   }
 }
