@@ -89,6 +89,39 @@ export const orderRouter = router({
       let partnerCommissionAmount = 0;
       let creditUsed = input.creditUsed || 0;
 
+      // Helper: Book commission for a partner
+      const bookPartnerCommission = async (partner: any, reason: string) => {
+        const productSubtotalAfterDiscount = input.subtotal - partnerDiscountAmount;
+        const commissionRate = parseFloat(partner.commissionPercent) / 100;
+        partnerCommissionAmount = Math.round(productSubtotalAfterDiscount * commissionRate * 100) / 100;
+
+        if (partnerCommissionAmount <= 0) return;
+
+        const currentBalance = parseFloat(partner.creditBalance);
+        const newBalance = currentBalance + partnerCommissionAmount;
+
+        await db.update(partners).set({
+          creditBalance: newBalance.toFixed(2),
+          updatedAt: new Date(),
+        }).where(eq(partners.id, partner.id));
+
+        await db.insert(partnerTransactions).values({
+          partnerId: partner.id,
+          type: "provision",
+          amount: partnerCommissionAmount.toFixed(2),
+          balanceAfter: newBalance.toFixed(2),
+          orderId: orderId,
+          customerName: `${input.customer.firstName} ${input.customer.lastName}`,
+          description: `Provision für Bestellung ${orderId} (${input.customer.firstName} ${input.customer.lastName}) [${reason}]`,
+        });
+
+        // Also set the partnerCode on the order for tracking
+        if (!partnerCode) partnerCode = partner.code;
+
+        console.log(`[Orders] Partner commission: ${partnerCommissionAmount.toFixed(2)} EUR for ${partner.name} (${reason})`);
+      };
+
+      // Case 1: Partner CODE was provided (customer or partner entered the code)
       if (partnerCode) {
         const { and: andOp } = await import("drizzle-orm");
         const [partner] = await db.select().from(partners)
@@ -96,32 +129,20 @@ export const orderRouter = router({
           .limit(1);
 
         if (partner) {
-          // Calculate commission on product subtotal after discount (not on shipping)
-          const productSubtotalAfterDiscount = input.subtotal - partnerDiscountAmount;
-          const commissionRate = parseFloat(partner.commissionPercent) / 100;
-          partnerCommissionAmount = Math.round(productSubtotalAfterDiscount * commissionRate * 100) / 100;
+          await bookPartnerCommission(partner, "Code");
+        }
+      }
 
-          // Book commission: update partner balance
-          const currentBalance = parseFloat(partner.creditBalance);
-          const newBalance = currentBalance + partnerCommissionAmount;
+      // Case 2: Partner NUMBER was provided but no code – partner ordering for themselves
+      // Also book commission for the partner (they get both discount + commission)
+      if (partnerNumber && !partnerCode) {
+        const { and: andOp } = await import("drizzle-orm");
+        const [partner] = await db.select().from(partners)
+          .where(andOp(eq(partners.partnerNumber, partnerNumber), eq(partners.isActive, 1)))
+          .limit(1);
 
-          await db.update(partners).set({
-            creditBalance: newBalance.toFixed(2),
-            updatedAt: new Date(),
-          }).where(eq(partners.id, partner.id));
-
-          // Record provision transaction
-          await db.insert(partnerTransactions).values({
-            partnerId: partner.id,
-            type: "provision",
-            amount: partnerCommissionAmount.toFixed(2),
-            balanceAfter: newBalance.toFixed(2),
-                 orderId: orderId,
-            customerName: `${input.customer.firstName} ${input.customer.lastName}`,
-            description: `Provision für Bestellung ${orderId} (${input.customer.firstName} ${input.customer.lastName})`,
-          });
-
-          console.log(`[Orders] Partner commission: ${partnerCommissionAmount.toFixed(2)} EUR for ${partner.name}`);
+        if (partner) {
+          await bookPartnerCommission(partner, "Eigenbestellung");
         }
       }
 
