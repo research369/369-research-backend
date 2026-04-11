@@ -277,3 +277,55 @@ export const partnerTransactions = pgTable("partner_transactions", {
 
 export type PartnerTransaction = typeof partnerTransactions.$inferSelect;
 export type InsertPartnerTransaction = typeof partnerTransactions.$inferInsert;
+
+/**
+ * Promo Codes – time-limited discount codes managed in WaWi
+ * Unlike partner codes, these can be used by any customer (including returning ones)
+ * They have optional expiry dates and usage limits
+ */
+export const promoCodeDiscountTypeEnum = pgEnum("promo_code_discount_type", ["percent", "fixed"]);
+
+export const promoCodes = pgTable("promo_codes", {
+  id: serial("id").primaryKey(),
+  code: varchar("code", { length: 50 }).notNull().unique(),
+  
+  // Discount
+  discountType: promoCodeDiscountTypeEnum("discount_type").notNull().default("percent"),
+  percentage: decimal("percentage", { precision: 5, scale: 2 }).default("0"),
+  fixedAmount: decimal("fixed_amount", { precision: 10, scale: 2 }).default("0"),
+  
+  // Constraints
+  minOrder: decimal("min_order", { precision: 10, scale: 2 }).default("0"),
+  maxUses: integer("max_uses").default(0), // 0 = unlimited
+  currentUses: integer("current_uses").default(0).notNull(),
+  
+  // Validity period
+  validFrom: timestamp("valid_from"),
+  validUntil: timestamp("valid_until"),
+  
+  // Status
+  isActive: integer("is_active").default(1).notNull(),
+  
+  // Meta
+  description: text("description"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type PromoCode = typeof promoCodes.$inferSelect;
+export type InsertPromoCode = typeof promoCodes.$inferInsert;
+
+/**
+ * Partner code usage – tracks which emails have used a partner code
+ * Each email can only use a partner code ONCE (first purchase only)
+ */
+export const partnerCodeUsage = pgTable("partner_code_usage", {
+  id: serial("id").primaryKey(),
+  email: varchar("email", { length: 320 }).notNull().unique(),
+  partnerCode: varchar("partner_code", { length: 50 }).notNull(),
+  orderId: varchar("order_id", { length: 32 }).notNull(),
+  usedAt: timestamp("used_at").defaultNow().notNull(),
+});
+
+export type PartnerCodeUsage = typeof partnerCodeUsage.$inferSelect;
+export type InsertPartnerCodeUsage = typeof partnerCodeUsage.$inferInsert;

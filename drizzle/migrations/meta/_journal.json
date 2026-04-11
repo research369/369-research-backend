@@ -15,6 +15,13 @@
       "when": 1775725653026,
       "tag": "0001_uneven_ricochet",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1775883208239,
+      "tag": "0002_lonely_nomad",
+      "breakpoints": true
     }
   ]
 }

@@ -8,6 +8,7 @@ import { customerRouter } from "./customerRouter.js";
 import { labelRouter } from "./labelRouter.js";
 import { partnerRouter } from "./partnerRouter.js";
 import { aiRouter } from "./aiRouter.js";
+import { promoCodeRouter } from "./promoCodeRouter.js";
 
 export const appRouter = router({
   order: orderRouter,
@@ -16,6 +17,7 @@ export const appRouter = router({
   label: labelRouter,
   partner: partnerRouter,
   ai: aiRouter,
+  promoCode: promoCodeRouter,
 });
 
 export type AppRouter = typeof appRouter;
