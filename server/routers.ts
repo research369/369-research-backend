@@ -9,6 +9,7 @@ import { labelRouter } from "./labelRouter.js";
 import { partnerRouter } from "./partnerRouter.js";
 import { aiRouter } from "./aiRouter.js";
 import { promoCodeRouter } from "./promoCodeRouter.js";
+import { shopSettingsRouter } from "./shopSettingsRouter.js";
 
 export const appRouter = router({
   order: orderRouter,
@@ -18,6 +19,7 @@ export const appRouter = router({
   partner: partnerRouter,
   ai: aiRouter,
   promoCode: promoCodeRouter,
+  shopSettings: shopSettingsRouter,
 });
 
 export type AppRouter = typeof appRouter;

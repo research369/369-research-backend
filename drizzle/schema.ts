@@ -329,3 +329,17 @@ export const partnerCodeUsage = pgTable("partner_code_usage", {
 
 export type PartnerCodeUsage = typeof partnerCodeUsage.$inferSelect;
 export type InsertPartnerCodeUsage = typeof partnerCodeUsage.$inferInsert;
+
+/**
+ * Shop Settings – key/value store for global shop configuration
+ * e.g. shop_open = true/false (Master Out-of-Stock toggle)
+ */
+export const shopSettings = pgTable("shop_settings", {
+  id: serial("id").primaryKey(),
+  key: varchar("key", { length: 100 }).notNull().unique(),
+  value: text("value").notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type ShopSetting = typeof shopSettings.$inferSelect;
+export type InsertShopSetting = typeof shopSettings.$inferInsert;
