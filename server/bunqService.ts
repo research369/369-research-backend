@@ -256,7 +256,149 @@ export async function getIncomingPayments(count: number = 100): Promise<BunqPaym
 }
 
 /**
- * Match a payment description against an order ID
+ * Normalize a string for fuzzy matching: lowercase, remove special chars, collapse whitespace
+ */
+function normalize(str: string): string {
+  return str.toLowerCase().replace(/[^a-z0-9äöüß\s]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Extract potential order IDs from a description string.
+ * Matches patterns like "369-10003", "369 10003", "36910003", "369_10003"
+ */
+function extractOrderIds(description: string): string[] {
+  const results: string[] = [];
+  // Match "369" followed by optional separator and digits
+  const patterns = [
+    /369[\s\-_\.]*(\d{4,6})/gi,  // 369-10003, 369 10003, 36910003
+  ];
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(description)) !== null) {
+      results.push(`369-${match[1]}`);
+    }
+  }
+  return results;
+}
+
+export interface MatchResult {
+  orderId: string;
+  matchType: "orderNumber" | "nameAndAmount" | "amountOnly" | "nameOnly" | "none";
+  confidence: "high" | "medium" | "low";
+  matchedPayment: BunqPayment | null;
+  amountMatch: boolean;
+  nameMatch: boolean;
+  orderNumberMatch: boolean;
+}
+
+/**
+ * Intelligent payment matching for an order against all payments.
+ * Checks: (1) Order number in description, (2) Name match, (3) Amount match
+ * Returns the best match with confidence level.
+ */
+export function intelligentMatch(
+  order: { orderId: string; firstName: string; lastName: string; total: string },
+  payments: BunqPayment[]
+): MatchResult {
+  const orderTotal = parseFloat(order.total);
+  const orderName = normalize(`${order.firstName} ${order.lastName}`);
+  const orderNameParts = orderName.split(" ").filter(p => p.length > 1);
+
+  let bestMatch: MatchResult = {
+    orderId: order.orderId,
+    matchType: "none",
+    confidence: "low",
+    matchedPayment: null,
+    amountMatch: false,
+    nameMatch: false,
+    orderNumberMatch: false,
+  };
+
+  for (const payment of payments) {
+    const paymentAmount = parseFloat(payment.amount.value);
+    const paymentDesc = payment.description || "";
+    const senderName = normalize(payment.counterpartyAlias.name || "");
+
+    // Check 1: Order number in description (with fuzzy matching)
+    const extractedIds = extractOrderIds(paymentDesc);
+    const orderNumberMatch = extractedIds.some(
+      id => id.toUpperCase() === order.orderId.toUpperCase()
+    ) || paymentDesc.toUpperCase().includes(order.orderId.toUpperCase());
+
+    // Check 2: Name matching (sender name contains customer name parts or vice versa)
+    const nameMatch = orderNameParts.length > 0 && orderNameParts.some(part =>
+      senderName.includes(part) || normalize(paymentDesc).includes(part)
+    );
+
+    // Check 3: Amount matching (within 0.05 EUR tolerance)
+    const amountMatch = Math.abs(paymentAmount - orderTotal) <= 0.05;
+
+    // Determine match type and confidence
+    let matchType: MatchResult["matchType"] = "none";
+    let confidence: MatchResult["confidence"] = "low";
+
+    if (orderNumberMatch && amountMatch) {
+      // Best case: order number + amount match
+      matchType = "orderNumber";
+      confidence = "high";
+    } else if (orderNumberMatch && nameMatch) {
+      // Order number + name but amount differs (partial payment?)
+      matchType = "orderNumber";
+      confidence = "high";
+    } else if (orderNumberMatch) {
+      // Only order number match
+      matchType = "orderNumber";
+      confidence = "medium";
+    } else if (nameMatch && amountMatch) {
+      // Name + amount match (customer forgot order number)
+      matchType = "nameAndAmount";
+      confidence = "medium";
+    } else if (amountMatch && !nameMatch) {
+      // Only amount matches – could be coincidence
+      matchType = "amountOnly";
+      confidence = "low";
+    } else if (nameMatch && !amountMatch) {
+      // Only name matches
+      matchType = "nameOnly";
+      confidence = "low";
+    }
+
+    // Keep the best match (highest confidence)
+    const confidenceRank = { high: 3, medium: 2, low: 1 };
+    if (matchType !== "none" && confidenceRank[confidence] > confidenceRank[bestMatch.confidence]) {
+      bestMatch = {
+        orderId: order.orderId,
+        matchType,
+        confidence,
+        matchedPayment: payment,
+        amountMatch,
+        nameMatch,
+        orderNumberMatch,
+      };
+    }
+    // If same confidence, prefer the one with more matching criteria
+    else if (matchType !== "none" && confidenceRank[confidence] === confidenceRank[bestMatch.confidence]) {
+      const currentScore = (amountMatch ? 1 : 0) + (nameMatch ? 1 : 0) + (orderNumberMatch ? 1 : 0);
+      const bestScore = (bestMatch.amountMatch ? 1 : 0) + (bestMatch.nameMatch ? 1 : 0) + (bestMatch.orderNumberMatch ? 1 : 0);
+      if (currentScore > bestScore) {
+        bestMatch = {
+          orderId: order.orderId,
+          matchType,
+          confidence,
+          matchedPayment: payment,
+          amountMatch,
+          nameMatch,
+          orderNumberMatch,
+        };
+      }
+    }
+  }
+
+  return bestMatch;
+}
+
+/**
+ * Legacy: Match a payment description against an order ID
  * Order IDs are like "369-XXXXXX"
  */
 export function matchPaymentToOrder(
@@ -268,6 +410,12 @@ export function matchPaymentToOrder(
     if (desc.includes(orderId.toUpperCase())) {
       return orderId;
     }
+  }
+  // Also try fuzzy matching (369 10003 instead of 369-10003)
+  const extractedIds = extractOrderIds(payment.description);
+  for (const extracted of extractedIds) {
+    const match = orderIds.find(id => id.toUpperCase() === extracted.toUpperCase());
+    if (match) return match;
   }
   return null;
 }

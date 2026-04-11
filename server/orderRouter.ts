@@ -9,7 +9,7 @@ import { eq, desc, inArray } from "drizzle-orm";
 import { router, publicProcedure, adminProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
 import { orders, orderItems, articles, stockHistory } from "../drizzle/schema.js";
-import { getIncomingPayments, matchPaymentToOrder } from "./bunqService.js";
+import { getIncomingPayments, matchPaymentToOrder, intelligentMatch, type MatchResult } from "./bunqService.js";
 import { sendOrderConfirmationEmail, sendShippingNotificationEmail } from "./emailService.js";
 import { partners, partnerTransactions } from "../drizzle/schema.js";
 
@@ -379,64 +379,139 @@ export const orderRouter = router({
     return stats;
   }),
 
-  // ADMIN: Bunq payment matching
+  // ADMIN: Bunq payment matching (intelligent)
   matchBunqPayments: adminProcedure.mutation(async () => {
     const db = await getDb();
     if (!db) throw new Error("Database not available");
 
-    // Get all open orders
-    const openOrders = await db.select().from(orders).where(eq(orders.status, "offen"));
-    if (openOrders.length === 0) {
-      return { matched: 0, message: "Keine offenen Bestellungen vorhanden." };
-    }
+    // Get today's date range (start of day to now)
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
 
-    const orderIds = openOrders.map(o => o.orderId);
+    // Get ALL recent orders (not just open ones):
+    // - Open orders (need matching)
+    // - Today's paid orders (for display)
+    // - Orders without bunq match (bunqPaymentId is null)
+    const allOrders = await db.select().from(orders).orderBy(desc(orders.orderDate));
+    
+    // Filter: open orders + today's bezahlt orders + any order without bunq match
+    const relevantOrders = allOrders.filter(o => {
+      const isOpen = o.status === "offen";
+      const isTodayPaid = o.status === "bezahlt" && o.orderDate && new Date(o.orderDate) >= today;
+      const isUnmatched = !o.bunqPaymentId && ["offen", "bezahlt"].includes(o.status);
+      return isOpen || isTodayPaid || isUnmatched;
+    });
+
+    if (relevantOrders.length === 0) {
+      return { 
+        matched: 0, 
+        results: [],
+        totalPaymentsChecked: 0,
+        message: "Keine relevanten Bestellungen vorhanden." 
+      };
+    }
 
     // Get incoming payments from Bunq
     const payments = await getIncomingPayments(200);
 
-    let matchedCount = 0;
-    const matchedDetails: { orderId: string; paymentId: number; amount: string; sender: string }[] = [];
+    let autoMatchedCount = 0;
+    const results: Array<{
+      orderId: string;
+      customerName: string;
+      orderTotal: number;
+      orderStatus: string;
+      orderDate: string;
+      matchType: string;
+      confidence: string;
+      amountMatch: boolean;
+      nameMatch: boolean;
+      orderNumberMatch: boolean;
+      paymentId: number | null;
+      paymentAmount: string | null;
+      paymentSender: string | null;
+      paymentDescription: string | null;
+      paymentDate: string | null;
+      autoMatched: boolean;
+      alreadyPaid: boolean;
+    }> = [];
 
-    for (const payment of payments) {
-      const matchedOrderId = matchPaymentToOrder(payment, orderIds);
-      if (matchedOrderId) {
-        // Check if amount matches
-        const order = openOrders.find(o => o.orderId === matchedOrderId);
-        if (!order) continue;
+    // Track which payments have been used for matching
+    const usedPaymentIds = new Set<number>();
 
-        const paymentAmount = parseFloat(payment.amount.value);
-        const orderTotal = parseFloat(order.total);
+    for (const order of relevantOrders) {
+      const alreadyPaid = order.status === "bezahlt";
+      const alreadyBunqMatched = !!order.bunqPaymentId;
 
-        // Allow small tolerance (0.01 EUR)
-        if (Math.abs(paymentAmount - orderTotal) <= 0.01) {
-          // Update order status to "bezahlt"
-          await db.update(orders).set({
-            status: "bezahlt",
-            paidAt: new Date(),
-            bunqPaymentId: String(payment.id),
-            bunqMatchedAt: new Date(),
-          }).where(eq(orders.orderId, matchedOrderId));
+      // Run intelligent matching
+      const match = intelligentMatch(
+        {
+          orderId: order.orderId,
+          firstName: order.firstName,
+          lastName: order.lastName,
+          total: order.total,
+        },
+        // Exclude already-used payments
+        payments.filter(p => !usedPaymentIds.has(p.id))
+      );
 
-          matchedCount++;
-          matchedDetails.push({
-            orderId: matchedOrderId,
-            paymentId: payment.id,
-            amount: payment.amount.value,
-            sender: payment.counterpartyAlias.name,
-          });
-        }
+      let autoMatched = false;
+
+      // Auto-match only for open orders with high confidence + amount match
+      if (
+        order.status === "offen" &&
+        match.confidence === "high" &&
+        match.amountMatch &&
+        match.matchedPayment &&
+        !usedPaymentIds.has(match.matchedPayment.id)
+      ) {
+        // Auto-mark as paid
+        await db.update(orders).set({
+          status: "bezahlt",
+          paidAt: new Date(),
+          bunqPaymentId: String(match.matchedPayment.id),
+          bunqMatchedAt: new Date(),
+        }).where(eq(orders.orderId, order.orderId));
+
+        usedPaymentIds.add(match.matchedPayment.id);
+        autoMatchedCount++;
+        autoMatched = true;
       }
+
+      // If already bunq-matched, find the original payment for display
+      let displayPayment = match.matchedPayment;
+      if (alreadyBunqMatched && order.bunqPaymentId) {
+        const existingPayment = payments.find(p => String(p.id) === order.bunqPaymentId);
+        if (existingPayment) displayPayment = existingPayment;
+      }
+
+      results.push({
+        orderId: order.orderId,
+        customerName: `${order.firstName} ${order.lastName}`,
+        orderTotal: parseFloat(order.total),
+        orderStatus: autoMatched ? "bezahlt" : order.status,
+        orderDate: order.orderDate ? new Date(order.orderDate).toISOString() : "",
+        matchType: alreadyBunqMatched ? "alreadyMatched" : match.matchType,
+        confidence: alreadyBunqMatched ? "high" : match.confidence,
+        amountMatch: match.amountMatch,
+        nameMatch: match.nameMatch,
+        orderNumberMatch: match.orderNumberMatch,
+        paymentId: displayPayment?.id || null,
+        paymentAmount: displayPayment?.amount.value || null,
+        paymentSender: displayPayment?.counterpartyAlias.name || null,
+        paymentDescription: displayPayment?.description || null,
+        paymentDate: displayPayment?.created || null,
+        autoMatched,
+        alreadyPaid: alreadyPaid || alreadyBunqMatched,
+      });
     }
 
     return {
-      matched: matchedCount,
-      details: matchedDetails,
+      matched: autoMatchedCount,
+      results,
       totalPaymentsChecked: payments.length,
-      openOrdersChecked: openOrders.length,
-      message: matchedCount > 0
-        ? `${matchedCount} Bestellung(en) als bezahlt markiert!`
-        : "Keine passenden Zahlungen gefunden.",
+      message: autoMatchedCount > 0
+        ? `${autoMatchedCount} Bestellung(en) automatisch als bezahlt markiert!`
+        : "Keine automatischen Matches gefunden. Prüfe die Details unten.",
     };
   }),
 
