@@ -24,12 +24,16 @@ function getHeaders(token: string, body: string, privateKey?: string) {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "User-Agent": "369Research/1.0",
-    "X-Bunq-Client-Authentication": token,
     "X-Bunq-Client-Request-Id": requestId,
     "X-Bunq-Geolocation": "0 0 0 0 000",
     "X-Bunq-Language": "en_US",
     "X-Bunq-Region": "en_US",
   };
+
+  // Only include auth header if token is provided (not for installation call)
+  if (token) {
+    headers["X-Bunq-Client-Authentication"] = token;
+  }
 
   // Sign the request if we have a private key
   if (privateKey) {
