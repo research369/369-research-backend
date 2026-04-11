@@ -15,7 +15,7 @@ import { partners, partnerTransactions } from "../drizzle/schema.js";
 
 // Zod schemas
 const createOrderSchema = z.object({
-  orderId: z.string(),
+  orderId: z.string().optional(), // now generated server-side via DB sequence
   items: z.array(z.object({
     name: z.string(),
     dosage: z.string().optional(),
@@ -67,6 +67,21 @@ export const orderRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
+      // ── Generate sequential order ID from DB sequence ──
+      let orderId = input.orderId || `369-${Date.now()}`;
+      try {
+        const { sql } = await import('drizzle-orm');
+        const seqResult = await db.execute(sql`SELECT next_order_id() as order_id`);
+        const rows = seqResult as any;
+        if (rows && rows.length > 0 && rows[0].order_id) {
+          orderId = rows[0].order_id;
+        } else if (rows?.rows && rows.rows.length > 0) {
+          orderId = rows.rows[0].order_id;
+        }
+      } catch (err) {
+        console.warn('[Orders] Failed to generate sequential order ID, using fallback:', err);
+      }
+
       // ── Partner logic: validate code, calculate discount & commission ──
       let partnerCode = input.partnerCode || null;
       let partnerNumber = input.partnerNumber || null;
@@ -101,9 +116,9 @@ export const orderRouter = router({
             type: "provision",
             amount: partnerCommissionAmount.toFixed(2),
             balanceAfter: newBalance.toFixed(2),
-            orderId: input.orderId,
+                 orderId: orderId,
             customerName: `${input.customer.firstName} ${input.customer.lastName}`,
-            description: `Provision f\u00fcr Bestellung ${input.orderId} (${input.customer.firstName} ${input.customer.lastName})`,
+            description: `Provision für Bestellung ${orderId} (${input.customer.firstName} ${input.customer.lastName})`,
           });
 
           console.log(`[Orders] Partner commission: ${partnerCommissionAmount.toFixed(2)} EUR for ${partner.name}`);
@@ -135,8 +150,8 @@ export const orderRouter = router({
               type: "einloesung",
               amount: (-actualCreditUsed).toFixed(2),
               balanceAfter: newBalance.toFixed(2),
-              orderId: input.orderId,
-              description: `Guthaben eingel\u00f6st f\u00fcr Bestellung ${input.orderId}`,
+                  orderId: orderId,
+              description: `Guthaben eingelöst für Bestellung ${orderId}`,
             });
 
             creditUsed = actualCreditUsed;
@@ -147,7 +162,7 @@ export const orderRouter = router({
 
       // Insert order
       await db.insert(orders).values({
-        orderId: input.orderId,
+        orderId: orderId,
         firstName: input.customer.firstName,
         lastName: input.customer.lastName,
         email: input.customer.email,
@@ -177,7 +192,7 @@ export const orderRouter = router({
       // Insert order items
       for (const item of input.items) {
         await db.insert(orderItems).values({
-          orderId: input.orderId,
+          orderId: orderId,
           name: item.name,
           dosage: item.dosage || null,
           variant: item.variant || null,
@@ -189,12 +204,12 @@ export const orderRouter = router({
 
       // Log new order
       const itemList = input.items.map(i => `${i.quantity}x ${i.name}${i.dosage ? ` (${i.dosage})` : ""}`).join(", ");
-      console.log(`[Orders] New order: ${input.orderId} – ${input.total.toFixed(2)} EUR – ${input.customer.firstName} ${input.customer.lastName} – ${itemList}`);
+      console.log(`[Orders] New order: ${orderId} – ${input.total.toFixed(2)} EUR – ${input.customer.firstName} ${input.customer.lastName} – ${itemList}`);
 
       // Send order confirmation email to customer
       try {
         await sendOrderConfirmationEmail({
-          orderId: input.orderId,
+          orderId: orderId,
           customer: input.customer,
           items: input.items.map(i => ({ ...i, dosage: i.dosage || null, variant: i.variant || null })),
           subtotal: input.subtotal,
@@ -208,7 +223,7 @@ export const orderRouter = router({
         console.warn("[Orders] Failed to send confirmation email:", err);
       }
 
-      return { success: true, orderId: input.orderId };
+      return { success: true, orderId: orderId };
     }),
 
   // ADMIN: List all orders with items
