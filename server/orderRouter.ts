@@ -505,15 +505,80 @@ export const orderRouter = router({
       });
     }
 
+    // Collect unmatched payments (not used by any order, not already assigned)
+    const allAssignedPaymentIds = new Set<number>();
+    // Add IDs from auto-matched
+    for (const id of usedPaymentIds) allAssignedPaymentIds.add(id);
+    // Add IDs from already-matched orders in DB
+    for (const o of allOrders) {
+      if (o.bunqPaymentId) allAssignedPaymentIds.add(parseInt(o.bunqPaymentId));
+    }
+    // Add IDs from results that have a payment match
+    for (const r of results) {
+      if (r.paymentId) allAssignedPaymentIds.add(r.paymentId);
+    }
+
+    // Recent unmatched payments (last 7 days, not assigned to any order)
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    const unmatchedPayments = payments
+      .filter(p => {
+        if (allAssignedPaymentIds.has(p.id)) return false;
+        const pDate = new Date(p.created);
+        return pDate >= sevenDaysAgo;
+      })
+      .map(p => ({
+        id: p.id,
+        amount: p.amount.value,
+        currency: p.amount.currency,
+        sender: p.counterpartyAlias.name || "Unbekannt",
+        description: p.description || "",
+        date: p.created,
+        iban: p.counterpartyAlias.iban || "",
+      }));
+
     return {
       matched: autoMatchedCount,
       results,
+      unmatchedPayments,
       totalPaymentsChecked: payments.length,
       message: autoMatchedCount > 0
         ? `${autoMatchedCount} Bestellung(en) automatisch als bezahlt markiert!`
         : "Keine automatischen Matches gefunden. Prüfe die Details unten.",
     };
   }),
+
+  // ADMIN: Manually assign a Bunq payment to an order
+  assignBunqPayment: adminProcedure
+    .input(z.object({
+      orderId: z.string(),
+      paymentId: z.number(),
+      paymentAmount: z.string(),
+      markAsPaid: z.boolean().default(true),
+    }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1);
+      if (!order) throw new Error("Bestellung nicht gefunden");
+
+      const updateData: Record<string, any> = {
+        bunqPaymentId: String(input.paymentId),
+        bunqMatchedAt: new Date(),
+      };
+
+      if (input.markAsPaid && order.status === "offen") {
+        updateData.status = "bezahlt";
+        updateData.paidAt = new Date();
+      }
+
+      await db.update(orders).set(updateData).where(eq(orders.orderId, input.orderId));
+
+      console.log(`[Bunq] Manual assignment: Payment ${input.paymentId} (${input.paymentAmount} EUR) -> Order ${input.orderId}`);
+
+      return { success: true, markedAsPaid: input.markAsPaid && order.status === "offen" };
+    }),
 
   // ADMIN: Get recent Bunq payments (for manual review)
   bunqPayments: adminProcedure
