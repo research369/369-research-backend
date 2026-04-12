@@ -22,6 +22,13 @@
       "when": 1775883208239,
       "tag": "0002_lonely_nomad",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1775997205847,
+      "tag": "0003_wonderful_gabe_jones",
+      "breakpoints": true
     }
   ]
 }

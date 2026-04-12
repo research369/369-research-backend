@@ -8,10 +8,11 @@ import { z } from "zod";
 import { eq, desc, inArray } from "drizzle-orm";
 import { router, publicProcedure, adminProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
-import { orders, orderItems, articles, stockHistory } from "../drizzle/schema.js";
+import { orders, orderItems, articles, stockHistory, customers, customerCommunications } from "../drizzle/schema.js";
 import { getIncomingPayments, matchPaymentToOrder, intelligentMatch, type MatchResult } from "./bunqService.js";
 import { sendOrderConfirmationEmail, sendShippingNotificationEmail } from "./emailService.js";
 import { partners, partnerTransactions } from "../drizzle/schema.js";
+import { sql } from "drizzle-orm";
 
 // Zod schemas
 const createOrderSchema = z.object({
@@ -221,6 +222,104 @@ export const orderRouter = router({
           price: item.price.toFixed(2),
           quantity: item.quantity,
         });
+      }
+
+      // ── Auto-create or link customer ──
+      let customerId: number | null = null;
+      try {
+        const customerEmail = input.customer.email.toLowerCase().trim();
+        const customerPhone = input.customer.phone.trim();
+        const fullName = `${input.customer.firstName} ${input.customer.lastName}`;
+
+        // Try to find existing customer by email or phone
+        const allCustomers = await db.select().from(customers);
+        let existingCustomer = allCustomers.find(c =>
+          (c.email && c.email.toLowerCase() === customerEmail) ||
+          (c.phone && c.phone === customerPhone)
+        );
+
+        if (existingCustomer) {
+          // Update existing customer with latest data
+          customerId = existingCustomer.id;
+          const newTotalOrders = existingCustomer.totalOrders + 1;
+          const newTotalSpent = parseFloat(existingCustomer.totalSpent) + input.total;
+
+          await db.update(customers).set({
+            name: fullName,
+            firstName: input.customer.firstName,
+            lastName: input.customer.lastName,
+            phone: customerPhone || existingCustomer.phone,
+            email: customerEmail || existingCustomer.email,
+            company: input.customer.company || existingCustomer.company,
+            street: input.customer.street,
+            houseNumber: input.customer.houseNumber,
+            zip: input.customer.zip,
+            city: input.customer.city,
+            country: input.customer.country,
+            totalOrders: newTotalOrders,
+            totalSpent: newTotalSpent.toFixed(2),
+            lastOrderDate: new Date(),
+            updatedAt: new Date(),
+          }).where(eq(customers.id, existingCustomer.id));
+
+          console.log(`[Customers] Linked order ${orderId} to existing customer #${existingCustomer.customerNumber} (${fullName})`);
+        } else {
+          // Generate next customer number (starting at 1210)
+          const maxResult = await db.execute(sql`SELECT COALESCE(MAX(CAST(customer_number AS INTEGER)), 1209) as max_num FROM customers WHERE customer_number ~ '^[0-9]+$'`);
+          const rows = maxResult as any;
+          let nextNum = 1210;
+          if (rows && rows.length > 0 && rows[0].max_num) {
+            nextNum = parseInt(rows[0].max_num) + 1;
+          } else if (rows?.rows && rows.rows.length > 0) {
+            nextNum = parseInt(rows.rows[0].max_num) + 1;
+          }
+          if (nextNum < 1210) nextNum = 1210;
+
+          const [newCustomer] = await db.insert(customers).values({
+            customerNumber: String(nextNum),
+            name: fullName,
+            firstName: input.customer.firstName,
+            lastName: input.customer.lastName,
+            phone: customerPhone || null,
+            email: customerEmail || null,
+            company: input.customer.company || null,
+            street: input.customer.street,
+            houseNumber: input.customer.houseNumber,
+            zip: input.customer.zip,
+            city: input.customer.city,
+            country: input.customer.country,
+            source: "shop",
+            totalOrders: 1,
+            totalSpent: input.total.toFixed(2),
+            firstOrderDate: new Date(),
+            lastOrderDate: new Date(),
+          }).returning();
+
+          customerId = newCustomer.id;
+          console.log(`[Customers] Created new customer #${nextNum} (${fullName}) for order ${orderId}`);
+        }
+
+        // Link order to customer
+        if (customerId) {
+          await db.update(orders).set({ customerId }).where(eq(orders.orderId, orderId));
+        }
+
+        // Log the order confirmation email as communication
+        if (customerId) {
+          await db.insert(customerCommunications).values({
+            customerId,
+            type: "email",
+            status: "sent",
+            subject: `Bestellbestätigung ${orderId}`,
+            body: `Automatische Bestellbestätigung für Bestellung ${orderId} (${input.total.toFixed(2)} EUR)`,
+            recipientEmail: customerEmail,
+            senderName: "369 Research",
+            orderId: orderId,
+            createdBy: "system",
+          });
+        }
+      } catch (err) {
+        console.warn("[Customers] Failed to auto-create/link customer:", err);
       }
 
       // Log new order

@@ -7,6 +7,9 @@ export const userRoleEnum = pgEnum("user_role", ["user", "admin"]);
 export const stockChangeTypeEnum = pgEnum("stock_change_type", ["wareneingang", "verkauf", "korrektur", "retoure", "bestellung"]);
 export const paymentMethodEnum = pgEnum("payment_method", ["bunq", "creditCard", "wise", "SEPA", "Bar", "Kreditkarte", "PayPal", "Crypto", "Guthaben", "Sonstige"]);
 export const orderStatusEnum = pgEnum("order_status", ["offen", "bezahlt", "gepackt", "versendet", "zugestellt", "storniert"]);
+export const communicationTypeEnum = pgEnum("communication_type", ["email", "note", "whatsapp", "phone"]);
+export const communicationStatusEnum = pgEnum("communication_status", ["sent", "failed", "draft", "logged"]);
+export const emailCampaignStatusEnum = pgEnum("email_campaign_status", ["draft", "sending", "sent", "failed"]);
 
 /**
  * Admin users table – simple JWT auth
@@ -85,19 +88,30 @@ export type InsertStockHistory = typeof stockHistory.$inferInsert;
  */
 export const customers = pgTable("customers", {
   id: serial("id").primaryKey(),
+  customerNumber: varchar("customer_number", { length: 20 }).unique(),
   name: varchar("name", { length: 200 }).notNull(),
+  firstName: varchar("first_name", { length: 100 }),
+  lastName: varchar("last_name", { length: 100 }),
   phone: varchar("phone", { length: 50 }),
   email: varchar("email", { length: 320 }),
   company: varchar("company", { length: 200 }),
 
   street: varchar("street", { length: 200 }),
+  houseNumber: varchar("house_number", { length: 20 }),
   zip: varchar("zip", { length: 20 }),
   city: varchar("city", { length: 100 }),
   country: varchar("country", { length: 100 }),
 
+  // CRM fields
+  tags: text("tags"), // JSON array of tags, e.g. ["VIP", "Stammkunde", "B2B"]
+  source: varchar("source", { length: 100 }), // e.g. "shop", "manual", "import"
+
   notes: text("notes"),
   totalOrders: integer("total_orders").default(0).notNull(),
   totalSpent: decimal("total_spent", { precision: 10, scale: 2 }).default("0").notNull(),
+
+  firstOrderDate: timestamp("first_order_date"),
+  lastOrderDate: timestamp("last_order_date"),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
@@ -105,6 +119,78 @@ export const customers = pgTable("customers", {
 
 export type Customer = typeof customers.$inferSelect;
 export type InsertCustomer = typeof customers.$inferInsert;
+
+/**
+ * Customer Communications – tracks all interactions with customers
+ */
+export const customerCommunications = pgTable("customer_communications", {
+  id: serial("id").primaryKey(),
+  customerId: integer("customer_id").notNull(),
+
+  type: communicationTypeEnum("type").notNull(),
+  status: communicationStatusEnum("status").notNull().default("logged"),
+
+  subject: varchar("subject", { length: 500 }),
+  body: text("body"),
+  htmlBody: text("html_body"),
+
+  // For emails
+  recipientEmail: varchar("recipient_email", { length: 320 }),
+  senderName: varchar("sender_name", { length: 200 }),
+
+  // Reference
+  orderId: varchar("order_id", { length: 32 }),
+  campaignId: integer("campaign_id"),
+
+  createdBy: varchar("created_by", { length: 100 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export type CustomerCommunication = typeof customerCommunications.$inferSelect;
+export type InsertCustomerCommunication = typeof customerCommunications.$inferInsert;
+
+/**
+ * Email Templates – reusable HTML email templates
+ */
+export const emailTemplates = pgTable("email_templates", {
+  id: serial("id").primaryKey(),
+  name: varchar("name", { length: 200 }).notNull(),
+  subject: varchar("subject", { length: 500 }).notNull(),
+  htmlBody: text("html_body").notNull(),
+  description: text("description"),
+  isActive: integer("is_active").default(1).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type EmailTemplate = typeof emailTemplates.$inferSelect;
+export type InsertEmailTemplate = typeof emailTemplates.$inferInsert;
+
+/**
+ * Email Campaigns – bulk email sends
+ */
+export const emailCampaigns = pgTable("email_campaigns", {
+  id: serial("id").primaryKey(),
+  name: varchar("name", { length: 200 }).notNull(),
+  subject: varchar("subject", { length: 500 }).notNull(),
+  htmlBody: text("html_body").notNull(),
+  templateId: integer("template_id"),
+
+  status: emailCampaignStatusEnum("status").notNull().default("draft"),
+  recipientCount: integer("recipient_count").default(0).notNull(),
+  sentCount: integer("sent_count").default(0).notNull(),
+  failedCount: integer("failed_count").default(0).notNull(),
+
+  // Filter criteria used (JSON)
+  filterCriteria: text("filter_criteria"),
+
+  sentAt: timestamp("sent_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type EmailCampaign = typeof emailCampaigns.$inferSelect;
+export type InsertEmailCampaign = typeof emailCampaigns.$inferInsert;
 
 /**
  * Orders table – stores all shop orders
