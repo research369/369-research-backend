@@ -694,4 +694,63 @@ export const orderRouter = router({
 
       return { success: true };
     }),
+
+  // ADMIN: Update order (edit items, discount, shipping, total)
+  update: adminProcedure
+    .input(z.object({
+      orderId: z.string(),
+      items: z.array(z.object({
+        name: z.string(),
+        dosage: z.string().optional(),
+        variant: z.string().optional(),
+        price: z.number(),
+        quantity: z.number(),
+        type: z.string(),
+        articleId: z.number().optional(),
+      })),
+      subtotal: z.number(),
+      discount: z.number(),
+      discountCode: z.string().nullable().optional(),
+      shipping: z.number(),
+      total: z.number(),
+    }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      // Check order exists
+      const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1);
+      if (!order) throw new Error("Bestellung nicht gefunden");
+
+      // Update order financials
+      await db.update(orders).set({
+        subtotal: input.subtotal.toFixed(2),
+        discount: input.discount.toFixed(2),
+        discountCode: input.discountCode || null,
+        shipping: input.shipping.toFixed(2),
+        total: input.total.toFixed(2),
+        updatedAt: new Date(),
+      }).where(eq(orders.orderId, input.orderId));
+
+      // Delete old items
+      await db.delete(orderItems).where(eq(orderItems.orderId, input.orderId));
+
+      // Insert new items
+      for (const item of input.items) {
+        await db.insert(orderItems).values({
+          orderId: input.orderId,
+          name: item.name,
+          dosage: item.dosage || null,
+          variant: item.variant || null,
+          type: item.type,
+          price: item.price.toFixed(2),
+          quantity: item.quantity,
+          articleId: item.articleId || null,
+        });
+      }
+
+      console.log(`[Orders] Updated order ${input.orderId} – ${input.total.toFixed(2)} EUR – ${input.items.length} items`);
+
+      return { success: true };
+    }),
 });
