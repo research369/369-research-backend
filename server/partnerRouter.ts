@@ -91,6 +91,11 @@ export const partnerRouter = router({
       commissionPercent: z.number().min(0).max(100),
       customerDiscountPercent: z.number().min(0).max(100),
       notes: z.string().optional(),
+      street: z.string().optional(),
+      houseNumber: z.string().optional(),
+      zip: z.string().optional(),
+      city: z.string().optional(),
+      country: z.string().optional(),
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
@@ -111,6 +116,11 @@ export const partnerRouter = router({
         company: input.company || null,
         code: input.code.toUpperCase(),
         partnerNumber: input.partnerNumber,
+        street: input.street || null,
+        houseNumber: input.houseNumber || null,
+        zip: input.zip || null,
+        city: input.city || null,
+        country: input.country || null,
         commissionPercent: input.commissionPercent.toFixed(2),
         customerDiscountPercent: input.customerDiscountPercent.toFixed(2),
         creditBalance: "0.00",
@@ -133,6 +143,11 @@ export const partnerRouter = router({
       customerDiscountPercent: z.number().min(0).max(100).optional(),
       isActive: z.number().min(0).max(1).optional(),
       notes: z.string().optional(),
+      street: z.string().optional(),
+      houseNumber: z.string().optional(),
+      zip: z.string().optional(),
+      city: z.string().optional(),
+      country: z.string().optional(),
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
@@ -147,6 +162,11 @@ export const partnerRouter = router({
       if (input.customerDiscountPercent !== undefined) updateData.customerDiscountPercent = input.customerDiscountPercent.toFixed(2);
       if (input.isActive !== undefined) updateData.isActive = input.isActive;
       if (input.notes !== undefined) updateData.notes = input.notes || null;
+      if (input.street !== undefined) updateData.street = input.street || null;
+      if (input.houseNumber !== undefined) updateData.houseNumber = input.houseNumber || null;
+      if (input.zip !== undefined) updateData.zip = input.zip || null;
+      if (input.city !== undefined) updateData.city = input.city || null;
+      if (input.country !== undefined) updateData.country = input.country || null;
 
       await db.update(partners).set(updateData).where(eq(partners.id, input.id));
       return { success: true };
@@ -317,6 +337,13 @@ export const partnerRouter = router({
         creditBalance: parseFloat(partner.creditBalance),
         partnerName: partner.name,
         discountPercent: parseFloat(partner.customerDiscountPercent),
+        address: {
+          street: partner.street || "",
+          houseNumber: partner.houseNumber || "",
+          zip: partner.zip || "",
+          city: partner.city || "",
+          country: partner.country || "",
+        },
       };
     }),
 

@@ -320,6 +320,13 @@ export const partners = pgTable("partners", {
   // Active flag
   isActive: integer("is_active").default(1).notNull(),
 
+  // Delivery address (used when partner orders via Partner-ID)
+  street: varchar("street", { length: 200 }),
+  houseNumber: varchar("house_number", { length: 20 }),
+  zip: varchar("zip", { length: 20 }),
+  city: varchar("city", { length: 100 }),
+  country: varchar("country", { length: 100 }),
+
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
