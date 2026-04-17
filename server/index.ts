@@ -48,6 +48,7 @@ const loginLimiter = rateLimit({
     error: "Zu viele Anmeldeversuche. Bitte versuchen Sie es in 15 Minuten erneut.",
   },
   keyGenerator: (req) => {
+    // Use X-Forwarded-For for Railway proxy, fallback to IP
     return (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.ip || "unknown";
   },
 });
