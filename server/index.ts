@@ -4,6 +4,7 @@
  */
 import express from "express";
 import cors from "cors";
+import rateLimit from "express-rate-limit";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import superjson from "superjson";
 import { ENV } from "./env.js";
@@ -36,8 +37,40 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString(), version: "1.0.0" });
 });
 
+// ── Rate Limiting ──────────────────────────────────────────────────
+// Strict limiter for login: max 5 attempts per 15 minutes per IP
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: "Zu viele Anmeldeversuche. Bitte versuchen Sie es in 15 Minuten erneut.",
+  },
+  keyGenerator: (req) => {
+    return (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.ip || "unknown";
+  },
+});
+
+// General API limiter: max 100 requests per minute per IP
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: "Zu viele Anfragen. Bitte versuchen Sie es später erneut.",
+  },
+  keyGenerator: (req) => {
+    return (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.ip || "unknown";
+  },
+});
+
+// Apply general rate limit to all API routes
+app.use("/api/", apiLimiter);
+
 // Auth routes (REST, not tRPC)
-app.post("/api/auth/login", handleLogin);
+app.post("/api/auth/login", loginLimiter, handleLogin);
 app.post("/api/auth/logout", handleLogout);
 app.get("/api/auth/me", handleMe);
 
