@@ -16,9 +16,12 @@ export const ENV = {
 
   // Forge LLM API (for KI-Bestellerfassung)
   forgeApiKey: process.env.FORGE_API_KEY || "",
-  forgeApiUrl: process.env.FORGE_API_URL || "https://api.manus.im/internal-api",
+  forgeApiUrl: process.env.FORGE_API_URL || "https://forge.manus.ai",
 
   // Admin credentials (set via env vars)
   adminUsername: process.env.ADMIN_USERNAME || "admin",
   adminPassword: process.env.ADMIN_PASSWORD || "",
+
+  // Internal API key for WaWi frontend calls (no user login required)
+  wawiInternalKey: process.env.WAWI_INTERNAL_KEY || "",
 };
