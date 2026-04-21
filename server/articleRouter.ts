@@ -396,6 +396,138 @@ export const articleRouter = router({
       };
     }),
 
+  // CMS: Update article description (manual or AI-generated)
+  updateDescription: adminProcedure
+    .input(z.object({
+      id: z.number(),
+      description: z.object({
+        wirkung: z.string(),
+        risiko: z.string(),
+        dosierung: z.string(),
+        quellen: z.array(z.string()),
+        fazit: z.string(),
+        kurztext: z.string().optional(),
+      }),
+    }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+      await db.update(articles).set({
+        description: input.description,
+      }).where(eq(articles.id, input.id));
+      return { success: true };
+    }),
+
+  // CMS: Generate description via AI
+  generateDescription: adminProcedure
+    .input(z.object({
+      id: z.number(),
+      name: z.string(),
+      category: z.string().optional(),
+    }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      // Call Forge LLM to generate description
+      const FORGE_API_KEY = process.env.FORGE_API_KEY;
+      const FORGE_API_URL = process.env.FORGE_API_URL || "https://forge.manus.ai";
+      if (!FORGE_API_KEY) throw new Error("FORGE_API_KEY not configured");
+
+      const prompt = `Du bist ein Experte für Forschungspeptide und Pharmazeutika. Erstelle eine wissenschaftliche Produktbeschreibung für das Forschungspeptid "${input.name}" (Kategorie: ${input.category || "Peptid"}).
+
+WICHTIG: Alle Beschreibungen sind ausschließlich für Forschungszwecke. Keine Gesundheitsversprechen. Keine Einnahmeempfehlungen für Menschen.
+
+Antworte als JSON mit genau dieser Struktur:
+{
+  "wirkung": "Beschreibung des Wirkmechanismus und der Forschungsergebnisse (2-3 Sätze, wissenschaftlich aber verständlich)",
+  "risiko": "Bekannte Risiken und Nebenwirkungen aus der Forschung (2-3 Sätze)",
+  "dosierung": "Typische Forschungsdosierungen aus Studien (1-2 Sätze, z.B. 'In Studien wurden Dosierungen von X-Y mg verwendet')",
+  "quellen": ["Quelle 1 (z.B. PubMed-Studie)", "Quelle 2"],
+  "fazit": "Kurzes Fazit zur Bedeutung für die Forschung (1-2 Sätze)",
+  "kurztext": "Einzeiliger Marketingtext für den Shop (max 100 Zeichen, z.B. 'Dualer GIP/GLP-1-Agonist für die Forschung')"
+}
+
+Nur das JSON, kein Markdown, keine Erklärung.`;
+
+      const response = await fetch(`${FORGE_API_URL}/v1/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${FORGE_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: "anthropic/claude-sonnet-4-20250514",
+          messages: [
+            { role: "system", content: "Du bist ein wissenschaftlicher Berater für Forschungspeptide. Antworte nur mit validem JSON." },
+            { role: "user", content: prompt },
+          ],
+          temperature: 0.3,
+        }),
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`LLM API error: ${response.status} - ${errText}`);
+      }
+
+      const result = await response.json() as any;
+      const content = result.choices?.[0]?.message?.content;
+      if (!content) throw new Error("No content from LLM");
+
+      // Parse JSON from response
+      let description;
+      try {
+        // Try to extract JSON from potential markdown code blocks
+        const jsonMatch = content.match(/```json?\s*([\s\S]*?)```/) || content.match(/\{[\s\S]*\}/);
+        const jsonStr = jsonMatch ? (jsonMatch[1] || jsonMatch[0]) : content;
+        description = JSON.parse(jsonStr.trim());
+      } catch (e) {
+        throw new Error(`Failed to parse LLM response: ${content}`);
+      }
+
+      // Save to DB
+      await db.update(articles).set({
+        description: description,
+      }).where(eq(articles.id, input.id));
+
+      return { success: true, description };
+    }),
+
+  // CMS: Toggle shop visibility
+  toggleShopVisible: adminProcedure
+    .input(z.object({
+      id: z.number(),
+      visible: z.boolean(),
+    }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+      await db.update(articles).set({
+        shopVisible: input.visible ? 1 : 0,
+      }).where(eq(articles.id, input.id));
+      return { success: true };
+    }),
+
+  // CMS: Get article with description (PUBLIC - for shop product pages)
+  shopArticle: publicProcedure
+    .input(z.object({ shopProductId: z.string() }))
+    .query(async ({ input }) => {
+      const db = await getDb();
+      if (!db) return null;
+      const allArticles = await db.select().from(articles);
+      const article = allArticles.find(a => a.shopProductId === input.shopProductId && a.shopVisible === 1);
+      if (!article) return null;
+      return {
+        id: article.id,
+        name: article.name,
+        description: article.description,
+        sellingPrice: article.sellingPrice ? parseFloat(article.sellingPrice) : 0,
+        stock: article.stock,
+        inStock: article.stock > 0,
+      };
+    }),
+
   // Check stock availability for shop products (PUBLIC)
   checkAvailability: adminProcedure
     .input(z.object({

@@ -1,4 +1,4 @@
-import { integer, pgTable, text, timestamp, varchar, decimal, pgEnum, serial } from "drizzle-orm/pg-core";
+import { integer, pgTable, text, timestamp, varchar, decimal, pgEnum, serial, jsonb } from "drizzle-orm/pg-core";
 
 /**
  * Enums
@@ -52,6 +52,11 @@ export const articles = pgTable("articles", {
   shopProductId: varchar("shop_product_id", { length: 100 }),
 
   notes: text("notes"),
+
+  // CMS: KI-generierte Beschreibung (JSON: wirkung, risiko, dosierung, quellen, fazit)
+  description: jsonb("description"),
+  // Artikel im Shop sichtbar?
+  shopVisible: integer("shop_visible").default(0).notNull(),
 
   isActive: integer("is_active").default(1).notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
