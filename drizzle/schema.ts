@@ -7,6 +7,8 @@ export const userRoleEnum = pgEnum("user_role", ["user", "admin"]);
 export const stockChangeTypeEnum = pgEnum("stock_change_type", ["wareneingang", "verkauf", "korrektur", "retoure", "bestellung"]);
 export const paymentMethodEnum = pgEnum("payment_method", ["bunq", "creditCard", "wise", "SEPA", "Bar", "Kreditkarte", "PayPal", "Crypto", "Guthaben", "Sonstige"]);
 export const orderStatusEnum = pgEnum("order_status", ["offen", "bezahlt", "gepackt", "versendet", "zugestellt", "storniert"]);
+export const commissionTypeEnum = pgEnum("commission_type", ["einmalig", "dauerhaft"]);
+export const acquiredByEnum = pgEnum("acquired_by", ["shop", "partner", "direkt"]);
 export const communicationTypeEnum = pgEnum("communication_type", ["email", "note", "whatsapp", "phone"]);
 export const communicationStatusEnum = pgEnum("communication_status", ["sent", "failed", "draft", "logged"]);
 export const emailCampaignStatusEnum = pgEnum("email_campaign_status", ["draft", "sending", "sent", "failed"]);
@@ -110,6 +112,10 @@ export const customers = pgTable("customers", {
   // CRM fields
   tags: text("tags"), // JSON array of tags, e.g. ["VIP", "Stammkunde", "B2B"]
   source: varchar("source", { length: 100 }), // e.g. "shop", "manual", "import"
+
+  // Acquisition tracking
+  acquiredBy: acquiredByEnum("acquired_by").default("shop").notNull(),
+  acquiredByPartnerId: integer("acquired_by_partner_id"), // FK to partners.id
 
   notes: text("notes"),
   totalOrders: integer("total_orders").default(0).notNull(),
@@ -321,6 +327,13 @@ export const partners = pgTable("partners", {
 
   // Running credit balance (sum of all commissions minus redemptions)
   creditBalance: decimal("credit_balance", { precision: 10, scale: 2 }).notNull().default("0"),
+
+  // Commission type: einmalig = one-time cash payout, dauerhaft = ongoing shop credit
+  commissionType: commissionTypeEnum("commission_type").default("dauerhaft").notNull(),
+
+  // Partner login credentials
+  passwordHash: text("password_hash"),
+  lastLogin: timestamp("last_login"),
 
   // Active flag
   isActive: integer("is_active").default(1).notNull(),

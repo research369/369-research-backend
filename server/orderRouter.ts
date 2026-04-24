@@ -5,7 +5,7 @@
  */
 
 import { z } from "zod";
-import { eq, desc, inArray } from "drizzle-orm";
+import { eq, desc, inArray, and } from "drizzle-orm";
 import { router, publicProcedure, adminProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
 import { orders, orderItems, articles, stockHistory, customers, customerCommunications } from "../drizzle/schema.js";
@@ -90,22 +90,46 @@ export const orderRouter = router({
       let partnerCommissionAmount = 0;
       let creditUsed = input.creditUsed || 0;
 
-      // Helper: Book commission for a partner
+      // Helper: Book commission for a partner (respects commissionType)
+      let resolvedPartner: any = null;
       const bookPartnerCommission = async (partner: any, reason: string) => {
+        resolvedPartner = partner;
         const productSubtotalAfterDiscount = input.subtotal - partnerDiscountAmount;
         const commissionRate = parseFloat(partner.commissionPercent) / 100;
         partnerCommissionAmount = Math.round(productSubtotalAfterDiscount * commissionRate * 100) / 100;
 
         if (partnerCommissionAmount <= 0) return;
 
+        // ── EINMALIG CHECK: Only book for first order from this customer email ──
+        if (partner.commissionType === "einmalig" && reason !== "Eigenbestellung") {
+          const customerEmail = input.customer.email.toLowerCase().trim();
+          const previousOrders = await db.select().from(orders)
+            .where(and(
+              eq(orders.partnerCode, partner.code),
+              eq(orders.email, customerEmail)
+            ));
+          // If there are previous orders from this customer with this partner, skip commission
+          const previousPaidOrders = previousOrders.filter(o =>
+            o.status === "bezahlt" || o.status === "gepackt" || o.status === "versendet" || o.status === "zugestellt"
+          );
+          if (previousPaidOrders.length > 0) {
+            console.log(`[Orders] EINMALIG: Skipping commission for ${partner.name} – customer ${customerEmail} already has ${previousPaidOrders.length} paid orders`);
+            partnerCommissionAmount = 0;
+            return;
+          }
+        }
+
         const currentBalance = parseFloat(partner.creditBalance);
         const newBalance = currentBalance + partnerCommissionAmount;
 
+        // For "dauerhaft": book as Guthaben (shop credit)
+        // For "einmalig": also track in balance for accounting (meant for cash payout)
         await db.update(partners).set({
           creditBalance: newBalance.toFixed(2),
           updatedAt: new Date(),
         }).where(eq(partners.id, partner.id));
 
+        const typeLabel = partner.commissionType === "einmalig" ? "Auszahlung" : "Guthaben";
         await db.insert(partnerTransactions).values({
           partnerId: partner.id,
           type: "provision",
@@ -113,13 +137,13 @@ export const orderRouter = router({
           balanceAfter: newBalance.toFixed(2),
           orderId: orderId,
           customerName: `${input.customer.firstName} ${input.customer.lastName}`,
-          description: `Provision für Bestellung ${orderId} (${input.customer.firstName} ${input.customer.lastName}) [${reason}]`,
+          description: `Provision für Bestellung ${orderId} (${input.customer.firstName} ${input.customer.lastName}) [${reason}] – ${typeLabel}`,
         });
 
         // Also set the partnerCode on the order for tracking
         if (!partnerCode) partnerCode = partner.code;
 
-        console.log(`[Orders] Partner commission: ${partnerCommissionAmount.toFixed(2)} EUR for ${partner.name} (${reason})`);
+        console.log(`[Orders] Partner commission (${partner.commissionType}): ${partnerCommissionAmount.toFixed(2)} EUR for ${partner.name} (${reason})`);
       };
 
       // Case 1: Partner CODE was provided (customer or partner entered the code)
@@ -275,6 +299,13 @@ export const orderRouter = router({
           }
           if (nextNum < 1210) nextNum = 1210;
 
+          // Determine acquisition source
+          const acquiredBy = partnerCode ? "partner" as const : "shop" as const;
+          let acquiredByPartnerId: number | null = null;
+          if (partnerCode && resolvedPartner) {
+            acquiredByPartnerId = resolvedPartner.id;
+          }
+
           const [newCustomer] = await db.insert(customers).values({
             customerNumber: String(nextNum),
             name: fullName,
@@ -289,6 +320,8 @@ export const orderRouter = router({
             city: input.customer.city,
             country: input.customer.country,
             source: "shop",
+            acquiredBy,
+            acquiredByPartnerId,
             totalOrders: 1,
             totalSpent: input.total.toFixed(2),
             firstOrderDate: new Date(),
