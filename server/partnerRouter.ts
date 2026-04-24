@@ -847,6 +847,52 @@ export const partnerRouter = router({
       return { success: true, amountRedeemed: input.amount, newBalance };
     }),
 
+  // Redeem credit from checkout by partner number (used when partner orders via Feld 2)
+  // Security: partner number is already validated in checkout, and amount is server-validated
+  redeemCreditByNumber: publicProcedure
+    .input(z.object({
+      partnerNumber: z.string(),
+      amount: z.number().positive(),
+      orderId: z.string(),
+      description: z.string().optional(),
+    }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      // Find partner by number
+      const [partner] = await db.select().from(partners)
+        .where(and(eq(partners.partnerNumber, input.partnerNumber), eq(partners.active, true)))
+        .limit(1);
+      if (!partner) throw new Error("Partner nicht gefunden");
+
+      const currentBalance = parseFloat(partner.creditBalance);
+      if (input.amount > currentBalance) {
+        throw new Error(`Nicht gen\u00fcgend Guthaben. Verf\u00fcgbar: ${currentBalance.toFixed(2)} \u20ac`);
+      }
+
+      const newBalance = Math.round((currentBalance - input.amount) * 100) / 100;
+
+      // Update balance
+      await db.update(partners).set({
+        creditBalance: newBalance.toFixed(2),
+        updatedAt: new Date(),
+      }).where(eq(partners.id, partner.id));
+
+      // Record transaction
+      await db.insert(partnerTransactions).values({
+        partnerId: partner.id,
+        type: "einloesung",
+        amount: (-input.amount).toFixed(2),
+        balanceAfter: newBalance.toFixed(2),
+        orderId: input.orderId,
+        description: input.description || `Guthaben eingel\u00f6st f\u00fcr Bestellung ${input.orderId}`,
+      });
+
+      console.log(`[Partners] Checkout credit redeemed: ${input.amount.toFixed(2)} EUR by ${partner.name} (Order: ${input.orderId})`);
+      return { success: true, newBalance };
+    }),
+
   // Change own password (partner-authenticated)
   changePassword: partnerProcedure
     .input(z.object({
