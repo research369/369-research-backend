@@ -562,10 +562,10 @@ export const partnerRouter = router({
 
   // ─── PARTNER PORTAL: Auth ─────────────────────────────────────
 
-  // Partner login (public)
-  login: publicProcedure
+  // Partner login via Partnernummer + Passwort (public)
+  portalLogin: publicProcedure
     .input(z.object({
-      email: z.string().email(),
+      partnerNumber: z.string(),
       password: z.string(),
     }))
     .mutation(async ({ input, ctx }) => {
@@ -574,7 +574,7 @@ export const partnerRouter = router({
 
       const [partner] = await db.select().from(partners)
         .where(and(
-          eq(partners.email, input.email.toLowerCase()),
+          eq(partners.partnerNumber, input.partnerNumber),
           eq(partners.isActive, 1)
         ))
         .limit(1);
@@ -618,7 +618,7 @@ export const partnerRouter = router({
     }),
 
   // Partner logout
-  logout: publicProcedure
+  portalLogout: publicProcedure
     .mutation(async ({ ctx }) => {
       ctx.res.clearCookie(PARTNER_COOKIE_NAME, {
         httpOnly: true,
@@ -632,7 +632,7 @@ export const partnerRouter = router({
   // ─── PARTNER PORTAL: Data (requires partner auth) ─────────────
 
   // Get own profile (partner-authenticated)
-  me: partnerProcedure
+  portalMe: partnerProcedure
     .query(async ({ ctx }) => {
       const partner = (ctx as any).partner;
       return {
@@ -658,7 +658,7 @@ export const partnerRouter = router({
     }),
 
   // Get own transactions (partner-authenticated)
-  myTransactions: partnerProcedure
+  portalMyTransactions: partnerProcedure
     .input(z.object({
       limit: z.number().min(1).max(200).optional(),
       offset: z.number().min(0).optional(),
@@ -695,7 +695,7 @@ export const partnerRouter = router({
 
   // Get own referred orders summary (partner-authenticated)
   // Shows: order number, date, total, commission – NO customer data
-  myOrders: partnerProcedure
+  portalMyOrders: partnerProcedure
     .input(z.object({
       limit: z.number().min(1).max(200).optional(),
       offset: z.number().min(0).optional(),
@@ -739,7 +739,7 @@ export const partnerRouter = router({
     }),
 
   // Get partner dashboard stats (partner-authenticated)
-  myStats: partnerProcedure
+  portalMyStats: partnerProcedure
     .query(async ({ ctx }) => {
       const partner = (ctx as any).partner;
       const db = await getDb();
@@ -785,7 +785,7 @@ export const partnerRouter = router({
   // ─── PARTNER PORTAL: Checkout credit redemption ────────────────
 
   // Partner-authenticated credit check for checkout (more secure than public checkCredit)
-  myCredit: partnerProcedure
+  portalMyCredit: partnerProcedure
     .query(async ({ ctx }) => {
       const partner = (ctx as any).partner;
       return {
@@ -804,7 +804,7 @@ export const partnerRouter = router({
     }),
 
   // Redeem credit at checkout (partner-authenticated, server-validated)
-  redeemCredit: partnerProcedure
+  portalRedeemCredit: partnerProcedure
     .input(z.object({
       amount: z.number().positive(),
       orderId: z.string(),
@@ -862,7 +862,7 @@ export const partnerRouter = router({
 
       // Find partner by number
       const [partner] = await db.select().from(partners)
-        .where(and(eq(partners.partnerNumber, input.partnerNumber), eq(partners.active, true)))
+        .where(and(eq(partners.partnerNumber, input.partnerNumber), eq(partners.isActive, 1)))
         .limit(1);
       if (!partner) throw new Error("Partner nicht gefunden");
 
@@ -894,7 +894,7 @@ export const partnerRouter = router({
     }),
 
   // Change own password (partner-authenticated)
-  changePassword: partnerProcedure
+  portalChangePassword: partnerProcedure
     .input(z.object({
       currentPassword: z.string(),
       newPassword: z.string().min(6),
