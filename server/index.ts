@@ -76,6 +76,34 @@ app.post("/api/auth/login", loginLimiter, handleLogin);
 app.post("/api/auth/logout", handleLogout);
 app.get("/api/auth/me", handleMe);
 
+// Temporary: Diagnose + fix partner passwords
+import bcrypt from "bcryptjs";
+app.post("/api/fix-partner-password", async (req, res) => {
+  const auth = req.headers.authorization;
+  if (auth !== `Bearer ${ENV.jwtSecret}`) return res.status(403).json({ error: "forbidden" });
+  const { partnerNumber, newPassword, diagnoseOnly } = req.body;
+  if (!partnerNumber) return res.status(400).json({ error: "partnerNumber required" });
+  try {
+    const pool = await getPool();
+    if (!pool) return res.status(500).json({ error: "no db" });
+    // Diagnose: check if partner exists and has passwordHash
+    const { rows } = await pool.query(
+      `SELECT id, name, partner_number, is_active, password_hash IS NOT NULL as has_password, LENGTH(password_hash) as hash_length FROM partners WHERE partner_number = $1`,
+      [partnerNumber]
+    );
+    if (rows.length === 0) return res.json({ error: "Partner not found", partnerNumber });
+    const partner = rows[0];
+    if (diagnoseOnly) return res.json({ partner });
+    // Set new password
+    if (!newPassword || newPassword.length < 6) return res.status(400).json({ error: "password min 6 chars" });
+    const hash = await bcrypt.hash(newPassword, 12);
+    await pool.query(`UPDATE partners SET password_hash = $1 WHERE partner_number = $2`, [hash, partnerNumber]);
+    return res.json({ success: true, message: `Password set for ${partnerNumber}` });
+  } catch (e: any) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 // tRPC middleware
 app.use(
   "/api/trpc",
