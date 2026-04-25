@@ -98,7 +98,7 @@ app.post("/api/fix-missing-migrations", async (req, res) => {
     return res.status(401).json({ error: "Unauthorized" });
   }
   try {
-    const pool = getPool();
+    const pool = await getPool();
     if (!pool) throw new Error("Pool not available");
 
     const results: string[] = [];
