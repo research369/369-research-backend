@@ -50,6 +50,13 @@
       "when": 1776235200000,
       "tag": "0006_partner_transaction_control",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1777321600000,
+      "tag": "0007_widen_varchar_fields",
+      "breakpoints": true
     }
   ]
 }

@@ -97,15 +97,15 @@ export const customers = pgTable("customers", {
   id: serial("id").primaryKey(),
   customerNumber: varchar("customer_number", { length: 20 }).unique(),
   name: varchar("name", { length: 200 }).notNull(),
-  firstName: varchar("first_name", { length: 100 }),
-  lastName: varchar("last_name", { length: 100 }),
+  firstName: varchar("first_name", { length: 200 }),
+  lastName: varchar("last_name", { length: 200 }),
   phone: varchar("phone", { length: 50 }),
   email: varchar("email", { length: 320 }),
   company: varchar("company", { length: 200 }),
 
-  street: varchar("street", { length: 200 }),
-  houseNumber: varchar("house_number", { length: 20 }),
-  zip: varchar("zip", { length: 20 }),
+  street: varchar("street", { length: 300 }),
+  houseNumber: varchar("house_number", { length: 100 }),
+  zip: varchar("zip", { length: 30 }),
   city: varchar("city", { length: 100 }),
   country: varchar("country", { length: 100 }),
 
@@ -211,13 +211,13 @@ export const orders = pgTable("orders", {
   orderId: varchar("order_id", { length: 32 }).notNull().unique(),
 
   // Customer info
-  firstName: varchar("first_name", { length: 100 }).notNull(),
-  lastName: varchar("last_name", { length: 100 }).notNull(),
+  firstName: varchar("first_name", { length: 200 }).notNull(),
+  lastName: varchar("last_name", { length: 200 }).notNull(),
   email: varchar("email", { length: 320 }).notNull(),
   phone: varchar("phone", { length: 50 }).notNull(),
-  street: varchar("street", { length: 200 }).notNull(),
-  houseNumber: varchar("house_number", { length: 20 }).notNull(),
-  zip: varchar("zip", { length: 20 }).notNull(),
+  street: varchar("street", { length: 300 }).notNull(),
+  houseNumber: varchar("house_number", { length: 100 }).notNull(),
+  zip: varchar("zip", { length: 30 }).notNull(),
   city: varchar("city", { length: 100 }).notNull(),
   country: varchar("country", { length: 100 }).notNull(),
   company: varchar("company", { length: 200 }),
@@ -339,9 +339,9 @@ export const partners = pgTable("partners", {
   isActive: integer("is_active").default(1).notNull(),
 
   // Delivery address (used when partner orders via Partner-ID)
-  street: varchar("street", { length: 200 }),
-  houseNumber: varchar("house_number", { length: 20 }),
-  zip: varchar("zip", { length: 20 }),
+  street: varchar("street", { length: 300 }),
+  houseNumber: varchar("house_number", { length: 100 }),
+  zip: varchar("zip", { length: 30 }),
   city: varchar("city", { length: 100 }),
   country: varchar("country", { length: 100 }),
 

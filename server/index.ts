@@ -91,53 +91,6 @@ app.use(
   })
 );
 
-// ── Temporary fix endpoint: widen varchar fields (secured with JWT_SECRET) ──
-app.post("/api/fix-varchar-fields", async (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || authHeader !== `Bearer ${ENV.jwtSecret}`) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-  try {
-    const pool = await getPool();
-    if (!pool) throw new Error("Pool not available");
-
-    const results: string[] = [];
-
-    // Widen house_number in all tables from varchar(20) to varchar(100)
-    const alterStatements = [
-      `ALTER TABLE orders ALTER COLUMN house_number TYPE varchar(100)`,
-      `ALTER TABLE customers ALTER COLUMN house_number TYPE varchar(100)`,
-      `ALTER TABLE partners ALTER COLUMN house_number TYPE varchar(100)`,
-      // Also widen street fields to be safe
-      `ALTER TABLE orders ALTER COLUMN street TYPE varchar(300)`,
-      `ALTER TABLE customers ALTER COLUMN street TYPE varchar(300)`,
-      `ALTER TABLE partners ALTER COLUMN street TYPE varchar(300)`,
-      // Widen first_name and last_name in orders (for multi-part names)
-      `ALTER TABLE orders ALTER COLUMN first_name TYPE varchar(200)`,
-      `ALTER TABLE orders ALTER COLUMN last_name TYPE varchar(200)`,
-      `ALTER TABLE customers ALTER COLUMN first_name TYPE varchar(200)`,
-      `ALTER TABLE customers ALTER COLUMN last_name TYPE varchar(200)`,
-      // Widen zip for international formats
-      `ALTER TABLE orders ALTER COLUMN zip TYPE varchar(30)`,
-      `ALTER TABLE customers ALTER COLUMN zip TYPE varchar(30)`,
-      `ALTER TABLE partners ALTER COLUMN zip TYPE varchar(30)`,
-    ];
-
-    for (const stmt of alterStatements) {
-      try {
-        await pool.query(stmt);
-        results.push(`OK: ${stmt}`);
-      } catch (err: any) {
-        results.push(`SKIP: ${stmt} – ${err.message}`);
-      }
-    }
-
-    res.json({ success: true, results });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // Start server
 const port = ENV.port;
 
