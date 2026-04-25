@@ -16,7 +16,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { router, publicProcedure, adminProcedure, middleware } from "./trpc.js";
 import { getDb } from "./db.js";
-import { partners, partnerTransactions, orders, orderItems, partnerCodeUsage } from "../drizzle/schema.js";
+import { partners, partnerTransactions, orders, orderItems, partnerCodeUsage, customers } from "../drizzle/schema.js";
 import { ENV } from "./env.js";
 import type { Request } from "express";
 
@@ -145,6 +145,8 @@ export const partnerRouter = router({
           ...t,
           amount: parseFloat(t.amount),
           balanceAfter: parseFloat(t.balanceAfter),
+          status: t.status || "normal",
+          adminNote: t.adminNote || null,
         })),
       };
     }),
@@ -386,8 +388,253 @@ export const partnerRouter = router({
           ...t,
           amount: parseFloat(t.amount),
           balanceAfter: parseFloat(t.balanceAfter),
+          status: t.status || "normal",
+          adminNote: t.adminNote || null,
         })),
       };
+    }),
+
+  // ─── ADMIN: Partner-Zuordnung & Transaktions-Kontrolle ────────
+
+  // Assign a partner to a customer and retroactively calculate commissions
+  assignPartnerToCustomer: adminProcedure
+    .input(z.object({
+      customerId: z.number(),
+      partnerId: z.number(),
+    }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      const [customer] = await db.select().from(customers).where(eq(customers.id, input.customerId)).limit(1);
+      if (!customer) throw new Error("Kunde nicht gefunden");
+
+      const [partner] = await db.select().from(partners).where(eq(partners.id, input.partnerId)).limit(1);
+      if (!partner) throw new Error("Partner nicht gefunden");
+
+      // Update customer with partner assignment
+      await db.update(customers).set({
+        acquiredBy: "partner",
+        acquiredByPartnerId: input.partnerId,
+        updatedAt: new Date(),
+      }).where(eq(customers.id, input.customerId));
+
+      // Retroactively calculate commissions for all existing paid orders of this customer
+      const { inArray } = await import("drizzle-orm");
+      const paidStatuses = ["bezahlt", "gepackt", "versendet", "zugestellt"];
+
+      // Find all paid orders for this customer (by email or customerId)
+      const customerOrders = await db.select().from(orders)
+        .where(and(
+          eq(orders.email, customer.email || ""),
+          inArray(orders.status, paidStatuses)
+        ))
+        .orderBy(orders.orderDate);
+
+      let commissionsBooked = 0;
+      let totalCommission = 0;
+      let currentBalance = parseFloat(partner.creditBalance);
+
+      for (const order of customerOrders) {
+        // Check if commission was already booked for this order
+        const existingTx = await db.select().from(partnerTransactions)
+          .where(and(
+            eq(partnerTransactions.partnerId, partner.id),
+            eq(partnerTransactions.orderId, order.orderId),
+            eq(partnerTransactions.type, "provision")
+          ))
+          .limit(1);
+
+        if (existingTx.length > 0) continue; // Already booked
+
+        // For einmalig: only book for the first order
+        if (partner.commissionType === "einmalig" && commissionsBooked > 0) continue;
+
+        // Calculate commission on product subtotal after discount
+        const productSubtotal = parseFloat(order.subtotal) - parseFloat(order.discount);
+        const commissionRate = parseFloat(partner.commissionPercent) / 100;
+        const commissionAmount = Math.round(productSubtotal * commissionRate * 100) / 100;
+
+        if (commissionAmount <= 0) continue;
+
+        currentBalance += commissionAmount;
+
+        const description = partner.commissionType === "einmalig"
+          ? `R\u00fcckwirkende Provision f\u00fcr Bestellung ${order.orderId} (${order.firstName} ${order.lastName}) \u2013 Auszahlung`
+          : `R\u00fcckwirkende Provision f\u00fcr Bestellung ${order.orderId} (${order.firstName} ${order.lastName}) \u2013 Guthaben`;
+
+        await db.insert(partnerTransactions).values({
+          partnerId: partner.id,
+          type: "provision",
+          amount: commissionAmount.toFixed(2),
+          balanceAfter: currentBalance.toFixed(2),
+          orderId: order.orderId,
+          customerName: `${order.firstName} ${order.lastName}`,
+          description,
+        });
+
+        // Also update the order's partner fields
+        await db.update(orders).set({
+          partnerCode: partner.code,
+          partnerCommission: commissionAmount.toFixed(2),
+        }).where(eq(orders.id, order.id));
+
+        commissionsBooked++;
+        totalCommission += commissionAmount;
+      }
+
+      // Update partner balance
+      if (totalCommission > 0) {
+        await db.update(partners).set({
+          creditBalance: currentBalance.toFixed(2),
+          updatedAt: new Date(),
+        }).where(eq(partners.id, partner.id));
+      }
+
+      console.log(`[Partners] Assigned partner ${partner.name} to customer ${customer.name}. Retroactive commissions: ${commissionsBooked} orders, ${totalCommission.toFixed(2)} EUR`);
+      return {
+        success: true,
+        commissionsBooked,
+        totalCommission,
+        newBalance: currentBalance,
+      };
+    }),
+
+  // Remove partner assignment from customer
+  removePartnerFromCustomer: adminProcedure
+    .input(z.object({ customerId: z.number() }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      await db.update(customers).set({
+        acquiredBy: "shop",
+        acquiredByPartnerId: null,
+        updatedAt: new Date(),
+      }).where(eq(customers.id, input.customerId));
+
+      return { success: true };
+    }),
+
+  // Update transaction status (admin control: storno, nicht werten, ausblenden)
+  updateTransactionStatus: adminProcedure
+    .input(z.object({
+      transactionId: z.number(),
+      status: z.enum(["normal", "storniert", "nicht_gewertet", "ausgeblendet"]),
+      adminNote: z.string().optional(),
+    }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      const [tx] = await db.select().from(partnerTransactions)
+        .where(eq(partnerTransactions.id, input.transactionId))
+        .limit(1);
+      if (!tx) throw new Error("Transaktion nicht gefunden");
+
+      const oldStatus = tx.status || "normal";
+      const txAmount = parseFloat(tx.amount);
+
+      // Get the partner
+      const [partner] = await db.select().from(partners)
+        .where(eq(partners.id, tx.partnerId))
+        .limit(1);
+      if (!partner) throw new Error("Partner nicht gefunden");
+
+      let currentBalance = parseFloat(partner.creditBalance);
+      let balanceAdjustment = 0;
+
+      // Calculate balance adjustment based on status change
+      // If going FROM normal TO storniert/nicht_gewertet: reverse the amount
+      // If going FROM storniert/nicht_gewertet TO normal: re-apply the amount
+      if (oldStatus === "normal" && (input.status === "storniert" || input.status === "nicht_gewertet")) {
+        // Reverse: subtract the positive provision or re-add the negative einloesung
+        balanceAdjustment = -txAmount;
+      } else if ((oldStatus === "storniert" || oldStatus === "nicht_gewertet") && input.status === "normal") {
+        // Restore: re-apply the original amount
+        balanceAdjustment = txAmount;
+      }
+      // ausgeblendet: same balance effect as storniert (reversed) but hidden from partner view
+      if (oldStatus === "normal" && input.status === "ausgeblendet") {
+        balanceAdjustment = -txAmount;
+      } else if (oldStatus === "ausgeblendet" && input.status === "normal") {
+        balanceAdjustment = txAmount;
+      }
+
+      // Apply balance adjustment
+      if (balanceAdjustment !== 0) {
+        currentBalance += balanceAdjustment;
+        await db.update(partners).set({
+          creditBalance: currentBalance.toFixed(2),
+          updatedAt: new Date(),
+        }).where(eq(partners.id, tx.partnerId));
+      }
+
+      // Update transaction status and admin note
+      await db.update(partnerTransactions).set({
+        status: input.status,
+        adminNote: input.adminNote || null,
+      }).where(eq(partnerTransactions.id, input.transactionId));
+
+      // If storniert: create a visible counter-booking for the partner's statement
+      if (input.status === "storniert" && txAmount > 0) {
+        await db.insert(partnerTransactions).values({
+          partnerId: tx.partnerId,
+          type: "korrektur",
+          amount: (-txAmount).toFixed(2),
+          balanceAfter: currentBalance.toFixed(2),
+          orderId: tx.orderId,
+          description: `Storno: ${input.adminNote || "Provision storniert"}`,
+          adminNote: `Storno von Transaktion #${tx.id}`,
+        });
+      }
+
+      console.log(`[Partners] Transaction #${tx.id} status changed: ${oldStatus} -> ${input.status} (Balance adj: ${balanceAdjustment.toFixed(2)})`);
+      return {
+        success: true,
+        balanceAdjustment,
+        newBalance: currentBalance,
+      };
+    }),
+
+  // Record a monetary payout for einmalig-partners (admin books cash payout)
+  recordPayout: adminProcedure
+    .input(z.object({
+      partnerId: z.number(),
+      amount: z.number().positive(),
+      description: z.string().optional(),
+    }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      const [partner] = await db.select().from(partners).where(eq(partners.id, input.partnerId)).limit(1);
+      if (!partner) throw new Error("Partner nicht gefunden");
+
+      const currentBalance = parseFloat(partner.creditBalance);
+      if (input.amount > currentBalance) {
+        throw new Error(`Nicht gen\u00fcgend Guthaben f\u00fcr Auszahlung. Verf\u00fcgbar: ${currentBalance.toFixed(2)} \u20ac`);
+      }
+
+      const newBalance = Math.round((currentBalance - input.amount) * 100) / 100;
+
+      // Update balance
+      await db.update(partners).set({
+        creditBalance: newBalance.toFixed(2),
+        updatedAt: new Date(),
+      }).where(eq(partners.id, input.partnerId));
+
+      // Record auszahlung transaction
+      await db.insert(partnerTransactions).values({
+        partnerId: input.partnerId,
+        type: "auszahlung",
+        amount: (-input.amount).toFixed(2),
+        balanceAfter: newBalance.toFixed(2),
+        description: input.description || `Monet\u00e4re Auszahlung: ${input.amount.toFixed(2)} \u20ac`,
+      });
+
+      console.log(`[Partners] Payout recorded: ${input.amount.toFixed(2)} EUR for ${partner.name}`);
+      return { success: true, newBalance };
     }),
 
   // ─── PUBLIC: Checkout integration ──────────────────────────────
@@ -658,6 +905,7 @@ export const partnerRouter = router({
     }),
 
   // Get own transactions (partner-authenticated)
+  // Filters out "ausgeblendet" transactions, shows storniert/nicht_gewertet with status marker
   portalMyTransactions: partnerProcedure
     .input(z.object({
       limit: z.number().min(1).max(200).optional(),
@@ -671,26 +919,47 @@ export const partnerRouter = router({
       const limit = input?.limit || 50;
       const offset = input?.offset || 0;
 
+      const { ne } = await import("drizzle-orm");
       const transactions = await db.select().from(partnerTransactions)
-        .where(eq(partnerTransactions.partnerId, partner.id))
+        .where(and(
+          eq(partnerTransactions.partnerId, partner.id),
+          ne(partnerTransactions.status, "ausgeblendet")
+        ))
         .orderBy(desc(partnerTransactions.createdAt))
         .limit(limit)
         .offset(offset);
 
-      return transactions.map(t => ({
-        id: t.id,
-        type: t.type,
-        amount: parseFloat(t.amount),
-        balanceAfter: parseFloat(t.balanceAfter),
-        orderId: t.orderId,
-        // NO customer name or email exposed to partner!
-        description: t.type === "provision" 
-          ? `Provision – Bestellung ${t.orderId}` 
-          : t.type === "einloesung"
-          ? `Guthaben eingelöst – Bestellung ${t.orderId}`
-          : t.description || "Korrektur",
-        createdAt: t.createdAt,
-      }));
+      return transactions.map(t => {
+        let description = "";
+        if (t.type === "provision") {
+          description = `Provision \u2013 Bestellung ${t.orderId}`;
+        } else if (t.type === "einloesung") {
+          description = `Guthaben eingel\u00f6st \u2013 Bestellung ${t.orderId}`;
+        } else if (t.type === "auszahlung") {
+          description = `Auszahlung`;
+        } else {
+          description = t.description || "Korrektur";
+        }
+
+        // Mark storniert/nicht_gewertet transactions
+        const status = t.status || "normal";
+        if (status === "storniert") {
+          description = `[STORNIERT] ${description}`;
+        } else if (status === "nicht_gewertet") {
+          description = `[NICHT GEWERTET] ${description}`;
+        }
+
+        return {
+          id: t.id,
+          type: t.type,
+          amount: parseFloat(t.amount),
+          balanceAfter: parseFloat(t.balanceAfter),
+          orderId: t.orderId,
+          description,
+          status,
+          createdAt: t.createdAt,
+        };
+      });
     }),
 
   // Get own referred orders summary (partner-authenticated)
@@ -739,6 +1008,7 @@ export const partnerRouter = router({
     }),
 
   // Get partner dashboard stats (partner-authenticated)
+  // Shows both payout (einmalig) and credit redemption (dauerhaft) totals
   portalMyStats: partnerProcedure
     .query(async ({ ctx }) => {
       const partner = (ctx as any).partner;
@@ -746,7 +1016,7 @@ export const partnerRouter = router({
       if (!db) throw new Error("Database not available");
 
       // Count total referred orders (paid only)
-      const { inArray } = await import("drizzle-orm");
+      const { inArray, ne } = await import("drizzle-orm");
       const paidStatuses = ["bezahlt", "gepackt", "versendet", "zugestellt"];
 
       const referredOrders = await db.select({
@@ -762,19 +1032,33 @@ export const partnerRouter = router({
       const totalRevenue = referredOrders.reduce((sum, o) => sum + parseFloat(o.total), 0);
       const totalCommission = referredOrders.reduce((sum, o) => sum + parseFloat(o.partnerCommission || "0"), 0);
 
-      // Get total redeemed
-      const transactions = await db.select().from(partnerTransactions)
+      // Get all non-hidden transactions for this partner
+      const allTransactions = await db.select().from(partnerTransactions)
         .where(and(
           eq(partnerTransactions.partnerId, partner.id),
-          eq(partnerTransactions.type, "einloesung")
+          ne(partnerTransactions.status, "ausgeblendet")
         ));
-      const totalRedeemed = transactions.reduce((sum, t) => sum + Math.abs(parseFloat(t.amount)), 0);
+
+      // Total redeemed as shop credit (Guthaben-Einl\u00f6sung)
+      const totalCreditRedeemed = allTransactions
+        .filter(t => t.type === "einloesung" && (t.status === "normal" || !t.status))
+        .reduce((sum, t) => sum + Math.abs(parseFloat(t.amount)), 0);
+
+      // Total paid out as cash (monet\u00e4re Auszahlung)
+      const totalPaidOut = allTransactions
+        .filter(t => t.type === "auszahlung" && (t.status === "normal" || !t.status))
+        .reduce((sum, t) => sum + Math.abs(parseFloat(t.amount)), 0);
+
+      // Combined "eingel\u00f6st" = credit redeemed + cash paid out
+      const totalRedeemed = totalCreditRedeemed + totalPaidOut;
 
       return {
         totalOrders,
         totalRevenue,
         totalCommission,
         totalRedeemed,
+        totalCreditRedeemed,
+        totalPaidOut,
         currentBalance: parseFloat(partner.creditBalance),
         commissionType: partner.commissionType,
         commissionPercent: parseFloat(partner.commissionPercent),
@@ -847,11 +1131,11 @@ export const partnerRouter = router({
       return { success: true, amountRedeemed: input.amount, newBalance };
     }),
 
-  // Redeem credit from checkout by partner number (used when partner orders via Feld 2)
-  // Security: partner number is already validated in checkout, and amount is server-validated
+  // Redeem credit from checkout by partner number (requires password for security)
   redeemCreditByNumber: publicProcedure
     .input(z.object({
       partnerNumber: z.string(),
+      password: z.string(),
       amount: z.number().positive(),
       orderId: z.string(),
       description: z.string().optional(),
@@ -865,6 +1149,15 @@ export const partnerRouter = router({
         .where(and(eq(partners.partnerNumber, input.partnerNumber), eq(partners.isActive, 1)))
         .limit(1);
       if (!partner) throw new Error("Partner nicht gefunden");
+
+      // Verify password
+      if (!partner.passwordHash) {
+        throw new Error("Kein Passwort gesetzt. Bitte wenden Sie sich an 369 Research.");
+      }
+      const validPw = await bcrypt.compare(input.password, partner.passwordHash);
+      if (!validPw) {
+        throw new Error("Falsches Passwort");
+      }
 
       const currentBalance = parseFloat(partner.creditBalance);
       if (input.amount > currentBalance) {

@@ -360,7 +360,8 @@ export type InsertPartner = typeof partners.$inferInsert;
  * - "einloesung" → credit redeemed at checkout by the partner
  * - "korrektur"  → manual adjustment by admin
  */
-export const partnerTransactionTypeEnum = pgEnum("partner_transaction_type", ["provision", "einloesung", "korrektur"]);
+export const partnerTransactionTypeEnum = pgEnum("partner_transaction_type", ["provision", "einloesung", "korrektur", "auszahlung"]);
+export const transactionStatusEnum = pgEnum("transaction_status", ["normal", "storniert", "nicht_gewertet", "ausgeblendet"]);
 
 export const partnerTransactions = pgTable("partner_transactions", {
   id: serial("id").primaryKey(),
@@ -382,6 +383,12 @@ export const partnerTransactions = pgTable("partner_transactions", {
 
   // Description
   description: text("description"),
+
+  // Transaction status for admin control
+  status: transactionStatusEnum("status").default("normal").notNull(),
+
+  // Admin note for documenting status changes
+  adminNote: text("admin_note"),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
