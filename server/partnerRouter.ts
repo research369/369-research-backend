@@ -217,6 +217,7 @@ export const partnerRouter = router({
     .input(z.object({
       id: z.number(),
       name: z.string().min(1).optional(),
+      code: z.string().min(1).optional(),
       email: z.string().email().optional().or(z.literal("")),
       phone: z.string().optional(),
       company: z.string().optional(),
@@ -235,8 +236,26 @@ export const partnerRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
+      // Check for code uniqueness if code is being changed
+      if (input.code !== undefined) {
+        const normalizedCode = input.code.toUpperCase().trim();
+        // Check each code in the comma-separated list for duplicates
+        const codeParts = normalizedCode.split(",").map(c => c.trim()).filter(Boolean);
+        for (const codePart of codeParts) {
+          const existing = await db.select({ id: partners.id }).from(partners)
+            .where(and(
+              sql`UPPER(${partners.code}) LIKE ${'%' + codePart + '%'}`,
+              sql`${partners.id} != ${input.id}`
+            ));
+          if (existing.length > 0) {
+            throw new Error(`Code "${codePart}" ist bereits vergeben`);
+          }
+        }
+      }
+
       const updateData: Record<string, any> = { updatedAt: new Date() };
       if (input.name !== undefined) updateData.name = input.name;
+      if (input.code !== undefined) updateData.code = input.code.toUpperCase().trim();
       if (input.email !== undefined) updateData.email = input.email || null;
       if (input.phone !== undefined) updateData.phone = input.phone || null;
       if (input.company !== undefined) updateData.company = input.company || null;
@@ -1381,5 +1400,130 @@ export const partnerRouter = router({
 
       console.log(`[Partners] Password reset confirmed for ${partner.partnerNumber}`);
       return { success: true, message: "Passwort erfolgreich zurueckgesetzt. Du kannst dich jetzt einloggen." };
+    }),
+
+  // ─── Send Credentials Email (Admin) ─────────────────────────────
+  // Sends an email to the partner with portal link, partner number, and password
+  sendCredentials: adminProcedure
+    .input(z.object({
+      partnerId: z.number(),
+      password: z.string().min(6, "Passwort muss mindestens 6 Zeichen haben"),
+    }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      // Get partner data
+      const [partner] = await db.select().from(partners).where(eq(partners.id, input.partnerId));
+      if (!partner) throw new Error("Partner nicht gefunden");
+      if (!partner.email) throw new Error("Partner hat keine E-Mail-Adresse hinterlegt");
+
+      // Set the password first
+      const hash = await bcrypt.hash(input.password, 12);
+      await db.update(partners).set({
+        passwordHash: hash,
+        updatedAt: new Date(),
+      }).where(eq(partners.id, input.partnerId));
+
+      // Build the credentials email
+      const html = `
+<!DOCTYPE html>
+<html lang="de">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background-color:#0a0e17;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <div style="max-width:600px;margin:0 auto;padding:20px;">
+    
+    <!-- Header -->
+    <div style="background:linear-gradient(135deg,#0f172a,#1e293b);border-radius:12px 12px 0 0;padding:32px;text-align:center;border:1px solid #1e3a5f;border-bottom:none;">
+      <h1 style="color:#3b82f6;margin:0;font-size:28px;font-weight:700;letter-spacing:2px;">369 RESEARCH</h1>
+      <p style="color:#64748b;margin:8px 0 0;font-size:12px;letter-spacing:3px;text-transform:uppercase;">Partner Portal</p>
+    </div>
+
+    <!-- Content -->
+    <div style="background:#111827;padding:32px;border:1px solid #1e3a5f;border-top:none;">
+      <h2 style="font-size:20px;color:#ffffff;margin:0 0 8px;">Willkommen im Partner-Programm!</h2>
+      <p style="font-size:14px;color:#94a3b8;margin:0 0 24px;line-height:1.6;">Hallo ${partner.name},<br><br>hier sind deine Zugangsdaten f\u00fcr das 369 Research Partner Portal:</p>
+
+      <!-- Credentials Box -->
+      <div style="background:#0a0f1a;border:1px solid #1e3a5f;border-radius:12px;padding:24px;margin-bottom:24px;">
+        <table style="width:100%;border-collapse:collapse;">
+          <tr>
+            <td style="padding:12px 0;color:#64748b;font-size:13px;text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid #1c2433;">Portal-Link</td>
+            <td style="padding:12px 0;text-align:right;border-bottom:1px solid #1c2433;"><a href="https://www.369research.eu/partner" style="color:#3b82f6;font-weight:600;text-decoration:none;">369research.eu/partner</a></td>
+          </tr>
+          <tr>
+            <td style="padding:12px 0;color:#64748b;font-size:13px;text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid #1c2433;">Partnernummer</td>
+            <td style="padding:12px 0;text-align:right;color:#3b82f6;font-weight:700;font-family:monospace;font-size:16px;border-bottom:1px solid #1c2433;">${partner.partnerNumber}</td>
+          </tr>
+          <tr>
+            <td style="padding:12px 0;color:#64748b;font-size:13px;text-transform:uppercase;letter-spacing:1px;">Passwort</td>
+            <td style="padding:12px 0;text-align:right;color:#ffffff;font-weight:700;font-family:monospace;font-size:16px;">${input.password}</td>
+          </tr>
+        </table>
+      </div>
+
+      <!-- Partner Info -->
+      <div style="background:#0a0f1a;border:1px solid #1e3a5f;border-radius:12px;padding:24px;margin-bottom:24px;">
+        <h3 style="font-size:14px;color:#64748b;margin:0 0 16px;text-transform:uppercase;letter-spacing:1px;">Deine Partner-Details</h3>
+        <table style="width:100%;border-collapse:collapse;">
+          <tr>
+            <td style="padding:8px 0;color:#94a3b8;font-size:14px;">Dein Rabattcode</td>
+            <td style="padding:8px 0;text-align:right;color:#10b981;font-weight:700;font-family:monospace;font-size:16px;">${partner.code}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;color:#94a3b8;font-size:14px;">Kundenrabatt</td>
+            <td style="padding:8px 0;text-align:right;color:#ffffff;font-weight:600;">${partner.customerDiscountPercent}%</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;color:#94a3b8;font-size:14px;">Deine Provision</td>
+            <td style="padding:8px 0;text-align:right;color:#ffffff;font-weight:600;">${partner.commissionPercent}%</td>
+          </tr>
+        </table>
+      </div>
+
+      <!-- CTA Button -->
+      <div style="text-align:center;margin:24px 0;">
+        <a href="https://www.369research.eu/partner" style="background:linear-gradient(135deg,#2563eb,#1d4ed8);color:#ffffff;padding:14px 32px;border-radius:10px;text-decoration:none;font-weight:600;font-size:16px;display:inline-block;">Zum Partner Portal</a>
+      </div>
+
+      <p style="font-size:13px;color:#475569;margin:24px 0 0;line-height:1.6;text-align:center;">Bitte \u00e4ndere dein Passwort nach dem ersten Login \u00fcber die Einstellungen im Portal.</p>
+    </div>
+
+    <!-- Footer -->
+    <div style="background:#0d1117;border:1px solid #1e3a5f;border-top:none;border-radius:0 0 12px 12px;padding:20px;text-align:center;">
+      <p style="margin:0;font-size:12px;color:#475569;">369 Research \u00b7 Precision. Purity. Performance.</p>
+      <p style="margin:4px 0 0;font-size:12px;color:#475569;">Bei Fragen: WhatsApp +31 6 87387437</p>
+    </div>
+  </div>
+</body>
+</html>`;
+
+      // Send email via Resend
+      const apiKey = process.env.RESEND_API_KEY;
+      if (!apiKey) throw new Error("E-Mail-Service nicht konfiguriert (RESEND_API_KEY fehlt)");
+
+      const response = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          from: "369 Research <onboarding@resend.dev>",
+          to: [partner.email],
+          subject: `Deine Zugangsdaten – 369 Research Partner Portal`,
+          html,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.warn(`[Partners] Failed to send credentials email (${response.status}):`, errorText);
+        throw new Error(`E-Mail konnte nicht gesendet werden: ${response.status}`);
+      }
+
+      const result = await response.json();
+      console.log(`[Partners] Credentials email sent to ${partner.email}, id: ${result.id}`);
+      return { success: true, message: `Zugangsdaten an ${partner.email} gesendet` };
     }),
 });
