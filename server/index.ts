@@ -91,6 +91,59 @@ app.use(
   })
 );
 
+// ── Temporary DB diagnostic endpoint (secured with JWT_SECRET) ──
+app.get("/api/db-diag", async (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || authHeader !== `Bearer ${ENV.jwtSecret}`) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  try {
+    const pool = await getPool();
+    if (!pool) throw new Error("Pool not available");
+
+    // Check payment_method enum values
+    const enumResult = await pool.query(`
+      SELECT e.enumlabel 
+      FROM pg_type t 
+      JOIN pg_enum e ON t.oid = e.enumtypid 
+      WHERE t.typname = 'payment_method' 
+      ORDER BY e.enumsortorder
+    `);
+
+    // Check orders table columns
+    const colResult = await pool.query(`
+      SELECT column_name, data_type, is_nullable 
+      FROM information_schema.columns 
+      WHERE table_name = 'orders' 
+      ORDER BY ordinal_position
+    `);
+
+    // Check all tables
+    const tableResult = await pool.query(`
+      SELECT table_name 
+      FROM information_schema.tables 
+      WHERE table_schema = 'public' 
+      ORDER BY table_name
+    `);
+
+    // Check if next_order_id function exists
+    const funcResult = await pool.query(`
+      SELECT routine_name 
+      FROM information_schema.routines 
+      WHERE routine_schema = 'public' AND routine_name = 'next_order_id'
+    `);
+
+    res.json({
+      payment_method_values: enumResult.rows.map((r: any) => r.enumlabel),
+      orders_columns: colResult.rows.map((r: any) => ({ name: r.column_name, type: r.data_type })),
+      tables: tableResult.rows.map((r: any) => r.table_name),
+      next_order_id_exists: funcResult.rows.length > 0,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Start server
 const port = ENV.port;
 
