@@ -24,6 +24,13 @@ export async function getDb() {
   return _db;
 }
 
+export async function getPool() {
+  if (!_pool && ENV.databaseUrl) {
+    await getDb(); // ensures pool is initialized
+  }
+  return _pool;
+}
+
 export async function closeDb() {
   if (_pool) {
     await _pool.end();

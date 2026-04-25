@@ -10,6 +10,7 @@ import superjson from "superjson";
 import { ENV } from "./env.js";
 import { appRouter } from "./routers.js";
 import { getUserFromRequest, handleLogin, handleLogout, handleMe, seedAdminUser } from "./auth.js";
+import { getPool } from "./db.js";
 import type { Context } from "./trpc.js";
 
 const app = express();
@@ -35,6 +36,42 @@ app.use(express.json({ limit: "50mb" }));
 // Health check
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString(), version: "1.0.0" });
+});
+
+// ── Temporary Migration Endpoint (secured with JWT_SECRET) ────────
+app.post("/api/run-migration-0006", async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || authHeader !== `Bearer ${ENV.jwtSecret}`) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    const pool = await getPool();
+    if (!pool) {
+      return res.status(500).json({ error: "Database pool not available" });
+    }
+
+    const migrationSQL = `
+      -- Migration 0006: Partner Transaction Control
+      DO $$ BEGIN
+        CREATE TYPE "transaction_status" AS ENUM ('normal', 'storniert', 'nicht_gewertet', 'ausgeblendet');
+      EXCEPTION WHEN duplicate_object THEN NULL;
+      END $$;
+
+      ALTER TYPE "partner_transaction_type" ADD VALUE IF NOT EXISTS 'auszahlung';
+
+      ALTER TABLE "partner_transactions" ADD COLUMN IF NOT EXISTS "status" "transaction_status" DEFAULT 'normal' NOT NULL;
+
+      ALTER TABLE "partner_transactions" ADD COLUMN IF NOT EXISTS "admin_note" text;
+    `;
+
+    await pool.query(migrationSQL);
+    console.log("[Migration] 0006_partner_transaction_control executed successfully");
+    res.json({ success: true, message: "Migration 0006 executed successfully" });
+  } catch (error: any) {
+    console.error("[Migration] Error:", error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // ── Rate Limiting ──────────────────────────────────────────────────
