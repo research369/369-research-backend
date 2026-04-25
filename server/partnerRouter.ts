@@ -1214,4 +1214,172 @@ export const partnerRouter = router({
 
       return { success: true };
     }),
+
+  // ─── PARTNER PORTAL: Password Reset (public, email-based) ─────
+
+  /**
+   * Step 1: Partner requests a password reset.
+   * - Checks if partner exists and has an email
+   * - Generates a 6-digit code, stores it with expiry (15 min)
+   * - Sends email via Resend
+   */
+  portalRequestPasswordReset: publicProcedure
+    .input(z.object({
+      partnerNumber: z.string().min(1),
+    }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      const [partner] = await db.select().from(partners)
+        .where(eq(partners.partnerNumber, input.partnerNumber))
+        .limit(1);
+
+      // Always return success to prevent enumeration attacks
+      if (!partner || partner.isActive !== 1) {
+        // Don't reveal whether partner exists
+        return { success: true, message: "Falls eine E-Mail-Adresse hinterlegt ist, wurde ein Reset-Code gesendet." };
+      }
+
+      if (!partner.email) {
+        return { success: false, message: "Keine E-Mail-Adresse hinterlegt. Bitte kontaktiere den Admin." };
+      }
+
+      // Generate 6-digit code
+      const code = Math.floor(100000 + Math.random() * 900000).toString();
+      const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+
+      // Store code in partner's notes field temporarily (prefixed so we can parse it)
+      // Format: __RESET_CODE__:CODE:EXPIRY_ISO
+      const resetData = `__RESET_CODE__:${code}:${expiresAt.toISOString()}`;
+      
+      // We store the reset code in a dedicated field approach: use SQL directly
+      const { getPool } = await import("./db.js");
+      const pool = await getPool();
+      if (!pool) throw new Error("Database not available");
+      
+      // Store reset code (we use a simple approach: store in a temporary column or use notes)
+      // Using raw SQL to set a reset_code and reset_code_expires field
+      await pool.query(
+        `UPDATE partners SET notes = COALESCE(REGEXP_REPLACE(notes, '__RESET_CODE__:[^|]*\\|?', ''), '') || $1 WHERE id = $2`,
+        [`|${resetData}`, partner.id]
+      );
+
+      // Send email via Resend
+      const apiKey = process.env.RESEND_API_KEY;
+      if (!apiKey) {
+        console.warn("[Partners] RESEND_API_KEY not configured, cannot send reset email");
+        return { success: false, message: "E-Mail-Service nicht verfuegbar. Bitte kontaktiere den Admin." };
+      }
+
+      const emailHtml = `
+<!DOCTYPE html>
+<html lang="de">
+<head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background-color:#0a0a0f;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <div style="max-width:500px;margin:0 auto;padding:40px 20px;">
+    <div style="background:linear-gradient(135deg,#0d1117,#161b22);border:1px solid #1c2433;border-radius:16px;padding:40px;text-align:center;">
+      <div style="margin-bottom:24px;">
+        <h1 style="color:#3b82f6;margin:0;font-size:24px;font-weight:700;letter-spacing:1px;">369 RESEARCH</h1>
+        <p style="color:#64748b;margin:4px 0 0;font-size:12px;letter-spacing:2px;">PARTNER PORTAL</p>
+      </div>
+      <div style="background:#0a0f1a;border:1px solid #1e3a5f;border-radius:12px;padding:24px;margin:24px 0;">
+        <p style="color:#94a3b8;font-size:14px;margin:0 0 16px;">Dein Passwort-Reset-Code:</p>
+        <p style="color:#3b82f6;font-size:36px;font-weight:700;letter-spacing:8px;margin:0;font-family:monospace;">${code}</p>
+        <p style="color:#64748b;font-size:12px;margin:16px 0 0;">Gueltig fuer 15 Minuten</p>
+      </div>
+      <p style="color:#64748b;font-size:13px;margin:0;">Falls du keinen Reset angefordert hast, ignoriere diese E-Mail.</p>
+    </div>
+  </div>
+</body>
+</html>`;
+
+      try {
+        const RESEND_API_URL = "https://api.resend.com/emails";
+        const response = await fetch(RESEND_API_URL, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            from: "369 Research <onboarding@resend.dev>",
+            to: [partner.email],
+            subject: "Passwort zuruecksetzen – 369 Research Partner Portal",
+            html: emailHtml,
+          }),
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.warn(`[Partners] Failed to send reset email (${response.status}):`, errorText);
+          return { success: false, message: "E-Mail konnte nicht gesendet werden. Bitte versuche es spaeter." };
+        }
+
+        console.log(`[Partners] Password reset code sent to ${partner.email} for ${partner.partnerNumber}`);
+        return { success: true, message: "Falls eine E-Mail-Adresse hinterlegt ist, wurde ein Reset-Code gesendet." };
+      } catch (error) {
+        console.warn("[Partners] Error sending reset email:", error);
+        return { success: false, message: "E-Mail konnte nicht gesendet werden." };
+      }
+    }),
+
+  /**
+   * Step 2: Partner confirms the reset code and sets a new password.
+   */
+  portalConfirmPasswordReset: publicProcedure
+    .input(z.object({
+      partnerNumber: z.string().min(1),
+      code: z.string().length(6),
+      newPassword: z.string().min(6),
+    }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      const [partner] = await db.select().from(partners)
+        .where(and(
+          eq(partners.partnerNumber, input.partnerNumber),
+          eq(partners.isActive, 1)
+        ))
+        .limit(1);
+
+      if (!partner) {
+        throw new Error("Ungueltiger Reset-Code");
+      }
+
+      // Extract reset code from notes
+      const notes = partner.notes || "";
+      const resetMatch = notes.match(/__RESET_CODE__:(\d{6}):([^|]+)/);
+      
+      if (!resetMatch) {
+        throw new Error("Kein Reset-Code vorhanden. Bitte fordere einen neuen an.");
+      }
+
+      const storedCode = resetMatch[1];
+      const expiresAt = new Date(resetMatch[2]);
+
+      if (storedCode !== input.code) {
+        throw new Error("Ungueltiger Reset-Code");
+      }
+
+      if (new Date() > expiresAt) {
+        throw new Error("Reset-Code abgelaufen. Bitte fordere einen neuen an.");
+      }
+
+      // Code is valid – set new password
+      const hash = await bcrypt.hash(input.newPassword, 12);
+      
+      // Remove reset code from notes and update password
+      const cleanedNotes = notes.replace(/\|?__RESET_CODE__:[^|]*/g, "").replace(/^\|/, "");
+      
+      await db.update(partners).set({
+        passwordHash: hash,
+        notes: cleanedNotes || null,
+        updatedAt: new Date(),
+      }).where(eq(partners.id, partner.id));
+
+      console.log(`[Partners] Password reset confirmed for ${partner.partnerNumber}`);
+      return { success: true, message: "Passwort erfolgreich zurueckgesetzt. Du kannst dich jetzt einloggen." };
+    }),
 });
