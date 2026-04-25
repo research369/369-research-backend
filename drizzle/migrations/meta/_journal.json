@@ -43,6 +43,13 @@
       "when": 1776148800000,
       "tag": "0005_partner_system_extension",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1776235200000,
+      "tag": "0006_partner_transaction_control",
+      "breakpoints": true
     }
   ]
 }
