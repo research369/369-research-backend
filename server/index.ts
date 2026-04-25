@@ -6,13 +6,9 @@ import express from "express";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
-import bcrypt from "bcryptjs";
-import { eq } from "drizzle-orm";
 import { ENV } from "./env.js";
 import { appRouter } from "./routers.js";
 import { getUserFromRequest, handleLogin, handleLogout, handleMe, seedAdminUser } from "./auth.js";
-import { getDb } from "./db.js";
-import { users } from "../drizzle/schema.js";
 import type { Context } from "./trpc.js";
 
 const app = express();
@@ -78,20 +74,6 @@ app.post("/api/auth/login", loginLimiter, handleLogin);
 app.post("/api/auth/logout", handleLogout);
 app.get("/api/auth/me", handleMe);
 
-// TEMPORARY: Admin password reset endpoint (remove after use)
-app.post("/api/admin-reset-pw", async (req, res) => {
-  const { secret, newPassword } = req.body;
-  if (secret !== "369-temp-reset-2024") return res.status(403).json({ error: "Forbidden" });
-  try {
-    const db = await getDb();
-    if (!db) return res.status(500).json({ error: "DB not available" });
-    const hash = await bcrypt.hash(newPassword, 12);
-    await db.update(users).set({ passwordHash: hash }).where(eq(users.username, "admin"));
-    return res.json({ success: true, message: "Admin password reset" });
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
-  }
-});
 
 // tRPC middleware
 app.use(
