@@ -11,6 +11,7 @@ import { ENV } from "./env.js";
 import { appRouter } from "./routers.js";
 import { getUserFromRequest, handleLogin, handleLogout, handleMe, seedAdminUser } from "./auth.js";
 import type { Context } from "./trpc.js";
+import { getPool } from "./db.js";
 
 const app = express();
 
@@ -89,6 +90,66 @@ app.use(
     },
   })
 );
+
+// ── Temporary: Fix enum values from other chat's migration ──
+app.post("/api/fix-enums-0006", async (req, res) => {
+  try {
+    const secret = req.headers["x-migration-secret"];
+    if (secret !== ENV.jwtSecret) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const pool = await getPool();
+    if (!pool) return res.status(500).json({ error: "No DB pool" });
+    
+    const results: string[] = [];
+    
+    // Check current enum values
+    const enumCheck = await pool.query(`SELECT unnest(enum_range(NULL::transaction_status))::text as val`);
+    const currentValues = enumCheck.rows.map((r: any) => r.val);
+    results.push(`Current enum values: ${JSON.stringify(currentValues)}`);
+    
+    // If the enum has English values, we need to rename them
+    if (currentValues.includes('active') && !currentValues.includes('normal')) {
+      // Rename enum values from English to German
+      await pool.query(`ALTER TYPE transaction_status RENAME VALUE 'active' TO 'normal'`);
+      results.push('Renamed active -> normal');
+      await pool.query(`ALTER TYPE transaction_status RENAME VALUE 'cancelled' TO 'storniert'`);
+      results.push('Renamed cancelled -> storniert');
+      await pool.query(`ALTER TYPE transaction_status RENAME VALUE 'excluded' TO 'nicht_gewertet'`);
+      results.push('Renamed excluded -> nicht_gewertet');
+      await pool.query(`ALTER TYPE transaction_status RENAME VALUE 'hidden' TO 'ausgeblendet'`);
+      results.push('Renamed hidden -> ausgeblendet');
+      
+      // Update any existing rows that use old values
+      await pool.query(`UPDATE partner_transactions SET status = 'normal' WHERE status IS NULL`);
+      results.push('Updated NULL statuses to normal');
+    } else {
+      results.push('Enum values already correct (German), no changes needed');
+    }
+    
+    // Also check if admin_note column exists
+    const colCheck = await pool.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'partner_transactions' AND column_name = 'admin_note'`);
+    if (colCheck.rows.length === 0) {
+      await pool.query(`ALTER TABLE partner_transactions ADD COLUMN admin_note TEXT`);
+      results.push('Added admin_note column');
+    } else {
+      results.push('admin_note column already exists');
+    }
+    
+    // Check if assigned_partner_id exists on customers
+    const custColCheck = await pool.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'customers' AND column_name = 'assigned_partner_id'`);
+    if (custColCheck.rows.length === 0) {
+      await pool.query(`ALTER TABLE customers ADD COLUMN assigned_partner_id INTEGER REFERENCES partners(id)`);
+      results.push('Added assigned_partner_id to customers');
+    } else {
+      results.push('assigned_partner_id already exists on customers');
+    }
+    
+    res.json({ success: true, results });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // Start server
 const port = ENV.port;
