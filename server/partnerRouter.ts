@@ -791,8 +791,10 @@ export const partnerRouter = router({
         }
       }
 
+      // Provision wird IMMER auf den übergebenen Nettobetrag nach ALLEN Rabatten berechnet
       const commissionRate = parseFloat(partner.commissionPercent) / 100;
       const commissionAmount = Math.round(input.productSubtotalAfterDiscount * commissionRate * 100) / 100;
+      console.log(`[Partners] Commission calc: nettoAfterDiscount=${input.productSubtotalAfterDiscount}, rate=${commissionRate}, commission=${commissionAmount}`);
 
       if (commissionAmount <= 0) return { success: false, message: "Keine Provision" };
 

@@ -94,9 +94,14 @@ export const orderRouter = router({
       let resolvedPartner: any = null;
       const bookPartnerCommission = async (partner: any, reason: string) => {
         resolvedPartner = partner;
-        const productSubtotalAfterDiscount = input.subtotal - partnerDiscountAmount;
+        // Provision wird IMMER auf den Nettobetrag nach ALLEN Rabatten berechnet
+        // input.subtotal = Produkt-Subtotal VOR Rabatt
+        // input.discount = Gesamtrabatt (Partner-Rabatt + sonstige Rabatte)
+        // Netto = subtotal - discount (was der Kunde für Produkte tatsächlich zahlt, ohne Versand)
+        const nettoAfterAllDiscounts = Math.max(0, input.subtotal - input.discount);
         const commissionRate = parseFloat(partner.commissionPercent) / 100;
-        partnerCommissionAmount = Math.round(productSubtotalAfterDiscount * commissionRate * 100) / 100;
+        partnerCommissionAmount = Math.round(nettoAfterAllDiscounts * commissionRate * 100) / 100;
+        console.log(`[Orders] Commission calc: subtotal=${input.subtotal}, discount=${input.discount}, netto=${nettoAfterAllDiscounts}, rate=${commissionRate}, commission=${partnerCommissionAmount}`);
 
         if (partnerCommissionAmount <= 0) return;
 
