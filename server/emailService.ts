@@ -167,7 +167,7 @@ function buildOrderConfirmationHtml(data: OrderEmailData): string {
     <!-- Footer -->
     <div style="text-align:center;padding:24px;font-size:12px;color:#9ca3af;">
       <p style="margin:0;">369 Research · Forschungsmaterialien</p>
-      <p style="margin:4px 0 0;">Bei Fragen: WhatsApp +31 6 87387437</p>
+      <p style="margin:4px 0 0;">Bei Fragen: WhatsApp +4915510063537</p>
     </div>
   </div>
 </body>
@@ -245,7 +245,7 @@ export async function sendShippingNotificationEmail(data: {
       <h2 style="font-size:18px;color:#111827;margin:0 0 12px;">Deine Bestellung ${data.orderId} wurde versendet! 📦</h2>
       <p style="font-size:14px;color:#374151;line-height:1.6;">Hallo ${data.customerName},<br><br>deine Bestellung ist auf dem Weg zu dir!</p>
       ${trackingInfo}
-      <p style="font-size:13px;color:#6b7280;margin-top:20px;">Bei Fragen: WhatsApp +31 6 87387437</p>
+      <p style="font-size:13px;color:#6b7280;margin-top:20px;">Bei Fragen: WhatsApp +4915510063537</p>
     </div>
     <div style="text-align:center;padding:16px;font-size:12px;color:#9ca3af;">369 Research · Forschungsmaterialien</div>
   </div>

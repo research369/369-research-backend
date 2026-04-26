@@ -1492,7 +1492,7 @@ export const partnerRouter = router({
     <!-- Footer -->
     <div style="background:#0d1117;border:1px solid #1e3a5f;border-top:none;border-radius:0 0 12px 12px;padding:20px;text-align:center;">
       <p style="margin:0;font-size:12px;color:#475569;">369 Research \u00b7 Precision. Purity. Performance.</p>
-      <p style="margin:4px 0 0;font-size:12px;color:#475569;">Bei Fragen: WhatsApp +31 6 87387437</p>
+      <p style="margin:4px 0 0;font-size:12px;color:#475569;">Bei Fragen: WhatsApp +4915510063537</p>
     </div>
   </div>
 </body>
