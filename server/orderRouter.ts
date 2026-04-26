@@ -211,6 +211,13 @@ export const orderRouter = router({
         }
       }
 
+      // ── Idempotency check: if order already exists, skip re-processing ──
+      const existingOrder = await db.select().from(orders).where(eq(orders.orderId, orderId)).limit(1);
+      if (existingOrder.length > 0) {
+        console.warn(`[Orders] Duplicate request for order ${orderId} – skipping (order already exists)`);
+        return { success: true, orderId: orderId };
+      }
+
       // Insert order
       await db.insert(orders).values({
         orderId: orderId,
@@ -364,9 +371,37 @@ export const orderRouter = router({
       const itemList = input.items.map(i => `${i.quantity}x ${i.name}${i.dosage ? ` (${i.dosage})` : ""}`).join(", ");
       console.log(`[Orders] New order: ${orderId} – ${input.total.toFixed(2)} EUR – ${input.customer.firstName} ${input.customer.lastName} – ${itemList}`);
 
-      // Send order confirmation email to customer
+      // Send order confirmation email to customer (idempotent: only once per orderId)
       try {
-        await sendOrderConfirmationEmail({
+        // Check if email was already sent for this order (via communication log OR order email_sent flag)
+        // We use customerCommunications as the sent-marker; also check the order's email field directly
+        const existingEmailLog = await db.select().from(customerCommunications)
+          .where(eq(customerCommunications.orderId, orderId))
+          .limit(1);
+        const alreadySent = existingEmailLog.length > 0;
+        if (alreadySent) {
+          console.warn(`[Orders] Confirmation email already sent for order ${orderId} – skipping duplicate`);
+        } else {
+          // Log BEFORE sending to prevent race conditions
+          if (customerId) {
+            // Already logged above – skip
+          } else {
+            // No customer found, but still log to prevent duplicate emails
+            try {
+              await db.insert(customerCommunications).values({
+                customerId: null as any,
+                type: "email",
+                status: "sent",
+                subject: `Bestellbestätigung ${orderId}`,
+                body: `Automatische Bestellbestätigung für Bestellung ${orderId}`,
+                recipientEmail: input.customer.email,
+                senderName: "369 Research",
+                orderId: orderId,
+                createdBy: "system",
+              });
+            } catch (_) { /* ignore */ }
+          }
+          await sendOrderConfirmationEmail({
           orderId: orderId,
           customer: input.customer,
           items: input.items.map(i => ({ ...i, dosage: i.dosage || null, variant: i.variant || null })),
@@ -376,7 +411,8 @@ export const orderRouter = router({
           shipping: input.shipping,
           total: input.total,
           paymentMethod: input.paymentMethod,
-        });
+          });
+        }
       } catch (err) {
         console.warn("[Orders] Failed to send confirmation email:", err);
       }
