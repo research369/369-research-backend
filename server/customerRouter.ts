@@ -370,7 +370,7 @@ export const customerRouter = router({
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          from: "369 Research <onboarding@resend.dev>",
+          from: "369 Research <noreply@369research.eu>",
           to: [customer.email],
           subject: input.subject,
           html: input.htmlBody,
@@ -458,7 +458,7 @@ export const customerRouter = router({
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
-              from: "369 Research <onboarding@resend.dev>",
+              from: "369 Research <noreply@369research.eu>",
               to: [customer.email!],
               subject: input.subject,
               html: personalizedHtml,

@@ -191,7 +191,7 @@ export async function sendOrderConfirmationEmail(data: OrderEmailData): Promise<
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        from: "369 Research <onboarding@resend.dev>",
+        from: "369 Research <noreply@369research.eu>",
         to: [data.customer.email],
         subject: `Bestellbestätigung ${data.orderId} – 369 Research`,
         html,
@@ -260,7 +260,7 @@ export async function sendShippingNotificationEmail(data: {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        from: "369 Research <onboarding@resend.dev>",
+        from: "369 Research <noreply@369research.eu>",
         to: [data.customerEmail],
         subject: `Deine Bestellung ${data.orderId} wurde versendet! – 369 Research`,
         html,

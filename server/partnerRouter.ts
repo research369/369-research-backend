@@ -1322,7 +1322,7 @@ export const partnerRouter = router({
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            from: "369 Research <onboarding@resend.dev>",
+            from: "369 Research <noreply@369research.eu>",
             to: [partner.email],
             subject: "Passwort zuruecksetzen – 369 Research Partner Portal",
             html: emailHtml,
@@ -1509,7 +1509,7 @@ export const partnerRouter = router({
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          from: "369 Research <onboarding@resend.dev>",
+          from: "369 Research <noreply@369research.eu>",
           to: [partner.email],
           subject: `Deine Zugangsdaten – 369 Research Partner Portal`,
           html,
