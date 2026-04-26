@@ -1531,4 +1531,77 @@ export const partnerRouter = router({
       console.log(`[Partners] Credentials email sent to ${partner.email}, id: ${result.id}`);
       return { success: true, message: `Zugangsdaten an ${partner.email} gesendet` };
     }),
+
+  // ─── ADMIN: Recalculate commissions for all partners ────────────────────────
+  recalcCommissions: adminProcedure
+    .mutation(async () => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+      const { inArray } = await import("drizzle-orm");
+      const paidStatuses = ["bezahlt", "gepackt", "versendet", "zugestellt"];
+
+      const allPartners = await db.select().from(partners);
+      let totalFixed = 0;
+      const log: string[] = [];
+
+      for (const partner of allPartners) {
+        const commissionRate = parseFloat(partner.commissionPercent) / 100;
+
+        const partnerOrders = await db.select({
+          orderId: orders.orderId,
+          subtotal: orders.subtotal,
+          discount: orders.discount,
+          partnerCommission: orders.partnerCommission,
+          status: orders.status,
+        }).from(orders)
+          .where(and(
+            eq(orders.partnerCode, partner.code),
+            inArray(orders.status, paidStatuses)
+          ));
+
+        let partnerBalanceCorrection = 0;
+
+        for (const order of partnerOrders) {
+          const sub = parseFloat(order.subtotal || "0");
+          const disc = parseFloat(order.discount || "0");
+          const netto = Math.max(0, sub - disc);
+          const expectedCommission = Math.round(netto * commissionRate * 100) / 100;
+          const actualCommission = parseFloat(order.partnerCommission || "0");
+          const diff = Math.round((expectedCommission - actualCommission) * 100) / 100;
+
+          if (Math.abs(diff) >= 0.01) {
+            await db.update(orders).set({
+              partnerCommission: expectedCommission.toFixed(2),
+            }).where(eq(orders.orderId, order.orderId));
+
+            await db.insert(partnerTransactions).values({
+              partnerId: partner.id,
+              type: "provision",
+              amount: diff.toFixed(2),
+              balanceAfter: "0",
+              orderId: order.orderId,
+              customerName: "Korrektur",
+              description: `Provisions-Korrektur für Bestellung ${order.orderId}: ${actualCommission.toFixed(2)} → ${expectedCommission.toFixed(2)} EUR`,
+            });
+
+            partnerBalanceCorrection += diff;
+            totalFixed++;
+            log.push(`${partner.code} | ${order.orderId}: ${actualCommission.toFixed(2)} → ${expectedCommission.toFixed(2)} (diff: +${diff.toFixed(2)})`);
+          }
+        }
+
+        if (Math.abs(partnerBalanceCorrection) >= 0.01) {
+          const currentBalance = parseFloat(partner.creditBalance || "0");
+          const newBalance = Math.round((currentBalance + partnerBalanceCorrection) * 100) / 100;
+          await db.update(partners).set({
+            creditBalance: newBalance.toFixed(2),
+            updatedAt: new Date(),
+          }).where(eq(partners.id, partner.id));
+          log.push(`${partner.code} | Guthaben: ${currentBalance.toFixed(2)} → ${newBalance.toFixed(2)} EUR`);
+        }
+      }
+
+      console.log(`[Partners] recalcCommissions: fixed ${totalFixed} orders`);
+      return { success: true, fixed: totalFixed, log };
+    }),
 });
