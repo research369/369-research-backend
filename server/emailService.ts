@@ -3,6 +3,8 @@
  * Uses Resend API (https://resend.com)
  */
 
+import { generateSKUFromName } from "./articleCodes.js";
+
 const RESEND_API_URL = "https://api.resend.com/emails";
 
 interface OrderEmailData {
@@ -65,15 +67,18 @@ function getBankDetails(method: string): string {
 }
 
 function buildOrderConfirmationHtml(data: OrderEmailData): string {
-  const itemRows = data.items.map(item => `
+  const itemRows = data.items.map(item => {
+    const sku = generateSKUFromName(item.name, item.dosage || item.variant);
+    return `
     <tr>
-      <td style="padding:10px 12px;border-bottom:1px solid #f3f4f6;font-size:14px;">
-        ${item.name}${item.dosage ? ` (${item.dosage})` : ""}${item.variant ? ` – ${item.variant}` : ""}
+      <td style="padding:10px 12px;border-bottom:1px solid #f3f4f6;font-size:14px;font-family:monospace;font-weight:600;">
+        ${sku}${item.variant ? ` – ${item.variant}` : ""}
       </td>
       <td style="padding:10px 12px;border-bottom:1px solid #f3f4f6;font-size:14px;text-align:center;">${item.quantity}</td>
       <td style="padding:10px 12px;border-bottom:1px solid #f3f4f6;font-size:14px;text-align:right;">${(item.price * item.quantity).toFixed(2)} €</td>
     </tr>
-  `).join("");
+  `;
+  }).join("");
 
   return `
 <!DOCTYPE html>

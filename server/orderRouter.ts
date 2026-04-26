@@ -428,7 +428,8 @@ export const orderRouter = router({
       }
 
       // Log new order
-      const itemList = input.items.map(i => `${i.quantity}x ${i.name}${i.dosage ? ` (${i.dosage})` : ""}`).join(", ");
+      const { generateSKUFromName: _logSku } = await import("./articleCodes.js");
+      const itemList = input.items.map(i => `${i.quantity}x ${_logSku(i.name, i.dosage || i.variant)}`).join(", ");
       console.log(`[Orders] New order: ${orderId} – ${input.total.toFixed(2)} EUR – ${input.customer.firstName} ${input.customer.lastName} – ${itemList}`);
 
       // Send order confirmation email to customer (idempotent: only once per orderId)
