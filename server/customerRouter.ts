@@ -152,13 +152,23 @@ export const customerRouter = router({
       const [customer] = await db.select().from(customers).where(eq(customers.id, input.id)).limit(1);
       if (!customer) throw new Error("Customer not found");
 
-      // Get orders linked by customerId, email, or phone
+      // Get orders linked by customerId, email, phone, or full name (fallback for customers without contact data)
       const allOrders = await db.select().from(orders).orderBy(desc(orders.orderDate));
-      const customerOrders = allOrders.filter(o =>
-        o.customerId === customer.id ||
-        (customer.email && o.email.toLowerCase() === customer.email.toLowerCase()) ||
-        (customer.phone && o.phone === customer.phone)
-      );
+      const customerFullName = `${customer.firstName || ''} ${customer.lastName || ''}`.trim().toLowerCase();
+      const customerOrders = allOrders.filter(o => {
+        // Primary: direct customerId link
+        if (o.customerId === customer.id) return true;
+        // Secondary: email match (only if customer has email)
+        if (customer.email && o.email.toLowerCase() === customer.email.toLowerCase()) return true;
+        // Tertiary: phone match (only if customer has phone)
+        if (customer.phone && o.phone === customer.phone) return true;
+        // Fallback: name match for customers without email/phone
+        if (!customer.email && !customer.phone && customerFullName) {
+          const orderFullName = `${o.firstName} ${o.lastName}`.trim().toLowerCase();
+          if (orderFullName === customerFullName) return true;
+        }
+        return false;
+      });
 
       // Get items for these orders
       const orderIds = customerOrders.map(o => o.orderId);
@@ -733,5 +743,43 @@ export const customerRouter = router({
     }
 
     return { success: true, created, linked, totalOrders: allOrders.length };
+  }),
+
+  // Rebuild customer stats (totalOrders, totalSpent, firstOrderDate, lastOrderDate) from actual orders
+  rebuildCustomerStats: adminProcedure.mutation(async () => {
+    const db = await getDb();
+    if (!db) throw new Error("Database not available");
+    const allCustomers = await db.select().from(customers);
+    const allOrders = await db.select().from(orders);
+    let updated = 0;
+    for (const customer of allCustomers) {
+      const customerFullName = `${customer.firstName || ''} ${customer.lastName || ''}`.trim().toLowerCase();
+      // Find all orders for this customer (by customerId, email, phone, or name fallback)
+      const customerOrders = allOrders.filter(o => {
+        if (o.customerId === customer.id) return true;
+        if (customer.email && o.email.toLowerCase() === customer.email.toLowerCase()) return true;
+        if (customer.phone && o.phone === customer.phone) return true;
+        // Name fallback for customers without email/phone
+        if (!customer.email && !customer.phone && customerFullName) {
+          const orderFullName = `${o.firstName} ${o.lastName}`.trim().toLowerCase();
+          if (orderFullName === customerFullName) return true;
+        }
+        return false;
+      });
+      const totalOrders = customerOrders.length;
+      const totalSpent = customerOrders.reduce((sum, o) => sum + parseFloat(o.total), 0);
+      const orderDates = customerOrders.map(o => o.orderDate).filter(Boolean) as Date[];
+      const firstOrderDate = orderDates.length > 0 ? new Date(Math.min(...orderDates.map(d => d.getTime()))) : null;
+      const lastOrderDate = orderDates.length > 0 ? new Date(Math.max(...orderDates.map(d => d.getTime()))) : null;
+      await db.update(customers).set({
+        totalOrders,
+        totalSpent: totalSpent.toFixed(2),
+        firstOrderDate,
+        lastOrderDate,
+        updatedAt: new Date(),
+      }).where(eq(customers.id, customer.id));
+      updated++;
+    }
+    return { success: true, updated, totalCustomers: allCustomers.length };
   }),
 });
