@@ -218,6 +218,66 @@ export const orderRouter = router({
         return { success: true, orderId: orderId };
       }
 
+      // ── Stock check: verify all peptide items are in stock before creating order ──
+      const allArticlesForCheck = await db.select().from(articles).where(eq(articles.isActive, 1));
+      const outOfStockItems: string[] = [];
+      for (const item of input.items) {
+        if (item.type !== 'peptide') continue;
+        const dosageNorm = (item.dosage || '').toLowerCase().trim();
+        // Find articles matching this product (by shopProductId) and dosage
+        const matchingArticles = allArticlesForCheck.filter(a => {
+          if (!a.shopProductId) return false;
+          const parenMatch = a.name.match(/\(([^)]+)\)\s*$/);
+          const noParenMatch = a.name.match(/\b(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu))\s*$/i);
+          const articleDosage = parenMatch ? parenMatch[1].trim().toLowerCase() : noParenMatch ? noParenMatch[1].trim().toLowerCase() : '';
+          return articleDosage === dosageNorm;
+        });
+        if (matchingArticles.length > 0) {
+          const totalStock = matchingArticles.reduce((sum, a) => sum + (a.stock ?? 0), 0);
+          if (totalStock < item.quantity) {
+            outOfStockItems.push(`${item.name}${item.dosage ? ` (${item.dosage})` : ''} (Bestand: ${totalStock})`);
+          }
+        }
+      }
+      if (outOfStockItems.length > 0) {
+        console.warn(`[Orders] Stock check failed for order ${orderId}:`, outOfStockItems);
+        throw new Error(`Folgende Artikel sind nicht mehr verfügbar: ${outOfStockItems.join(', ')}. Bitte entferne sie aus dem Warenkorb.`);
+      }
+
+      // ── Stock deduction: reduce stock for all ordered peptide items ──
+      for (const item of input.items) {
+        if (item.type !== 'peptide') continue;
+        const dosageNorm = (item.dosage || '').toLowerCase().trim();
+        const matchingArticles = allArticlesForCheck.filter(a => {
+          if (!a.shopProductId) return false;
+          const parenMatch = a.name.match(/\(([^)]+)\)\s*$/);
+          const noParenMatch = a.name.match(/\b(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu))\s*$/i);
+          const articleDosage = parenMatch ? parenMatch[1].trim().toLowerCase() : noParenMatch ? noParenMatch[1].trim().toLowerCase() : '';
+          return articleDosage === dosageNorm;
+        });
+        let remainingToDeduct = item.quantity;
+        for (const article of matchingArticles) {
+          if (remainingToDeduct <= 0) break;
+          const deduct = Math.min(remainingToDeduct, article.stock ?? 0);
+          if (deduct > 0) {
+            const newStock = (article.stock ?? 0) - deduct;
+            await db.update(articles).set({ stock: newStock, updatedAt: new Date() }).where(eq(articles.id, article.id));
+            await db.insert(stockHistory).values({
+              articleId: article.id,
+              quantityChange: -deduct,
+              changeType: 'verkauf',
+              quantityBefore: article.stock ?? 0,
+              quantityAfter: newStock,
+              reason: `Bestandsabzug für Bestellung ${orderId}`,
+              orderId: orderId,
+              userName: 'system',
+            });
+            remainingToDeduct -= deduct;
+            console.log(`[Orders] Stock deducted: ${article.name} ${article.stock} → ${newStock} (order ${orderId})`);
+          }
+        }
+      }
+
       // Insert order
       await db.insert(orders).values({
         orderId: orderId,
