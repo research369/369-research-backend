@@ -152,33 +152,43 @@ export const customerRouter = router({
       const [customer] = await db.select().from(customers).where(eq(customers.id, input.id)).limit(1);
       if (!customer) throw new Error("Customer not found");
 
-      // Get orders linked by customerId, email, phone, or full name (fallback for customers without contact data)
+      // Get orders linked by customerId, email, or phone
+      // Placeholder emails/phones are excluded from matching to avoid false positives
+      const PLACEHOLDER_EMAILS_GET = new Set([
+        'keine@angabe.de', 'noemail@noemail.de', 'no@email.de', 'noreply@noreply.de',
+        'placeholder@placeholder.de', 'test@test.de', 'info@info.de',
+      ]);
       const allOrders = await db.select().from(orders).orderBy(desc(orders.orderDate));
-      const customerFullName = `${customer.firstName || ''} ${customer.lastName || ''}`.trim().toLowerCase();
+      const emailKey = customer.email?.toLowerCase().trim() || '';
+      const phoneKey = customer.phone?.trim() || '';
+      const emailUsable = emailKey && !PLACEHOLDER_EMAILS_GET.has(emailKey);
+      const phoneUsable = phoneKey && phoneKey.length > 4;
       const customerOrders = allOrders.filter(o => {
         // Primary: direct customerId link
         if (o.customerId === customer.id) return true;
-        // Secondary: email match (only if customer has email)
-        if (customer.email && o.email.toLowerCase() === customer.email.toLowerCase()) return true;
-        // Tertiary: phone match (only if customer has phone)
-        if (customer.phone && o.phone === customer.phone) return true;
-        // Fallback: name match for customers without email/phone
-        if (!customer.email && !customer.phone && customerFullName) {
-          const orderFullName = `${o.firstName} ${o.lastName}`.trim().toLowerCase();
-          if (orderFullName === customerFullName) return true;
-        }
+        // Secondary: email match (only if customer has a real email)
+        if (emailUsable && o.email.toLowerCase().trim() === emailKey) return true;
+        // Tertiary: phone match (only if customer has a real phone)
+        if (phoneUsable && o.phone.trim() === phoneKey) return true;
         return false;
+      });
+      // Deduplicate by orderId
+      const seenIds = new Set<string>();
+      const uniqueCustomerOrders = customerOrders.filter(o => {
+        if (seenIds.has(o.orderId)) return false;
+        seenIds.add(o.orderId);
+        return true;
       });
 
       // Get items for these orders
-      const orderIds = customerOrders.map(o => o.orderId);
+      const orderIds = uniqueCustomerOrders.map(o => o.orderId);
       let items: any[] = [];
       if (orderIds.length > 0) {
         const allItems = await db.select().from(orderItems);
         items = allItems.filter(i => orderIds.includes(i.orderId));
       }
 
-      const ordersWithItems = customerOrders.map(o => ({
+      const ordersWithItems = uniqueCustomerOrders.map(o => ({
         ...o,
         total: parseFloat(o.total),
         subtotal: parseFloat(o.subtotal),
@@ -751,24 +761,65 @@ export const customerRouter = router({
     if (!db) throw new Error("Database not available");
     const allCustomers = await db.select().from(customers);
     const allOrders = await db.select().from(orders);
+
+    // Placeholder/dummy emails that should NOT be used for matching
+    const PLACEHOLDER_EMAILS = new Set([
+      'keine@angabe.de', 'noemail@noemail.de', 'no@email.de', 'noreply@noreply.de',
+      'placeholder@placeholder.de', 'test@test.de', 'info@info.de',
+    ]);
+    // Placeholder phones
+    const PLACEHOLDER_PHONES = new Set(['0000000', '00000000000', '']);
+
+    // Build a map: email -> list of customerIds that use it
+    // If multiple customers share the same email, email-matching is ambiguous → skip it
+    const emailToCustomerIds: Record<string, number[]> = {};
+    for (const c of allCustomers) {
+      if (c.email && !PLACEHOLDER_EMAILS.has(c.email.toLowerCase().trim())) {
+        const key = c.email.toLowerCase().trim();
+        if (!emailToCustomerIds[key]) emailToCustomerIds[key] = [];
+        emailToCustomerIds[key].push(c.id);
+      }
+    }
+    // Same for phone
+    const phoneToCustomerIds: Record<string, number[]> = {};
+    for (const c of allCustomers) {
+      if (c.phone && !PLACEHOLDER_PHONES.has(c.phone.trim())) {
+        const key = c.phone.trim();
+        if (!phoneToCustomerIds[key]) phoneToCustomerIds[key] = [];
+        phoneToCustomerIds[key].push(c.id);
+      }
+    }
+
     let updated = 0;
     for (const customer of allCustomers) {
-      const customerFullName = `${customer.firstName || ''} ${customer.lastName || ''}`.trim().toLowerCase();
-      // Find all orders for this customer (by customerId, email, phone, or name fallback)
+      const emailKey = customer.email?.toLowerCase().trim() || '';
+      const phoneKey = customer.phone?.trim() || '';
+      // Only use email for matching if it's unique (not shared with other customers) and not a placeholder
+      const emailIsUsable = emailKey && !PLACEHOLDER_EMAILS.has(emailKey) && (emailToCustomerIds[emailKey]?.length ?? 0) === 1;
+      // Only use phone for matching if it's unique and not a placeholder
+      const phoneIsUsable = phoneKey && !PLACEHOLDER_PHONES.has(phoneKey) && (phoneToCustomerIds[phoneKey]?.length ?? 0) === 1;
+
       const customerOrders = allOrders.filter(o => {
+        // Primary: direct customerId link (always reliable)
         if (o.customerId === customer.id) return true;
-        if (customer.email && o.email.toLowerCase() === customer.email.toLowerCase()) return true;
-        if (customer.phone && o.phone === customer.phone) return true;
-        // Name fallback for customers without email/phone
-        if (!customer.email && !customer.phone && customerFullName) {
-          const orderFullName = `${o.firstName} ${o.lastName}`.trim().toLowerCase();
-          if (orderFullName === customerFullName) return true;
-        }
+        // Secondary: unique email match
+        if (emailIsUsable && o.email.toLowerCase().trim() === emailKey) return true;
+        // Tertiary: unique phone match
+        if (phoneIsUsable && o.phone.trim() === phoneKey) return true;
         return false;
       });
-      const totalOrders = customerOrders.length;
-      const totalSpent = customerOrders.reduce((sum, o) => sum + parseFloat(o.total), 0);
-      const orderDates = customerOrders.map(o => o.orderDate).filter(Boolean) as Date[];
+
+      // Deduplicate by orderId (avoid counting same order twice)
+      const seen = new Set<string>();
+      const uniqueOrders = customerOrders.filter(o => {
+        if (seen.has(o.orderId)) return false;
+        seen.add(o.orderId);
+        return true;
+      });
+
+      const totalOrders = uniqueOrders.length;
+      const totalSpent = uniqueOrders.reduce((sum, o) => sum + parseFloat(o.total), 0);
+      const orderDates = uniqueOrders.map(o => o.orderDate).filter(Boolean) as Date[];
       const firstOrderDate = orderDates.length > 0 ? new Date(Math.min(...orderDates.map(d => d.getTime()))) : null;
       const lastOrderDate = orderDates.length > 0 ? new Date(Math.max(...orderDates.map(d => d.getTime()))) : null;
       await db.update(customers).set({
