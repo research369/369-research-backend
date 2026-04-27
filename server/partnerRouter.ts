@@ -1043,17 +1043,23 @@ export const partnerRouter = router({
       const { inArray, ne } = await import("drizzle-orm");
       const paidStatuses = ["bezahlt", "gepackt", "versendet", "zugestellt"];
 
-      const referredOrders = await db.select({
+       const referredOrders = await db.select({
         total: orders.total,
+        subtotal: orders.subtotal,
+        discount: orders.discount,
+        shipping: orders.shipping,
         partnerCommission: orders.partnerCommission,
       }).from(orders)
         .where(and(
           eq(orders.partnerCode, partner.code),
           inArray(orders.status, paidStatuses)
         ));
-
       const totalOrders = referredOrders.length;
-      const totalRevenue = referredOrders.reduce((sum, o) => sum + parseFloat(o.total), 0);
+      // totalRevenue = Nettoumsatz nach Rabatten, OHNE Versand (= Basis für Provision)
+      const totalRevenue = referredOrders.reduce((sum, o) => {
+        const netto = Math.max(0, parseFloat(o.subtotal || "0") - parseFloat(o.discount || "0"));
+        return sum + netto;
+      }, 0);
       const totalCommission = referredOrders.reduce((sum, o) => sum + parseFloat(o.partnerCommission || "0"), 0);
 
       // Get all non-hidden transactions for this partner
