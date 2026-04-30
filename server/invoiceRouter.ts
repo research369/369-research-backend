@@ -3,7 +3,7 @@
  * Replaces browser localStorage for invoice persistence.
  */
 import { z } from "zod";
-import { eq, desc, and, gte, lte } from "drizzle-orm";
+import { eq, desc } from "drizzle-orm";
 import { router, protectedProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
 import { invoices } from "../drizzle/schema.js";
@@ -29,7 +29,9 @@ export const invoiceRouter = router({
   save: protectedProcedure
     .input(storedInvoiceSchema)
     .mutation(async ({ input }) => {
-      const db = getDb();
+      const db = await getDb();
+      if (!db) throw new Error("Datenbank nicht verfügbar");
+
       const existing = await db
         .select({ id: invoices.id })
         .from(invoices)
@@ -60,7 +62,9 @@ export const invoiceRouter = router({
   saveBatch: protectedProcedure
     .input(z.array(storedInvoiceSchema))
     .mutation(async ({ input }) => {
-      const db = getDb();
+      const db = await getDb();
+      if (!db) throw new Error("Datenbank nicht verfügbar");
+
       let saved = 0;
       let skipped = 0;
 
@@ -96,7 +100,9 @@ export const invoiceRouter = router({
   /** Get all invoices (sorted by date desc) */
   getAll: protectedProcedure
     .query(async () => {
-      const db = getDb();
+      const db = await getDb();
+      if (!db) return [];
+
       const rows = await db
         .select()
         .from(invoices)
@@ -120,7 +126,9 @@ export const invoiceRouter = router({
   getByOrder: protectedProcedure
     .input(z.object({ orderNumber: z.string() }))
     .query(async ({ input }) => {
-      const db = getDb();
+      const db = await getDb();
+      if (!db) return [];
+
       const rows = await db
         .select()
         .from(invoices)
@@ -145,7 +153,9 @@ export const invoiceRouter = router({
   deleteByOrder: protectedProcedure
     .input(z.object({ orderNumber: z.string() }))
     .mutation(async ({ input }) => {
-      const db = getDb();
+      const db = await getDb();
+      if (!db) throw new Error("Datenbank nicht verfügbar");
+
       await db.delete(invoices).where(eq(invoices.orderNumber, input.orderNumber));
       return { success: true };
     }),

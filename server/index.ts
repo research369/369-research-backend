@@ -9,6 +9,7 @@ import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { ENV } from "./env.js";
 import { appRouter } from "./routers.js";
 import { getUserFromRequest, handleLogin, handleLogout, handleMe, seedAdminUser } from "./auth.js";
+import { getPool } from "./db.js";
 import type { Context } from "./trpc.js";
 
 const app = express();
@@ -105,6 +106,33 @@ async function start() {
     await seedAdminUser();
   } catch (err) {
     console.warn("[Server] Failed to seed admin user:", err);
+  }
+
+  // Auto-migrate: create invoices table if not exists
+  try {
+    const pool = await getPool();
+    if (pool) {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS invoices (
+          id SERIAL PRIMARY KEY,
+          invoice_number VARCHAR(50) NOT NULL UNIQUE,
+          order_number VARCHAR(32) NOT NULL,
+          date VARCHAR(10) NOT NULL,
+          date_iso VARCHAR(10) NOT NULL,
+          total_gross DECIMAL(10,2) NOT NULL,
+          html TEXT NOT NULL,
+          items TEXT NOT NULL DEFAULT '[]',
+          split_index INTEGER,
+          split_total INTEGER,
+          created_at TIMESTAMP DEFAULT NOW() NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS invoices_order_number_idx ON invoices(order_number);
+        CREATE INDEX IF NOT EXISTS invoices_date_iso_idx ON invoices(date_iso);
+      `);
+      console.log("[Server] invoices table ready");
+    }
+  } catch (err) {
+    console.warn("[Server] Failed to create invoices table:", err);
   }
 
   app.listen(port, "0.0.0.0", () => {
