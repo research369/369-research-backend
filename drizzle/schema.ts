@@ -461,3 +461,30 @@ export const shopSettings = pgTable("shop_settings", {
 
 export type ShopSetting = typeof shopSettings.$inferSelect;
 export type InsertShopSetting = typeof shopSettings.$inferInsert;
+
+/**
+ * Invoices – persistent invoice storage (replaces browser localStorage)
+ * Each row stores a generated invoice with its full HTML for rendering/printing.
+ */
+export const invoices = pgTable("invoices", {
+  id: serial("id").primaryKey(),
+  invoiceNumber: varchar("invoice_number", { length: 50 }).notNull().unique(),
+  orderNumber: varchar("order_number", { length: 32 }).notNull(),
+
+  date: varchar("date", { length: 10 }).notNull(),      // dd.mm.yyyy
+  dateISO: varchar("date_iso", { length: 10 }).notNull(), // yyyy-mm-dd
+
+  totalGross: decimal("total_gross", { precision: 10, scale: 2 }).notNull(),
+  html: text("html").notNull(),
+
+  // Line items summary (JSON)
+  items: text("items").notNull().default("[]"),
+
+  splitIndex: integer("split_index"),
+  splitTotal: integer("split_total"),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export type Invoice = typeof invoices.$inferSelect;
+export type InsertInvoice = typeof invoices.$inferInsert;
