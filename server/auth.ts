@@ -9,6 +9,7 @@ import { eq } from "drizzle-orm";
 import { ENV } from "./env.js";
 import { getDb } from "./db.js";
 import { users } from "../drizzle/schema.js";
+import { verifyTotpCode } from "./totpRouter.js";
 import type { Request, Response } from "express";
 
 const TOKEN_EXPIRY = "7d"; // 7 days
@@ -85,6 +86,19 @@ export async function handleLogin(req: Request, res: Response) {
   const valid = await bcrypt.compare(password, user.passwordHash);
   if (!valid) {
     return res.status(401).json({ error: "Ungültige Anmeldedaten" });
+  }
+
+  // 2FA Check: if TOTP is enabled, require a TOTP code
+  if (user.totpEnabled) {
+    const totpCode = req.body.totpCode as string | undefined;
+    if (!totpCode) {
+      // Signal frontend that 2FA is required
+      return res.status(200).json({ totpRequired: true, userId: user.id });
+    }
+    const totpValid = await verifyTotpCode(user.id, totpCode);
+    if (!totpValid) {
+      return res.status(401).json({ error: "Ungültiger 2FA-Code" });
+    }
   }
 
   // Update last signed in

@@ -11,6 +11,7 @@ import { aiRouter } from "./aiRouter.js";
 import { promoCodeRouter } from "./promoCodeRouter.js";
 import { shopSettingsRouter } from "./shopSettingsRouter.js";
 import { invoiceRouter } from "./invoiceRouter.js";
+import { totpRouter } from "./totpRouter.js";
 
 export const appRouter = router({
   order: orderRouter,
@@ -22,6 +23,7 @@ export const appRouter = router({
   promoCode: promoCodeRouter,
   shopSettings: shopSettingsRouter,
   invoice: invoiceRouter,
+  totp: totpRouter,
 });
 
 export type AppRouter = typeof appRouter;

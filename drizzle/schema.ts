@@ -26,6 +26,8 @@ export const users = pgTable("users", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
   lastSignedIn: timestamp("last_signed_in").defaultNow().notNull(),
+  totpSecret: text("totp_secret"),
+  totpEnabled: integer("totp_enabled").default(0).notNull(),
 });
 
 export type User = typeof users.$inferSelect;
