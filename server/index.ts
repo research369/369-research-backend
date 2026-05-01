@@ -38,27 +38,47 @@ app.get("/health", (_req, res) => {
 });
 
 // ── Rate Limiting ──────────────────────────────────────────────────
-// Strict limiter for login: max 5 attempts per 15 minutes per IP
+// Helper: detect Railway-internal / server-side requests (skip rate limiting)
+const isInternalRequest = (req: any): boolean => {
+  const forwarded = (req.headers["x-forwarded-for"] as string) || "";
+  const ip = req.ip || "";
+  const userAgent = (req.headers["user-agent"] as string) || "";
+  // Skip for localhost, Railway internal network (10.x, 172.x) and Python requests (server-side scripts)
+  return (
+    ip.startsWith("127.") ||
+    ip.startsWith("::1") ||
+    ip.startsWith("10.") ||
+    ip.startsWith("172.") ||
+    forwarded.startsWith("10.") ||
+    forwarded.startsWith("172.") ||
+    userAgent.includes("python-requests") ||
+    userAgent.includes("node-fetch") ||
+    req.headers["x-internal-token"] === ENV.jwtSecret
+  );
+};
+
+// Strict limiter for login: max 10 attempts per 15 minutes per IP (external only)
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5,
+  max: 10,
   standardHeaders: true,
   legacyHeaders: false,
+  skip: isInternalRequest,
   message: {
     error: "Zu viele Anmeldeversuche. Bitte versuchen Sie es in 15 Minuten erneut.",
   },
   keyGenerator: (req) => {
-    // Use X-Forwarded-For for Railway proxy, fallback to IP
     return (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.ip || "unknown";
   },
 });
 
-// General API limiter: max 100 requests per minute per IP
+// General API limiter: max 300 requests per minute per IP
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
-  max: 100,
+  max: 300,
   standardHeaders: true,
   legacyHeaders: false,
+  skip: isInternalRequest,
   message: {
     error: "Zu viele Anfragen. Bitte versuchen Sie es später erneut.",
   },
