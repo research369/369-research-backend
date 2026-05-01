@@ -108,6 +108,20 @@ async function start() {
     console.warn("[Server] Failed to seed admin user:", err);
   }
 
+  // Auto-migrate: add TOTP columns to users table if not exists
+  try {
+    const pool = await getPool();
+    if (pool) {
+      await pool.query(`
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_secret TEXT;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_enabled INTEGER NOT NULL DEFAULT 0;
+      `);
+      console.log("[Server] users TOTP columns ready");
+    }
+  } catch (err) {
+    console.warn("[Server] Failed to add TOTP columns:", err);
+  }
+
   // Auto-migrate: create invoices table if not exists
   try {
     const pool = await getPool();
