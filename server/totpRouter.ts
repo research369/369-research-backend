@@ -22,15 +22,14 @@ export const totpRouter = router({
       if (!db) throw new Error("Datenbank nicht verfügbar");
 
       // Generate new secret
+      const newSecret = new OTPAuth.Secret({ size: 20 });
       const totp = new OTPAuth.TOTP({
         issuer: ISSUER,
         label: ctx.user!.username,
         algorithm: "SHA1",
         digits: 6,
         period: 30,
-        secret: OTPAuth.Secret.fromBase32(
-          OTPAuth.Secret.generate(20).base32
-        ),
+        secret: newSecret,
       });
 
       const secret = totp.secret.base32;
