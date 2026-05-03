@@ -218,6 +218,84 @@ export async function sendOrderConfirmationEmail(data: OrderEmailData): Promise<
   }
 }
 
+export async function sendAdminOrderNotification(data: OrderEmailData): Promise<boolean> {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    console.warn("[Email] RESEND_API_KEY not configured, skipping admin notification");
+    return false;
+  }
+
+  const itemRows = data.items.map(item => {
+    const sku = generateSKUFromName(item.name, item.dosage || item.variant);
+    return `<tr>
+      <td style="padding:6px 10px;border-bottom:1px solid #f3f4f6;font-size:13px;font-family:monospace;">${sku}${item.variant ? ` – ${item.variant}` : ""}</td>
+      <td style="padding:6px 10px;border-bottom:1px solid #f3f4f6;font-size:13px;text-align:center;">${item.quantity}x</td>
+      <td style="padding:6px 10px;border-bottom:1px solid #f3f4f6;font-size:13px;text-align:right;">${(item.price * item.quantity).toFixed(2)} €</td>
+    </tr>`;
+  }).join("");
+
+  const html = `
+<!DOCTYPE html>
+<html lang="de">
+<head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <div style="max-width:600px;margin:0 auto;padding:20px;">
+    <div style="background:linear-gradient(135deg,#0f172a,#1e293b);border-radius:12px 12px 0 0;padding:24px 32px;">
+      <h1 style="color:#fff;margin:0;font-size:20px;">🛒 Neue Bestellung eingegangen</h1>
+      <p style="color:#94a3b8;margin:6px 0 0;font-size:14px;">${data.orderId} · ${data.total.toFixed(2)} € · ${getPaymentMethodLabel(data.paymentMethod)}</p>
+    </div>
+    <div style="background:#fff;padding:24px;border:1px solid #e5e7eb;">
+      <h3 style="font-size:15px;color:#111827;margin:0 0 8px;">Kunde</h3>
+      <p style="font-size:14px;color:#374151;margin:0 0 4px;"><strong>${data.customer.firstName} ${data.customer.lastName}</strong>${data.customer.company ? ` · ${data.customer.company}` : ""}</p>
+      <p style="font-size:14px;color:#374151;margin:0 0 4px;">${data.customer.email} · ${data.customer.phone}</p>
+      <p style="font-size:14px;color:#374151;margin:0 0 16px;">${data.customer.street} ${data.customer.houseNumber}, ${data.customer.zip} ${data.customer.city}, ${data.customer.country}</p>
+      <h3 style="font-size:15px;color:#111827;margin:0 0 8px;">Positionen</h3>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:16px;">
+        <tbody>${itemRows}</tbody>
+      </table>
+      <table style="width:100%;border-collapse:collapse;">
+        <tr><td style="padding:3px 0;font-size:13px;color:#6b7280;">Zwischensumme</td><td style="padding:3px 0;font-size:13px;text-align:right;">${data.subtotal.toFixed(2)} €</td></tr>
+        ${data.discount > 0 ? `<tr><td style="padding:3px 0;font-size:13px;color:#059669;">Rabatt${data.discountCode ? ` (${data.discountCode})` : ""}</td><td style="padding:3px 0;font-size:13px;text-align:right;color:#059669;">-${data.discount.toFixed(2)} €</td></tr>` : ""}
+        <tr><td style="padding:3px 0;font-size:13px;color:#6b7280;">Versand</td><td style="padding:3px 0;font-size:13px;text-align:right;">${data.shipping > 0 ? data.shipping.toFixed(2) + " €" : "Kostenlos"}</td></tr>
+        <tr><td style="padding:8px 0 0;font-size:16px;font-weight:700;color:#111827;border-top:2px solid #e5e7eb;">Gesamt</td><td style="padding:8px 0 0;font-size:16px;font-weight:700;text-align:right;color:#111827;border-top:2px solid #e5e7eb;">${data.total.toFixed(2)} €</td></tr>
+      </table>
+    </div>
+    <div style="background:#eff6ff;border:1px solid #bfdbfe;border-top:none;border-radius:0 0 12px 12px;padding:16px 24px;">
+      <p style="margin:0;font-size:13px;color:#1e40af;"><strong>Verwendungszweck:</strong> ${data.orderId} · <strong>Zahlungsart:</strong> ${getPaymentMethodLabel(data.paymentMethod)}</p>
+    </div>
+  </div>
+</body>
+</html>`;
+
+  try {
+    const response = await fetch(RESEND_API_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: "369 Research Shop <noreply@369research.eu>",
+        to: ["369peptides@gmail.com"],
+        subject: `🛒 Neue Bestellung ${data.orderId} – ${data.total.toFixed(2)} € (${data.customer.firstName} ${data.customer.lastName})`,
+        html,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.warn(`[Email] Failed to send admin notification (${response.status}):`, errorText);
+      return false;
+    }
+
+    console.log(`[Email] Admin notification sent for order ${data.orderId}`);
+    return true;
+  } catch (error) {
+    console.warn("[Email] Error sending admin notification:", error);
+    return false;
+  }
+}
+
 export async function sendShippingNotificationEmail(data: {
   orderId: string;
   customerEmail: string;

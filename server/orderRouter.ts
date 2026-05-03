@@ -10,7 +10,7 @@ import { router, publicProcedure, adminProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
 import { orders, orderItems, articles, stockHistory, customers, customerCommunications } from "../drizzle/schema.js";
 import { getIncomingPayments, matchPaymentToOrder, intelligentMatch, type MatchResult } from "./bunqService.js";
-import { sendOrderConfirmationEmail, sendShippingNotificationEmail } from "./emailService.js";
+import { sendOrderConfirmationEmail, sendShippingNotificationEmail, sendAdminOrderNotification } from "./emailService.js";
 import { partners, partnerTransactions } from "../drizzle/schema.js";
 import { sql } from "drizzle-orm";
 
@@ -476,6 +476,23 @@ export const orderRouter = router({
         }
       } catch (err) {
         console.warn("[Orders] Failed to send confirmation email:", err);
+      }
+
+      // Send admin notification email (always, fire-and-forget)
+      try {
+        await sendAdminOrderNotification({
+          orderId: orderId,
+          customer: input.customer,
+          items: input.items.map(i => ({ ...i, dosage: i.dosage || null, variant: i.variant || null })),
+          subtotal: input.subtotal,
+          discount: input.discount,
+          discountCode: input.discountCode,
+          shipping: input.shipping,
+          total: input.total,
+          paymentMethod: input.paymentMethod,
+        });
+      } catch (err) {
+        console.warn("[Orders] Failed to send admin notification email:", err);
       }
 
       return { success: true, orderId: orderId };
