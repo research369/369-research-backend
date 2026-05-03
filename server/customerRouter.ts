@@ -281,6 +281,53 @@ export const customerRouter = router({
 
       await db.update(customers).set(updateData).where(eq(customers.id, id));
 
+      // ── Sync address/contact data to all linked orders ──
+      // Only sync fields that are actually address/contact related (not tags, notes, source)
+      const orderSyncFields: Record<string, any> = {};
+      if (data.firstName !== undefined) orderSyncFields.firstName = data.firstName || null;
+      if (data.lastName !== undefined) orderSyncFields.lastName = data.lastName || null;
+      if (data.phone !== undefined) orderSyncFields.phone = data.phone || null;
+      if (data.email !== undefined) orderSyncFields.email = data.email || null;
+      if (data.company !== undefined) orderSyncFields.company = data.company || null;
+      if (data.street !== undefined) orderSyncFields.street = data.street || null;
+      if (data.houseNumber !== undefined) orderSyncFields.houseNumber = data.houseNumber || null;
+      if (data.zip !== undefined) orderSyncFields.zip = data.zip || null;
+      if (data.city !== undefined) orderSyncFields.city = data.city || null;
+      if (data.country !== undefined) orderSyncFields.country = data.country || null;
+
+      if (Object.keys(orderSyncFields).length > 0) {
+        // Find all orders linked to this customer
+        const linkedOrders = await db.select({ orderId: orders.orderId })
+          .from(orders)
+          .where(eq(orders.customerId, id));
+
+        if (linkedOrders.length > 0) {
+          // For each linked order: only overwrite fields that are currently empty/null in the order
+          for (const { orderId } of linkedOrders) {
+            const [order] = await db.select().from(orders).where(eq(orders.orderId, orderId)).limit(1);
+            if (!order) continue;
+
+            const orderUpdate: Record<string, any> = {};
+            // Always sync: overwrite if the order field is null/empty OR if explicitly provided
+            if (data.firstName !== undefined && (!order.firstName || order.firstName.trim() === '')) orderUpdate.firstName = data.firstName || null;
+            if (data.lastName !== undefined && (!order.lastName || order.lastName.trim() === '')) orderUpdate.lastName = data.lastName || null;
+            if (data.phone !== undefined && (!order.phone || order.phone.trim() === '')) orderUpdate.phone = data.phone || null;
+            if (data.email !== undefined && (!order.email || order.email.trim() === '' || order.email === 'keine@angabe.de')) orderUpdate.email = data.email || null;
+            if (data.company !== undefined) orderUpdate.company = data.company || null;
+            if (data.street !== undefined && (!order.street || order.street.trim() === '')) orderUpdate.street = data.street || null;
+            if (data.houseNumber !== undefined && (!order.houseNumber || order.houseNumber.trim() === '')) orderUpdate.houseNumber = data.houseNumber || null;
+            if (data.zip !== undefined && (!order.zip || order.zip.trim() === '')) orderUpdate.zip = data.zip || null;
+            if (data.city !== undefined && (!order.city || order.city.trim() === '')) orderUpdate.city = data.city || null;
+            if (data.country !== undefined && (!order.country || order.country.trim() === '')) orderUpdate.country = data.country || null;
+
+            if (Object.keys(orderUpdate).length > 0) {
+              await db.update(orders).set(orderUpdate).where(eq(orders.orderId, orderId));
+              console.log(`[Customers] Synced ${Object.keys(orderUpdate).join(', ')} from customer #${id} to order ${orderId}`);
+            }
+          }
+        }
+      }
+
       return { success: true };
     }),
 
