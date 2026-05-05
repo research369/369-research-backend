@@ -45,6 +45,9 @@ const createOrderSchema = z.object({
   total: z.number(),
   paymentMethod: z.enum(["bunq", "creditCard", "wise", "SEPA", "Bar", "Kreditkarte", "PayPal", "Crypto", "Guthaben", "Sonstige"]),
   date: z.string(),
+  // Existing customer override (from KI-Erfassung manual match)
+  existingCustomerId: z.number().optional(),
+  internalNote: z.string().optional(),
   // Partner fields
   partnerCode: z.string().nullable().optional(),
   partnerNumber: z.string().nullable().optional(),
@@ -305,6 +308,7 @@ export const orderRouter = router({
         partnerDiscount: partnerDiscountAmount.toFixed(2),
         partnerCommission: partnerCommissionAmount.toFixed(2),
         creditUsed: creditUsed.toFixed(2),
+        internalNote: input.internalNote || null,
       });
 
       // Insert order items
@@ -327,12 +331,27 @@ export const orderRouter = router({
         const customerPhone = input.customer.phone.trim();
         const fullName = `${input.customer.firstName} ${input.customer.lastName}`;
 
-        // Try to find existing customer by email or phone
-        const allCustomers = await db.select().from(customers);
-        let existingCustomer = allCustomers.find(c =>
-          (c.email && c.email.toLowerCase() === customerEmail) ||
-          (c.phone && c.phone === customerPhone)
-        );
+        // If existingCustomerId is provided (from KI-Erfassung manual match), use it directly
+        let existingCustomer: any = null;
+        if (input.existingCustomerId) {
+          const [found] = await db.select().from(customers).where(eq(customers.id, input.existingCustomerId));
+          if (found) {
+            existingCustomer = found;
+            console.log(`[Customers] Using manually matched customer ID=${input.existingCustomerId} (${found.name})`);
+          }
+        }
+
+        if (!existingCustomer) {
+          // Try to find existing customer by email or phone
+          const allCustomers = await db.select().from(customers);
+          // Normalize phone for comparison
+          const normalizePhone = (p: string) => p.replace(/[\s\-\.\(\)]/g, '');
+          const normPhone = normalizePhone(customerPhone);
+          existingCustomer = allCustomers.find(c =>
+            (c.email && c.email.toLowerCase() === customerEmail && customerEmail !== 'keine@angabe.de') ||
+            (c.phone && normalizePhone(c.phone) === normPhone && normPhone.length >= 8)
+          );
+        }
 
         if (existingCustomer) {
           // Update existing customer with latest data
@@ -605,11 +624,12 @@ export const orderRouter = router({
       await db.update(orders).set(updateData).where(eq(orders.orderId, input.orderId));
 
       // Send shipping notification email when status changes to "versendet"
+      let emailResult: { sent: boolean; error?: string } = { sent: false };
       if (input.status === "versendet") {
         try {
           const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1);
           if (order) {
-            await sendShippingNotificationEmail({
+            emailResult = await sendShippingNotificationEmail({
               orderId: input.orderId,
               customerEmail: order.email,
               customerName: order.firstName,
@@ -617,12 +637,17 @@ export const orderRouter = router({
               trackingCarrier: input.trackingCarrier,
             });
           }
-        } catch (err) {
+        } catch (err: any) {
+          emailResult = { sent: false, error: err?.message || "Unbekannter Fehler" };
           console.warn("[Orders] Failed to send shipping notification:", err);
         }
       }
 
-      return { success: true };
+      return {
+        success: true,
+        emailSent: emailResult.sent,
+        emailError: emailResult.error,
+      };
     }),
 
   // ADMIN: Get order statistics

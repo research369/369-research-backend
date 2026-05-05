@@ -296,17 +296,70 @@ export async function sendAdminOrderNotification(data: OrderEmailData): Promise<
   }
 }
 
+// Validates that an email address is real and not a placeholder
+function isValidEmail(email: string | null | undefined): boolean {
+  if (!email) return false;
+  const trimmed = email.trim().toLowerCase();
+  // Reject known placeholder addresses
+  const placeholders = ["keine@angabe.de", "noreply@", "placeholder", "test@test", "example@"];
+  if (placeholders.some(p => trimmed.includes(p))) return false;
+  // Basic RFC 5322 check
+  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(trimmed);
+}
+
+// Sends a single Resend API request, returns { ok, status, body }
+async function resendSend(apiKey: string, payload: object): Promise<{ ok: boolean; status: number; body: string }> {
+  try {
+    const response = await fetch(RESEND_API_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    const body = await response.text();
+    return { ok: response.ok, status: response.status, body };
+  } catch (err: any) {
+    return { ok: false, status: 0, body: err?.message || "Network error" };
+  }
+}
+
+// Sends with up to `retries` attempts, waiting `delayMs` between attempts
+async function resendWithRetry(
+  apiKey: string,
+  payload: object,
+  retries = 2,
+  delayMs = 3000
+): Promise<{ ok: boolean; error?: string }> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    const result = await resendSend(apiKey, payload);
+    if (result.ok) return { ok: true };
+    console.warn(`[Email] Attempt ${attempt}/${retries} failed (HTTP ${result.status}): ${result.body}`);
+    if (attempt < retries) await new Promise(r => setTimeout(r, delayMs));
+  }
+  return { ok: false, error: `Failed after ${retries} attempts` };
+}
+
 export async function sendShippingNotificationEmail(data: {
   orderId: string;
   customerEmail: string;
   customerName: string;
   trackingNumber?: string;
   trackingCarrier?: string;
-}): Promise<boolean> {
+}): Promise<{ sent: boolean; error?: string }> {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
-    console.warn("[Email] RESEND_API_KEY not configured, skipping email");
-    return false;
+    const msg = "RESEND_API_KEY nicht konfiguriert";
+    console.warn(`[Email] ${msg}`);
+    return { sent: false, error: msg };
+  }
+
+  // Validate email before attempting send
+  if (!isValidEmail(data.customerEmail)) {
+    const msg = `Keine gültige E-Mail-Adresse hinterlegt ("${data.customerEmail}") – bitte im Kundendatensatz nachtragen`;
+    console.warn(`[Email] Shipping notification skipped for order ${data.orderId}: ${msg}`);
+    return { sent: false, error: msg };
   }
 
   const trackingInfo = data.trackingNumber
@@ -335,31 +388,19 @@ export async function sendShippingNotificationEmail(data: {
 </body>
 </html>`;
 
-  try {
-    const response = await fetch(RESEND_API_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        from: "369 Research <noreply@369research.eu>",
-        to: [data.customerEmail],
-        subject: `Deine Bestellung ${data.orderId} wurde versendet! – 369 Research`,
-        html,
-      }),
-    });
+  const result = await resendWithRetry(apiKey, {
+    from: "369 Research <noreply@369research.eu>",
+    to: [data.customerEmail],
+    subject: `Deine Bestellung ${data.orderId} wurde versendet! – 369 Research`,
+    html,
+  });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.warn(`[Email] Failed to send shipping notification (${response.status}):`, errorText);
-      return false;
-    }
-
-    console.log(`[Email] Shipping notification sent to ${data.customerEmail}`);
-    return true;
-  } catch (error) {
-    console.warn("[Email] Error sending shipping notification:", error);
-    return false;
+  if (result.ok) {
+    console.log(`[Email] Shipping notification sent to ${data.customerEmail} for order ${data.orderId}`);
+    return { sent: true };
+  } else {
+    const msg = result.error || "Unbekannter Fehler beim E-Mail-Versand";
+    console.warn(`[Email] Shipping notification failed for order ${data.orderId}: ${msg}`);
+    return { sent: false, error: msg };
   }
 }
