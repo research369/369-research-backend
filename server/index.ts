@@ -169,6 +169,102 @@ async function start() {
     console.warn("[Server] Failed to create invoices table:", err);
   }
 
+  // Auto-migrate: create batch tracking tables if not exists
+  try {
+    const pool = await getPool();
+    if (pool) {
+      await pool.query(`
+        DO $$ BEGIN
+          CREATE TYPE purchase_order_status AS ENUM (
+            'bestellt', 'versendet', 'teilweise_eingetroffen', 'vollständig', 'abgeschlossen'
+          );
+        EXCEPTION WHEN duplicate_object THEN null;
+        END $$;
+
+        CREATE TABLE IF NOT EXISTS purchase_orders (
+          id SERIAL PRIMARY KEY,
+          po_number VARCHAR(50) NOT NULL UNIQUE,
+          supplier_name VARCHAR(200) NOT NULL,
+          order_date TIMESTAMP NOT NULL,
+          shipping_date TIMESTAMP,
+          received_date TIMESTAMP,
+          tracking_number VARCHAR(100),
+          status purchase_order_status NOT NULL DEFAULT 'bestellt',
+          shipping_cost_usd DECIMAL(10,2),
+          total_usd DECIMAL(10,2),
+          usd_to_eur_rate DECIMAL(8,4),
+          notes TEXT,
+          screenshot_ref TEXT,
+          created_at TIMESTAMP DEFAULT NOW() NOT NULL,
+          updated_at TIMESTAMP DEFAULT NOW() NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS purchase_order_items (
+          id SERIAL PRIMARY KEY,
+          purchase_order_id INTEGER NOT NULL,
+          article_id INTEGER,
+          sku VARCHAR(50),
+          name VARCHAR(200) NOT NULL,
+          dosage VARCHAR(50),
+          supplier_code VARCHAR(100),
+          ordered_qty INTEGER NOT NULL DEFAULT 0,
+          received_qty INTEGER NOT NULL DEFAULT 0,
+          pack_quantity INTEGER,
+          pack_size INTEGER,
+          purchase_price_eur DECIMAL(10,4),
+          price_usd DECIMAL(10,2),
+          shipping_markup DECIMAL(5,4),
+          usd_to_eur_rate DECIMAL(8,4),
+          selling_price DECIMAL(10,2),
+          batch_number VARCHAR(100),
+          received_at TIMESTAMP,
+          created_at TIMESTAMP DEFAULT NOW() NOT NULL,
+          updated_at TIMESTAMP DEFAULT NOW() NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS batches (
+          id SERIAL PRIMARY KEY,
+          batch_number VARCHAR(100) NOT NULL,
+          article_id INTEGER NOT NULL,
+          article_name VARCHAR(200) NOT NULL,
+          purchase_order_id INTEGER,
+          purchase_order_item_id INTEGER,
+          supplier_name VARCHAR(200),
+          quantity INTEGER NOT NULL DEFAULT 0,
+          remaining_qty INTEGER NOT NULL DEFAULT 0,
+          received_date TIMESTAMP,
+          notes TEXT,
+          is_active INTEGER DEFAULT 1 NOT NULL,
+          created_at TIMESTAMP DEFAULT NOW() NOT NULL,
+          updated_at TIMESTAMP DEFAULT NOW() NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS order_item_batches (
+          id SERIAL PRIMARY KEY,
+          order_id VARCHAR(32) NOT NULL,
+          order_item_id INTEGER,
+          article_id INTEGER,
+          article_name VARCHAR(200) NOT NULL,
+          batch_id INTEGER,
+          batch_number VARCHAR(100) NOT NULL,
+          quantity INTEGER NOT NULL DEFAULT 1,
+          assigned_by VARCHAR(100),
+          assigned_at TIMESTAMP DEFAULT NOW() NOT NULL,
+          created_at TIMESTAMP DEFAULT NOW() NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_po_items_po_id ON purchase_order_items(purchase_order_id);
+        CREATE INDEX IF NOT EXISTS idx_batches_article_id ON batches(article_id);
+        CREATE INDEX IF NOT EXISTS idx_batches_batch_number ON batches(batch_number);
+        CREATE INDEX IF NOT EXISTS idx_order_item_batches_order_id ON order_item_batches(order_id);
+        CREATE INDEX IF NOT EXISTS idx_order_item_batches_article_id ON order_item_batches(article_id);
+      `);
+      console.log("[Server] Batch tracking tables ready");
+    }
+  } catch (err) {
+    console.warn("[Server] Failed to create batch tracking tables:", err);
+  }
+
   app.listen(port, "0.0.0.0", () => {
     console.log(`[Server] 369 Research Backend running on port ${port}`);
   });

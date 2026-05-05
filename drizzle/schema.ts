@@ -490,3 +490,147 @@ export const invoices = pgTable("invoices", {
 
 export type Invoice = typeof invoices.$inferSelect;
 export type InsertInvoice = typeof invoices.$inferInsert;
+
+/**
+ * Purchase Orders (Wareneingänge) – stored in DB for persistence across devices
+ * Replaces the previous localStorage-based system
+ */
+export const purchaseOrderStatusEnum = pgEnum("purchase_order_status", [
+  "bestellt",
+  "versendet",
+  "teilweise_eingetroffen",
+  "vollständig",
+  "abgeschlossen",
+]);
+
+export const purchaseOrders = pgTable("purchase_orders", {
+  id: serial("id").primaryKey(),
+  poNumber: varchar("po_number", { length: 50 }).notNull().unique(), // e.g. "PO-2026-001"
+
+  supplierName: varchar("supplier_name", { length: 200 }).notNull(),
+  orderDate: timestamp("order_date").notNull(),
+  shippingDate: timestamp("shipping_date"),
+  receivedDate: timestamp("received_date"),
+  trackingNumber: varchar("tracking_number", { length: 100 }),
+
+  status: purchaseOrderStatusEnum("status").notNull().default("bestellt"),
+
+  // Financials
+  shippingCostUsd: decimal("shipping_cost_usd", { precision: 10, scale: 2 }),
+  totalUsd: decimal("total_usd", { precision: 10, scale: 2 }),
+  usdToEurRate: decimal("usd_to_eur_rate", { precision: 8, scale: 4 }),
+
+  notes: text("notes"),
+
+  // Original screenshot stored as reference (base64 or URL)
+  screenshotRef: text("screenshot_ref"),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type PurchaseOrder = typeof purchaseOrders.$inferSelect;
+export type InsertPurchaseOrder = typeof purchaseOrders.$inferInsert;
+
+/**
+ * Purchase Order Items – line items per purchase order
+ */
+export const purchaseOrderItems = pgTable("purchase_order_items", {
+  id: serial("id").primaryKey(),
+  purchaseOrderId: integer("purchase_order_id").notNull(), // FK to purchaseOrders.id
+
+  // Article link
+  articleId: integer("article_id"),                        // FK to articles.id (nullable if new)
+  sku: varchar("sku", { length: 50 }),
+  name: varchar("name", { length: 200 }).notNull(),
+  dosage: varchar("dosage", { length: 50 }),
+  supplierCode: varchar("supplier_code", { length: 100 }), // Händler-Kürzel
+
+  // Quantities
+  orderedQty: integer("ordered_qty").notNull().default(0),
+  receivedQty: integer("received_qty").notNull().default(0),
+  packQuantity: integer("pack_quantity"),
+  packSize: integer("pack_size"),
+
+  // Pricing
+  purchasePriceEur: decimal("purchase_price_eur", { precision: 10, scale: 4 }),
+  priceUsd: decimal("price_usd", { precision: 10, scale: 2 }),
+  shippingMarkup: decimal("shipping_markup", { precision: 5, scale: 4 }),
+  usdToEurRate: decimal("usd_to_eur_rate", { precision: 8, scale: 4 }),
+  sellingPrice: decimal("selling_price", { precision: 10, scale: 2 }),
+
+  // Batch number assigned at goods receipt – editable by user
+  batchNumber: varchar("batch_number", { length: 100 }),
+
+  receivedAt: timestamp("received_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type PurchaseOrderItem = typeof purchaseOrderItems.$inferSelect;
+export type InsertPurchaseOrderItem = typeof purchaseOrderItems.$inferInsert;
+
+/**
+ * Batches – all available batches per article
+ * Created when goods are received (Wareneingang) and a batch number is assigned.
+ * Used to track which batch a customer received.
+ */
+export const batches = pgTable("batches", {
+  id: serial("id").primaryKey(),
+  batchNumber: varchar("batch_number", { length: 100 }).notNull(),
+
+  // Linked article
+  articleId: integer("article_id").notNull(),              // FK to articles.id
+  articleName: varchar("article_name", { length: 200 }).notNull(),
+
+  // Source
+  purchaseOrderId: integer("purchase_order_id"),           // FK to purchaseOrders.id
+  purchaseOrderItemId: integer("purchase_order_item_id"),  // FK to purchaseOrderItems.id
+  supplierName: varchar("supplier_name", { length: 200 }),
+
+  // Quantity in this batch
+  quantity: integer("quantity").notNull().default(0),
+  remainingQty: integer("remaining_qty").notNull().default(0),
+
+  receivedDate: timestamp("received_date"),
+  notes: text("notes"),
+
+  isActive: integer("is_active").default(1).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type Batch = typeof batches.$inferSelect;
+export type InsertBatch = typeof batches.$inferInsert;
+
+/**
+ * Order Item Batches – which batch was used for which order item
+ * INTERNAL ONLY – never shown to customers, not in invoices, not in emails
+ */
+export const orderItemBatches = pgTable("order_item_batches", {
+  id: serial("id").primaryKey(),
+
+  // Order reference
+  orderId: varchar("order_id", { length: 32 }).notNull(),  // FK to orders.orderId
+  orderItemId: integer("order_item_id"),                   // FK to orderItems.id (optional)
+
+  // Article
+  articleId: integer("article_id"),
+  articleName: varchar("article_name", { length: 200 }).notNull(),
+
+  // Batch assigned
+  batchId: integer("batch_id"),                            // FK to batches.id
+  batchNumber: varchar("batch_number", { length: 100 }).notNull(),
+
+  // Quantity from this batch used in this order
+  quantity: integer("quantity").notNull().default(1),
+
+  // Who assigned it and when
+  assignedBy: varchar("assigned_by", { length: 100 }),
+  assignedAt: timestamp("assigned_at").defaultNow().notNull(),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export type OrderItemBatch = typeof orderItemBatches.$inferSelect;
+export type InsertOrderItemBatch = typeof orderItemBatches.$inferInsert;
