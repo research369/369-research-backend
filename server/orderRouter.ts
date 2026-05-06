@@ -347,10 +347,21 @@ export const orderRouter = router({
           // Normalize phone for comparison
           const normalizePhone = (p: string) => p.replace(/[\s\-\.\(\)]/g, '');
           const normPhone = normalizePhone(customerPhone);
+          const PLACEHOLDER_EMAILS_MATCH = new Set(['keine@angabe.de', 'noemail@noemail.de', 'no@email.de']);
+          const emailUsableForMatch = customerEmail && !PLACEHOLDER_EMAILS_MATCH.has(customerEmail.toLowerCase());
+          // Phone matching: only use if the number is UNIQUE (exactly one customer has it)
+          // This prevents false positives when multiple customers share the same phone number
+          const phoneMatchCandidates = normPhone.length >= 8
+            ? allCustomers.filter(c => c.phone && normalizePhone(c.phone) === normPhone)
+            : [];
+          const phoneIsUnique = phoneMatchCandidates.length === 1;
           existingCustomer = allCustomers.find(c =>
-            (c.email && c.email.toLowerCase() === customerEmail && customerEmail !== 'keine@angabe.de') ||
-            (c.phone && normalizePhone(c.phone) === normPhone && normPhone.length >= 8)
+            (emailUsableForMatch && c.email && c.email.toLowerCase() === customerEmail) ||
+            (phoneIsUnique && c.phone && normalizePhone(c.phone) === normPhone && normPhone.length >= 8)
           );
+          if (!phoneIsUnique && phoneMatchCandidates.length > 1) {
+            console.warn(`[Customers] Phone ${normPhone} matches ${phoneMatchCandidates.length} customers – skipping phone-based match to avoid false assignment`);
+          }
         }
 
         if (existingCustomer) {
