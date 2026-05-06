@@ -1029,4 +1029,34 @@ export const orderRouter = router({
 
       return { success: true };
     }),
+
+  // Reassign order to a different customer (admin only)
+  reassignCustomer: adminProcedure
+    .input(z.object({
+      orderId: z.string(),
+      newCustomerId: z.number(),
+    }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+      const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1);
+      if (!order) throw new Error("Bestellung nicht gefunden");
+      const oldCustomerId = order.customerId;
+      await db.update(orders)
+        .set({ customerId: input.newCustomerId, updatedAt: new Date() })
+        .where(eq(orders.orderId, input.orderId));
+      // Rebuild stats for both affected customers
+      for (const cid of [oldCustomerId, input.newCustomerId] as number[]) {
+        if (!cid) continue;
+        const custOrders = await db.select().from(orders).where(sql`${orders.customerId} = ${cid}`);
+        const totalOrders = custOrders.length;
+        const totalSpent = custOrders.reduce((s, o) => s + parseFloat(o.total), 0);
+        const dates = custOrders.map(o => o.orderDate).filter(Boolean) as Date[];
+        const firstOrderDate = dates.length > 0 ? new Date(Math.min(...dates.map(d => d.getTime()))) : null;
+        const lastOrderDate = dates.length > 0 ? new Date(Math.max(...dates.map(d => d.getTime()))) : null;
+        await db.update(customers).set({ totalOrders, totalSpent: totalSpent.toFixed(2), firstOrderDate, lastOrderDate, updatedAt: new Date() }).where(sql`${customers.id} = ${cid}`);
+      }
+      console.log(`[Orders] Reassigned order ${input.orderId} from customer ${oldCustomerId} to ${input.newCustomerId}`);
+      return { success: true, oldCustomerId, newCustomerId: input.newCustomerId };
+    }),
 });
