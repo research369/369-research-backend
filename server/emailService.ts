@@ -341,6 +341,71 @@ async function resendWithRetry(
   return { ok: false, error: `Failed after ${retries} attempts` };
 }
 
+export async function sendPackingNotificationEmail(data: {
+  orderId: string;
+  customerEmail: string;
+  customerName: string;
+}): Promise<{ sent: boolean; error?: string }> {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    const msg = "RESEND_API_KEY nicht konfiguriert";
+    console.warn(`[Email] ${msg}`);
+    return { sent: false, error: msg };
+  }
+
+  if (!isValidEmail(data.customerEmail)) {
+    const msg = `Keine gültige E-Mail-Adresse hinterlegt ("${data.customerEmail}") – bitte im Kundendatensatz nachtragen`;
+    console.warn(`[Email] Packing notification skipped for order ${data.orderId}: ${msg}`);
+    return { sent: false, error: msg };
+  }
+
+  const html = `
+<!DOCTYPE html>
+<html lang="de">
+<head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background-color:#f9fafb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <div style="max-width:600px;margin:0 auto;padding:20px;">
+    <div style="background:linear-gradient(135deg,#0f172a,#1e293b);border-radius:12px 12px 0 0;padding:32px;text-align:center;">
+      <h1 style="color:#ffffff;margin:0;font-size:24px;">369 Research</h1>
+      <p style="color:#94a3b8;margin:8px 0 0;font-size:14px;">Versandvorbereitung</p>
+    </div>
+    <div style="background:#ffffff;padding:32px;border:1px solid #e5e7eb;border-radius:0 0 12px 12px;">
+      <div style="text-align:center;margin-bottom:24px;">
+        <div style="font-size:48px;margin-bottom:12px;">📦</div>
+        <h2 style="font-size:22px;color:#111827;margin:0 0 8px;">Dein Paket wird gepackt!</h2>
+        <p style="font-size:15px;color:#374151;line-height:1.6;margin:0;">Hallo ${data.customerName},<br><br>wir haben deine Bestellung <strong>${data.orderId}</strong> erhalten und packen dein Paket gerade sorgfältig für den Versand. 🔬✨</p>
+      </div>
+      <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:20px;margin:24px 0;">
+        <p style="margin:0;font-size:14px;color:#166534;line-height:1.8;">
+          📦 <strong>Paket wird gepackt</strong> – deine Bestellung wird gerade vorbereitet<br>
+          🚚 <strong>Versand</strong> – du erhältst eine weitere Benachrichtigung sobald dein Paket unterwegs ist<br>
+          📬 <strong>Tracking</strong> – mit der Versandbestätigung bekommst du deine Sendungsnummer
+        </p>
+      </div>
+      <p style="font-size:13px;color:#6b7280;margin-top:20px;text-align:center;">Bei Fragen: WhatsApp +4915510063537</p>
+    </div>
+    <div style="text-align:center;padding:16px;font-size:12px;color:#9ca3af;">369 Research · Forschungsmaterialien</div>
+  </div>
+</body>
+</html>`;
+
+  const result = await resendWithRetry(apiKey, {
+    from: "369 Research <noreply@369research.eu>",
+    to: [data.customerEmail],
+    subject: `Deine Bestellung ${data.orderId} wird gepackt 📦 – 369 Research`,
+    html,
+  });
+
+  if (result.ok) {
+    console.log(`[Email] Packing notification sent to ${data.customerEmail} for order ${data.orderId}`);
+    return { sent: true };
+  } else {
+    const msg = result.error || "Unbekannter Fehler beim E-Mail-Versand";
+    console.warn(`[Email] Packing notification failed for order ${data.orderId}: ${msg}`);
+    return { sent: false, error: msg };
+  }
+}
+
 export async function sendShippingNotificationEmail(data: {
   orderId: string;
   customerEmail: string;

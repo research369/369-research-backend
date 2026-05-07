@@ -10,7 +10,7 @@ import { router, publicProcedure, adminProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
 import { orders, orderItems, articles, stockHistory, customers, customerCommunications } from "../drizzle/schema.js";
 import { getIncomingPayments, matchPaymentToOrder, intelligentMatch, type MatchResult } from "./bunqService.js";
-import { sendOrderConfirmationEmail, sendShippingNotificationEmail, sendAdminOrderNotification } from "./emailService.js";
+import { sendOrderConfirmationEmail, sendShippingNotificationEmail, sendAdminOrderNotification, sendPackingNotificationEmail } from "./emailService.js";
 import { partners, partnerTransactions } from "../drizzle/schema.js";
 import { sql } from "drizzle-orm";
 
@@ -1039,6 +1039,69 @@ export const orderRouter = router({
       console.log(`[Orders] Updated order ${input.orderId} – ${input.total.toFixed(2)} EUR – ${input.items.length} items`);
 
       return { success: true };
+    }),
+
+  // Send packing notification to customer (WhatsApp link + Email)
+  sendPackingNotification: adminProcedure
+    .input(z.object({
+      orderId: z.string(),
+      sendEmail: z.boolean().default(true),
+    }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      // Bestellung laden
+      const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1);
+      if (!order) throw new Error("Bestellung nicht gefunden");
+
+      const customerName = `${order.firstName} ${order.lastName}`.trim();
+      const results: { channel: string; success: boolean; error?: string }[] = [];
+
+      // E-Mail senden
+      if (input.sendEmail && order.email) {
+        const emailResult = await sendPackingNotificationEmail({
+          orderId: order.orderId,
+          customerEmail: order.email,
+          customerName,
+        });
+        results.push({ channel: "email", success: emailResult.sent, error: emailResult.error });
+
+        // Kommunikation protokollieren
+        if (order.customerId) {
+          try {
+            await db.insert(customerCommunications).values({
+              customerId: order.customerId,
+              type: "email",
+              status: emailResult.sent ? "sent" : "failed",
+              subject: `Paket wird gepackt – Bestellung ${order.orderId}`,
+              body: `Packing-Benachrichtigung per E-Mail an ${order.email}`,
+              recipientEmail: order.email,
+              senderName: "369 Research",
+              orderId: order.orderId,
+              createdBy: "system",
+            });
+          } catch (logErr) {
+            console.warn("[Orders] Could not log packing email communication:", logErr);
+          }
+        }
+      } else if (input.sendEmail && !order.email) {
+        results.push({ channel: "email", success: false, error: "Keine E-Mail-Adresse hinterlegt" });
+      }
+
+      // WhatsApp-Nachricht generieren (Vorschau für Frontend)
+      const phone = order.phone || "";
+      const waMessage = `Hallo ${customerName} \ud83d\udc4b\n\ndein Paket f\u00fcr Bestellung *${order.orderId}* wird gerade gepackt und f\u00fcr den Versand vorbereitet! \ud83d\udce6\ud83d\udd2c\n\nSobald dein Paket auf dem Weg zu dir ist, bekommst du von uns eine weitere Nachricht mit deiner Sendungsnummer. \ud83d\ude9a\ud83d\udcec\n\nVielen Dank f\u00fcr dein Vertrauen! \ud83d\ude4f\n\n369 Research \ud83d\udd2c`;
+
+      console.log(`[Orders] Packing notification for ${order.orderId}: email=${input.sendEmail}, phone=${phone}`);
+      return {
+        success: true,
+        results,
+        whatsappPhone: phone,
+        whatsappMessage: waMessage,
+        customerName,
+        orderId: order.orderId,
+      };
     }),
 
   // Reassign order to a different customer (admin only)
