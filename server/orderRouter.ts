@@ -24,6 +24,7 @@ const createOrderSchema = z.object({
     price: z.number(),
     quantity: z.number(),
     type: z.string(),
+    shopProductId: z.string().optional(), // product id from shop (e.g. '3g-triple-g')
   })),
   customer: z.object({
     firstName: z.string(),
@@ -224,17 +225,26 @@ export const orderRouter = router({
       // ── Stock check: verify all peptide items are in stock before creating order ──
       const allArticlesForCheck = await db.select().from(articles).where(eq(articles.isActive, 1));
       const outOfStockItems: string[] = [];
-      for (const item of input.items) {
-        if (item.type !== 'peptide') continue;
+
+      // Helper: find articles matching a shop item by shopProductId + dosage
+      const findMatchingArticles = (item: { name: string; dosage?: string; shopProductId?: string }, allArts: typeof allArticlesForCheck) => {
         const dosageNorm = (item.dosage || '').toLowerCase().trim();
-        // Find articles matching this product (by shopProductId) and dosage
-        const matchingArticles = allArticlesForCheck.filter(a => {
+        const itemShopId = (item.shopProductId || '').toLowerCase().trim();
+        return allArts.filter(a => {
           if (!a.shopProductId) return false;
+          // Primary match: shopProductId must match exactly (if provided)
+          if (itemShopId && a.shopProductId.toLowerCase() !== itemShopId) return false;
+          // Secondary match: dosage must match
           const parenMatch = a.name.match(/\(([^)]+)\)\s*$/);
           const noParenMatch = a.name.match(/\b(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu))\s*$/i);
           const articleDosage = parenMatch ? parenMatch[1].trim().toLowerCase() : noParenMatch ? noParenMatch[1].trim().toLowerCase() : '';
           return articleDosage === dosageNorm;
         });
+      };
+
+      for (const item of input.items) {
+        if (item.type !== 'peptide') continue;
+        const matchingArticles = findMatchingArticles(item, allArticlesForCheck);
         if (matchingArticles.length > 0) {
           const totalStock = matchingArticles.reduce((sum, a) => sum + (a.stock ?? 0), 0);
           if (totalStock < item.quantity) {
@@ -250,14 +260,7 @@ export const orderRouter = router({
       // ── Stock deduction: reduce stock for all ordered peptide items ──
       for (const item of input.items) {
         if (item.type !== 'peptide') continue;
-        const dosageNorm = (item.dosage || '').toLowerCase().trim();
-        const matchingArticles = allArticlesForCheck.filter(a => {
-          if (!a.shopProductId) return false;
-          const parenMatch = a.name.match(/\(([^)]+)\)\s*$/);
-          const noParenMatch = a.name.match(/\b(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu))\s*$/i);
-          const articleDosage = parenMatch ? parenMatch[1].trim().toLowerCase() : noParenMatch ? noParenMatch[1].trim().toLowerCase() : '';
-          return articleDosage === dosageNorm;
-        });
+        const matchingArticles = findMatchingArticles(item, allArticlesForCheck);
         let remainingToDeduct = item.quantity;
         for (const article of matchingArticles) {
           if (remainingToDeduct <= 0) break;
