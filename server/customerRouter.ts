@@ -787,7 +787,7 @@ export const customerRouter = router({
         email: (o.email && !PLACEHOLDER_EMAILS.has(o.email.toLowerCase().trim())) ? o.email : null,
         phone: o.phone || null,
         orderCount: grpOrders.length,
-        totalSpent: grpOrders.reduce((s, x) => s + parseFloat(x.total || '0'), 0).toFixed(2),
+        totalSpent: grpOrders.filter(x => ['bezahlt','gepackt','versendet','zugestellt'].includes(x.status)).reduce((s, x) => s + parseFloat(x.total || '0'), 0).toFixed(2),
         city: o.city || null,
         country: o.country || null,
         sampleOrderId: o.orderId,
@@ -827,8 +827,9 @@ export const customerRouter = router({
 
       const emailKey = (o.email || '').toLowerCase().trim();
       const emailUsable = emailKey && !PLACEHOLDER_EMAILS.has(emailKey);
+      const PAID_STATUSES = new Set(['bezahlt', 'gepackt', 'versendet', 'zugestellt']);
       const totalOrders = grpOrders.length;
-      const totalSpent = grpOrders.reduce((s, x) => s + parseFloat(x.total || '0'), 0);
+      const totalSpent = grpOrders.filter(x => PAID_STATUSES.has(x.status)).reduce((s, x) => s + parseFloat(x.total || '0'), 0);
       const dates = grpOrders.map(x => x.orderDate).filter(Boolean).sort();
 
       try {
@@ -939,8 +940,9 @@ export const customerRouter = router({
         return true;
       });
 
+      const PAID_STATUSES_REBUILD = new Set(['bezahlt', 'gepackt', 'versendet', 'zugestellt']);
       const totalOrders = uniqueOrders.length;
-      const totalSpent = uniqueOrders.reduce((sum, o) => sum + parseFloat(o.total), 0);
+      const totalSpent = uniqueOrders.filter(o => PAID_STATUSES_REBUILD.has(o.status)).reduce((sum, o) => sum + parseFloat(o.total), 0);
       const orderDates = uniqueOrders.map(o => o.orderDate).filter(Boolean) as Date[];
       const firstOrderDate = orderDates.length > 0 ? new Date(Math.min(...orderDates.map(d => d.getTime()))) : null;
       const lastOrderDate = orderDates.length > 0 ? new Date(Math.max(...orderDates.map(d => d.getTime()))) : null;
