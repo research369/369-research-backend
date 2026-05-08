@@ -350,7 +350,7 @@ export const orderRouter = router({
           // Normalize phone for comparison
           const normalizePhone = (p: string) => p.replace(/[\s\-\.\(\)]/g, '');
           const normPhone = normalizePhone(customerPhone);
-          const PLACEHOLDER_EMAILS_MATCH = new Set(['keine@angabe.de', 'noemail@noemail.de', 'no@email.de']);
+          const PLACEHOLDER_EMAILS_MATCH = new Set(['keine@angabe.de', 'noemail@noemail.de', 'no@email.de', 'otc@369research.eu']);
           const emailUsableForMatch = customerEmail && !PLACEHOLDER_EMAILS_MATCH.has(customerEmail.toLowerCase());
           // Phone matching: only use if the number is UNIQUE (exactly one customer has it)
           // This prevents false positives when multiple customers share the same phone number
@@ -541,29 +541,24 @@ export const orderRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
-      let query = db.select().from(orders).orderBy(desc(orders.orderDate));
-
-      const allOrders = await query;
-
-      // Filter by status
-      let filtered = allOrders;
+      // Build WHERE conditions directly in DB – avoids loading all rows into JS
+      const conditions: any[] = [];
       if (input?.status && input.status !== "alle") {
-        filtered = filtered.filter(o => o.status === input.status);
+        conditions.push(eq(orders.status, input.status as any));
       }
-
-      // Search
       if (input?.search) {
-        const s = input.search.toLowerCase();
-        filtered = filtered.filter(o =>
-          o.orderId.toLowerCase().includes(s) ||
-          o.firstName.toLowerCase().includes(s) ||
-          o.lastName.toLowerCase().includes(s) ||
-          o.email.toLowerCase().includes(s)
+        const s = `%${input.search.toLowerCase()}%`;
+        conditions.push(
+          sql`(LOWER(${orders.orderId}) LIKE ${s} OR LOWER(${orders.firstName}) LIKE ${s} OR LOWER(${orders.lastName}) LIKE ${s} OR LOWER(${orders.email}) LIKE ${s})`
         );
       }
 
-      // Get items for each order
-      const orderIds = filtered.map(o => o.orderId);
+      const filteredOrders = conditions.length > 0
+        ? await db.select().from(orders).where(and(...conditions)).orderBy(desc(orders.orderDate))
+        : await db.select().from(orders).orderBy(desc(orders.orderDate));
+
+      // Get items for all returned orders in a single query
+      const orderIds = filteredOrders.map(o => o.orderId);
       let items: any[] = [];
       if (orderIds.length > 0) {
         items = await db.select().from(orderItems).where(
@@ -572,7 +567,7 @@ export const orderRouter = router({
       }
 
       // Combine
-      const result = filtered.map(o => ({
+      const result = filteredOrders.map(o => ({
         ...o,
         subtotal: parseFloat(o.subtotal),
         discount: parseFloat(o.discount),

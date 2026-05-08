@@ -156,7 +156,7 @@ export const customerRouter = router({
       // Placeholder emails/phones are excluded from matching to avoid false positives
       const PLACEHOLDER_EMAILS_GET = new Set([
         'keine@angabe.de', 'noemail@noemail.de', 'no@email.de', 'noreply@noreply.de',
-        'placeholder@placeholder.de', 'test@test.de', 'info@info.de',
+        'placeholder@placeholder.de', 'test@test.de', 'info@info.de', 'otc@369research.eu',
       ]);
       const allOrders = await db.select().from(orders).orderBy(desc(orders.orderDate));
       const emailKey = customer.email?.toLowerCase().trim() || '';
@@ -812,7 +812,7 @@ export const customerRouter = router({
     // Placeholder/dummy emails that should NOT be used for matching
     const PLACEHOLDER_EMAILS = new Set([
       'keine@angabe.de', 'noemail@noemail.de', 'no@email.de', 'noreply@noreply.de',
-      'placeholder@placeholder.de', 'test@test.de', 'info@info.de',
+      'placeholder@placeholder.de', 'test@test.de', 'info@info.de', 'otc@369research.eu',
     ]);
     // Placeholder phones
     const PLACEHOLDER_PHONES = new Set(['0000000', '00000000000', '']);
