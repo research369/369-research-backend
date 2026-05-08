@@ -713,93 +713,168 @@ export const customerRouter = router({
   }),
 
   // Backfill: Create customers from existing orders
-  backfillFromOrders: adminProcedure.mutation(async () => {
+  backfillFromOrders: adminProcedure
+    .input(z.object({ dryRun: z.boolean().optional() }).optional())
+    .mutation(async ({ input }) => {
     const db = await getDb();
     if (!db) throw new Error("Database not available");
+
+    const PLACEHOLDER_EMAILS = new Set([
+      'keine@angabe.de', 'noemail@noemail.de', 'no@email.de', 'noreply@noreply.de',
+      'placeholder@placeholder.de', 'test@test.de', 'info@info.de', 'otc@369research.eu',
+    ]);
+    const normalizePhone = (p: string) => (p || '').replace(/[\s\-\.\(\)]/g, '');
 
     const allOrders = await db.select().from(orders).orderBy(orders.orderDate);
     const existingCustomers = await db.select().from(customers);
 
-    let created = 0;
-    let linked = 0;
-
-    for (const order of allOrders) {
-      const email = order.email.toLowerCase().trim();
-      const phone = order.phone.trim();
-      const fullName = `${order.firstName} ${order.lastName}`;
-
-      // Check if customer already exists
-      let existing = existingCustomers.find(c =>
-        (c.email && c.email.toLowerCase() === email) ||
-        (c.phone && c.phone === phone)
-      );
-
-      if (existing) {
-        // Link order if not already linked
-        if (!order.customerId) {
-          await db.update(orders).set({ customerId: existing.id }).where(eq(orders.id, order.id));
-          linked++;
-        }
-        // Update totals
-        const orderTotal = parseFloat(order.total);
-        await db.update(customers).set({
-          totalOrders: existing.totalOrders + 1,
-          totalSpent: (parseFloat(existing.totalSpent) + orderTotal).toFixed(2),
-          lastOrderDate: order.orderDate,
-          firstName: order.firstName,
-          lastName: order.lastName,
-          street: order.street,
-          houseNumber: order.houseNumber,
-          zip: order.zip,
-          city: order.city,
-          country: order.country,
-          updatedAt: new Date(),
-        }).where(eq(customers.id, existing.id));
-        // Update local reference
-        existing.totalOrders += 1;
-        existing.totalSpent = (parseFloat(existing.totalSpent) + orderTotal).toFixed(2);
-      } else {
-        // Generate customer number
-        const maxResult = await db.execute(sql`SELECT COALESCE(MAX(CAST(customer_number AS INTEGER)), 1209) as max_num FROM customers WHERE customer_number ~ '^[0-9]+$'`);
-        const rows = maxResult as any;
-        let nextNum = 1210;
-        if (rows && rows.length > 0 && rows[0].max_num) {
-          nextNum = parseInt(rows[0].max_num) + 1;
-        } else if (rows?.rows && rows.rows.length > 0) {
-          nextNum = parseInt(rows.rows[0].max_num) + 1;
-        }
-        if (nextNum < 1210) nextNum = 1210;
-
-        const [newCustomer] = await db.insert(customers).values({
-          customerNumber: String(nextNum),
-          name: fullName,
-          firstName: order.firstName,
-          lastName: order.lastName,
-          phone: phone || null,
-          email: email || null,
-          company: order.company || null,
-          street: order.street,
-          houseNumber: order.houseNumber,
-          zip: order.zip,
-          city: order.city,
-          country: order.country,
-          source: "backfill",
-          totalOrders: 1,
-          totalSpent: order.total,
-          firstOrderDate: order.orderDate,
-          lastOrderDate: order.orderDate,
-        }).returning();
-
-        // Link order
-        await db.update(orders).set({ customerId: newCustomer.id }).where(eq(orders.id, order.id));
-
-        existingCustomers.push(newCustomer);
-        created++;
-        linked++;
+    // Build lookup maps from existing customers (ignore placeholder emails)
+    const emailToCustomer: Record<string, typeof existingCustomers[0]> = {};
+    const phoneToCustomer: Record<string, typeof existingCustomers[0]> = {};
+    for (const c of existingCustomers) {
+      if (c.email) {
+        const k = c.email.toLowerCase().trim();
+        if (!PLACEHOLDER_EMAILS.has(k)) emailToCustomer[k] = c;
+      }
+      if (c.phone) {
+        const k = normalizePhone(c.phone);
+        if (k.length >= 7) phoneToCustomer[k] = c;
       }
     }
 
-    return { success: true, created, linked, totalOrders: allOrders.length };
+    // Group orders by identity (email preferred, then phone, then single order)
+    const groups: Record<string, typeof allOrders> = {};
+    for (const order of allOrders) {
+      const emailKey = (order.email || '').toLowerCase().trim();
+      const phoneKey = normalizePhone(order.phone || '');
+      const emailUsable = emailKey && !PLACEHOLDER_EMAILS.has(emailKey);
+      const phoneUsable = phoneKey.length >= 7;
+
+      // Already has a customer linked? Skip for new-customer creation but still link
+      if (order.customerId) continue;
+
+      // Existing customer match by email
+      if (emailUsable && emailToCustomer[emailKey]) continue;
+      // Existing customer match by phone (only if no usable email)
+      if (!emailUsable && phoneUsable && phoneToCustomer[phoneKey]) continue;
+
+      const gk = emailUsable ? `e:${emailKey}` : (phoneUsable ? `p:${phoneKey}` : `o:${order.orderId}`);
+      if (!groups[gk]) groups[gk] = [];
+      groups[gk].push(order);
+    }
+
+    // Also collect orders that need linking to existing customers
+    const toLink: Array<{ orderId: number; customerId: number }> = [];
+    for (const order of allOrders) {
+      if (order.customerId) continue;
+      const emailKey = (order.email || '').toLowerCase().trim();
+      const phoneKey = normalizePhone(order.phone || '');
+      const emailUsable = emailKey && !PLACEHOLDER_EMAILS.has(emailKey);
+      const phoneUsable = phoneKey.length >= 7;
+      const matchedCustomer = (emailUsable && emailToCustomer[emailKey]) ||
+        (!emailUsable && phoneUsable && phoneToCustomer[phoneKey]);
+      if (matchedCustomer) {
+        toLink.push({ orderId: order.id, customerId: matchedCustomer.id });
+      }
+    }
+
+    // Build preview
+    const preview = Object.entries(groups).map(([gk, grpOrders]) => {
+      const o = grpOrders[grpOrders.length - 1]; // most recent order
+      return {
+        groupKey: gk,
+        name: `${o.firstName} ${o.lastName}`.trim(),
+        email: (o.email && !PLACEHOLDER_EMAILS.has(o.email.toLowerCase().trim())) ? o.email : null,
+        phone: o.phone || null,
+        orderCount: grpOrders.length,
+        totalSpent: grpOrders.reduce((s, x) => s + parseFloat(x.total || '0'), 0).toFixed(2),
+        city: o.city || null,
+        country: o.country || null,
+        sampleOrderId: o.orderId,
+      };
+    }).filter(p => p.name.trim().length > 0);
+
+    if (input?.dryRun) {
+      return {
+        success: true,
+        dryRun: true,
+        wouldCreate: preview.length,
+        wouldLink: toLink.length,
+        preview,
+        totalOrders: allOrders.length,
+        created: 0,
+        linked: 0,
+      };
+    }
+
+    // Execute backfill
+    let created = 0;
+    let linked = 0;
+
+    // Get starting customer number
+    const maxResult = await db.execute(sql`SELECT COALESCE(MAX(CAST(customer_number AS INTEGER)), 1209) as max_num FROM customers WHERE customer_number ~ '^[0-9]+$'`);
+    const maxRows = maxResult as any;
+    let nextNum = 1210;
+    const rawMax = maxRows?.rows?.[0]?.max_num ?? maxRows?.[0]?.max_num;
+    if (rawMax) nextNum = Math.max(1210, parseInt(rawMax) + 1);
+
+    for (const [, grpOrders] of Object.entries(groups)) {
+      const o = grpOrders[grpOrders.length - 1];
+      const firstName = o.firstName || '';
+      const lastName = o.lastName || '';
+      const name = `${firstName} ${lastName}`.trim();
+      if (!name) continue;
+
+      const emailKey = (o.email || '').toLowerCase().trim();
+      const emailUsable = emailKey && !PLACEHOLDER_EMAILS.has(emailKey);
+      const totalOrders = grpOrders.length;
+      const totalSpent = grpOrders.reduce((s, x) => s + parseFloat(x.total || '0'), 0);
+      const dates = grpOrders.map(x => x.orderDate).filter(Boolean).sort();
+
+      try {
+        const [newCustomer] = await db.insert(customers).values({
+          customerNumber: String(nextNum),
+          name,
+          firstName: firstName || null,
+          lastName: lastName || null,
+          phone: o.phone || null,
+          email: emailUsable ? o.email : null,
+          company: o.company || null,
+          street: o.street || null,
+          houseNumber: o.houseNumber || null,
+          zip: o.zip || null,
+          city: o.city || null,
+          country: o.country || null,
+          source: 'backfill',
+          totalOrders,
+          totalSpent: totalSpent.toFixed(2),
+          firstOrderDate: dates[0] ?? null,
+          lastOrderDate: dates[dates.length - 1] ?? null,
+        }).returning();
+
+        // Link all orders in this group to the new customer
+        for (const ord of grpOrders) {
+          await db.update(orders).set({ customerId: newCustomer.id }).where(eq(orders.id, ord.id));
+          linked++;
+        }
+
+        // Update lookup maps
+        if (emailUsable) emailToCustomer[emailKey] = newCustomer;
+        const pk = normalizePhone(o.phone || '');
+        if (pk.length >= 7) phoneToCustomer[pk] = newCustomer;
+
+        nextNum++;
+        created++;
+      } catch (_e) { /* skip on duplicate */ }
+    }
+
+    // Link unlinked orders to existing customers
+    for (const { orderId, customerId } of toLink) {
+      await db.update(orders).set({ customerId }).where(eq(orders.id, orderId));
+      linked++;
+    }
+
+    return { success: true, dryRun: false, created, linked, totalOrders: allOrders.length, preview: [] };
   }),
 
   // Rebuild customer stats (totalOrders, totalSpent, firstOrderDate, lastOrderDate) from actual orders
