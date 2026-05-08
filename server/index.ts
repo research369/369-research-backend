@@ -34,7 +34,7 @@ app.use(express.json({ limit: "50mb" }));
 
 // Health check
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString(), version: "1.0.0" });
+  res.json({ status: "ok", timestamp: new Date().toISOString(), version: "1.1.0", fix: "paid-status-filter" });
 });
 
 // ── Rate Limiting ──────────────────────────────────────────────────
