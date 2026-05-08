@@ -281,6 +281,102 @@ async function start() {
     console.warn("[Server] Failed to create orders indexes:", err);
   }
 
+  // FEHLER-019 Fix: Backfill customers from orders (one-time, idempotent)
+  // Creates customer records for orders that predate the customers table
+  try {
+    const pool = await getPool();
+    if (pool) {
+      const PLACEHOLDER_EMAILS = new Set([
+        'keine@angabe.de', 'noemail@noemail.de', 'no@email.de', 'noreply@noreply.de',
+        'placeholder@placeholder.de', 'test@test.de', 'info@info.de', 'otc@369research.eu',
+      ]);
+      const normalizePhone = (p: string) => (p || '').replace(/[\s\-\.\(\)]/g, '');
+
+      // Get all existing customers
+      const custRes = await pool.query('SELECT id, email, phone FROM customers');
+      const existingEmails = new Set<string>();
+      const existingPhones = new Set<string>();
+      for (const c of custRes.rows) {
+        if (c.email) {
+          const k = c.email.toLowerCase().trim();
+          if (!PLACEHOLDER_EMAILS.has(k)) existingEmails.add(k);
+        }
+        if (c.phone) {
+          const k = normalizePhone(c.phone);
+          if (k.length >= 8) existingPhones.add(k);
+        }
+      }
+
+      // Get all orders without a customer_id
+      const ordersRes = await pool.query(
+        'SELECT * FROM orders WHERE customer_id IS NULL ORDER BY order_date DESC'
+      );
+
+      // Get max customer number
+      const maxRes = await pool.query(
+        "SELECT COALESCE(MAX(CAST(customer_number AS INTEGER)), 1209) as max_num FROM customers WHERE customer_number ~ '^[0-9]+$'"
+      );
+      let nextNum = Math.max(1210, parseInt(maxRes.rows[0]?.max_num || '1209') + 1);
+
+      // Group orders by identity key
+      const groups: Record<string, any[]> = {};
+      for (const o of ordersRes.rows) {
+        const emailKey = (o.email || '').toLowerCase().trim();
+        const phoneKey = normalizePhone(o.phone || '');
+        const emailUsable = emailKey && !PLACEHOLDER_EMAILS.has(emailKey);
+        const phoneUsable = phoneKey.length >= 8;
+        if (emailUsable && existingEmails.has(emailKey)) continue;
+        if (!emailUsable && phoneUsable && existingPhones.has(phoneKey)) continue;
+        const gk = emailUsable ? `e:${emailKey}` : (phoneUsable ? `p:${phoneKey}` : `o:${o.order_id}`);
+        if (!groups[gk]) groups[gk] = [];
+        groups[gk].push(o);
+      }
+
+      let created = 0;
+      for (const [, grpOrders] of Object.entries(groups)) {
+        const o = grpOrders[0];
+        const firstName = o.first_name || '';
+        const lastName = o.last_name || '';
+        const name = `${firstName} ${lastName}`.trim();
+        if (!name) continue;
+        const emailKey = (o.email || '').toLowerCase().trim();
+        const emailUsable = emailKey && !PLACEHOLDER_EMAILS.has(emailKey);
+        const totalOrders = grpOrders.length;
+        const totalSpent = grpOrders.reduce((s: number, x: any) => s + parseFloat(x.total || '0'), 0);
+        const dates = grpOrders.map((x: any) => x.order_date).filter(Boolean).sort();
+        try {
+          await pool.query(
+            `INSERT INTO customers
+              (customer_number, name, first_name, last_name, phone, email, company,
+               street, house_number, zip, city, country, source,
+               total_orders, total_spent, first_order_date, last_order_date, created_at, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW(),NOW())`,
+            [
+              String(nextNum), name, firstName || null, lastName || null,
+              o.phone || null, emailUsable ? o.email : null, o.company || null,
+              o.street || null, o.house_number || null, o.zip || null,
+              o.city || null, o.country || null, 'backfill',
+              totalOrders, totalSpent.toFixed(2),
+              dates[0] || null, dates[dates.length - 1] || null,
+            ]
+          );
+          if (emailUsable) existingEmails.add(emailKey);
+          const pk = normalizePhone(o.phone || '');
+          if (pk.length >= 8) existingPhones.add(pk);
+          nextNum++;
+          created++;
+        } catch (_e) { /* skip duplicates */ }
+      }
+      if (created > 0) {
+        console.log(`[Server] FEHLER-019 Backfill: created ${created} customer records from orders`);
+      } else {
+        console.log('[Server] FEHLER-019 Backfill: no new customers needed (all already exist)');
+      }
+    }
+  } catch (err) {
+    console.warn('[Server] FEHLER-019 Backfill failed (non-fatal):', err);
+  }
+
   app.listen(port, "0.0.0.0", () => {
     console.log(`[Server] 369 Research Backend running on port ${port}`);
   });
