@@ -308,17 +308,17 @@ export const customerRouter = router({
             if (!order) continue;
 
             const orderUpdate: Record<string, any> = {};
-            // Always sync: overwrite if the order field is null/empty OR if explicitly provided
-            if (data.firstName !== undefined && (!order.firstName || order.firstName.trim() === '')) orderUpdate.firstName = data.firstName || null;
-            if (data.lastName !== undefined && (!order.lastName || order.lastName.trim() === '')) orderUpdate.lastName = data.lastName || null;
-            if (data.phone !== undefined && (!order.phone || order.phone.trim() === '')) orderUpdate.phone = data.phone || null;
-            if (data.email !== undefined && (!order.email || order.email.trim() === '' || order.email === 'keine@angabe.de')) orderUpdate.email = data.email || null;
+            // Always sync ALL address/contact fields from customer to order (full overwrite)
+            if (data.firstName !== undefined) orderUpdate.firstName = data.firstName || null;
+            if (data.lastName !== undefined) orderUpdate.lastName = data.lastName || null;
+            if (data.phone !== undefined) orderUpdate.phone = data.phone || null;
+            if (data.email !== undefined) orderUpdate.email = data.email || null;
             if (data.company !== undefined) orderUpdate.company = data.company || null;
-            if (data.street !== undefined && (!order.street || order.street.trim() === '')) orderUpdate.street = data.street || null;
-            if (data.houseNumber !== undefined && (!order.houseNumber || order.houseNumber.trim() === '')) orderUpdate.houseNumber = data.houseNumber || null;
-            if (data.zip !== undefined && (!order.zip || order.zip.trim() === '')) orderUpdate.zip = data.zip || null;
-            if (data.city !== undefined && (!order.city || order.city.trim() === '')) orderUpdate.city = data.city || null;
-            if (data.country !== undefined && (!order.country || order.country.trim() === '')) orderUpdate.country = data.country || null;
+            if (data.street !== undefined) orderUpdate.street = data.street || null;
+            if (data.houseNumber !== undefined) orderUpdate.houseNumber = data.houseNumber || null;
+            if (data.zip !== undefined) orderUpdate.zip = data.zip || null;
+            if (data.city !== undefined) orderUpdate.city = data.city || null;
+            if (data.country !== undefined) orderUpdate.country = data.country || null;
 
             if (Object.keys(orderUpdate).length > 0) {
               await db.update(orders).set(orderUpdate).where(eq(orders.orderId, orderId));
