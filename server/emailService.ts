@@ -372,17 +372,17 @@ export async function sendPackingNotificationEmail(data: {
     <div style="background:#ffffff;padding:32px;border:1px solid #e5e7eb;border-radius:0 0 12px 12px;">
       <div style="text-align:center;margin-bottom:24px;">
         <div style="font-size:48px;margin-bottom:12px;">📦</div>
-        <h2 style="font-size:22px;color:#111827;margin:0 0 8px;">Dein Paket wird gepackt!</h2>
-        <p style="font-size:15px;color:#374151;line-height:1.6;margin:0;">Hallo ${data.customerName},<br><br>wir haben deine Bestellung <strong>${data.orderId}</strong> erhalten und packen dein Paket gerade sorgfältig für den Versand. 🔬✨</p>
+        <h2 style="font-size:22px;color:#111827;margin:0 0 8px;">✅ Dein Paket wurde soeben verpackt!</h2>
+        <p style="font-size:15px;color:#374151;line-height:1.6;margin:0;">Hallo ${data.customerName},<br><br>dein Paket für Bestellung <strong>${data.orderId}</strong> wurde soeben sorgfältig verpackt und elektronisch erfasst. 📦🔬</p>
       </div>
       <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:20px;margin:24px 0;">
         <p style="margin:0;font-size:14px;color:#166534;line-height:1.8;">
-          📦 <strong>Paket wird gepackt</strong> – deine Bestellung wird gerade vorbereitet<br>
-          🚚 <strong>Versand</strong> – du erhältst eine weitere Benachrichtigung sobald dein Paket unterwegs ist<br>
-          📬 <strong>Tracking</strong> – mit der Versandbestätigung bekommst du deine Sendungsnummer
+          ✅ <strong>Paket verpackt & elektronisch erfasst</strong><br>
+          🚚 <strong>Versand wird vorbereitet</strong> – dein Paket ist bald auf dem Weg<br>
+          📬 <strong>Versandbestätigung folgt</strong> – du erhältst eine weitere Nachricht mit deiner Sendungsnummer und dem Tracking-Link, sobald dein Paket abgeholt wurde
         </p>
       </div>
-      <p style="font-size:13px;color:#6b7280;margin-top:20px;text-align:center;">Bei Fragen: WhatsApp +4915510063537</p>
+      <p style="font-size:13px;color:#6b7280;margin-top:20px;text-align:center;">Bei Fragen stehen wir dir jederzeit zur Verfügung: WhatsApp +4915510063537</p>
     </div>
     <div style="text-align:center;padding:16px;font-size:12px;color:#9ca3af;">369 Research · Forschungsmaterialien</div>
   </div>
@@ -392,7 +392,7 @@ export async function sendPackingNotificationEmail(data: {
   const result = await resendWithRetry(apiKey, {
     from: "369 Research <noreply@369research.eu>",
     to: [data.customerEmail],
-    subject: `Deine Bestellung ${data.orderId} wird gepackt 📦 – 369 Research`,
+    subject: `✅ Dein Paket (${data.orderId}) wurde verpackt & wird versandfertig gemacht 📦 – 369 Research`,
     html,
   });
 
