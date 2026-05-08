@@ -1,4 +1,4 @@
-import { integer, pgTable, text, timestamp, varchar, decimal, pgEnum, serial, jsonb } from "drizzle-orm/pg-core";
+import { integer, pgTable, text, timestamp, varchar, decimal, pgEnum, serial, jsonb, index } from "drizzle-orm/pg-core";
 
 /**
  * Enums
@@ -271,7 +271,12 @@ export const orders = pgTable("orders", {
   cancelledAt: timestamp("cancelled_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (t) => ({
+  statusIdx: index("orders_status_idx").on(t.status),
+  orderDateIdx: index("orders_order_date_idx").on(t.orderDate),
+  customerIdIdx: index("orders_customer_id_idx").on(t.customerId),
+  emailIdx: index("orders_email_idx").on(t.email),
+}));
 
 export type Order = typeof orders.$inferSelect;
 export type InsertOrder = typeof orders.$inferInsert;

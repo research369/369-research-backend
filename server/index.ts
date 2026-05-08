@@ -265,6 +265,22 @@ async function start() {
     console.warn("[Server] Failed to create batch tracking tables:", err);
   }
 
+  // Auto-migrate: performance indexes for orders table
+  try {
+    const pool = await getPool();
+    if (pool) {
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS orders_status_idx ON orders(status);
+        CREATE INDEX IF NOT EXISTS orders_order_date_idx ON orders(order_date);
+        CREATE INDEX IF NOT EXISTS orders_customer_id_idx ON orders(customer_id);
+        CREATE INDEX IF NOT EXISTS orders_email_idx ON orders(email);
+      `);
+      console.log("[Server] orders performance indexes ready");
+    }
+  } catch (err) {
+    console.warn("[Server] Failed to create orders indexes:", err);
+  }
+
   app.listen(port, "0.0.0.0", () => {
     console.log(`[Server] 369 Research Backend running on port ${port}`);
   });
