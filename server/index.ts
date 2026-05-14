@@ -96,61 +96,6 @@ app.post("/api/auth/logout", handleLogout);
 app.get("/api/auth/me", handleMe);
 
 
-// TEMP: next_order_id() DB-Funktion prüfen und reparieren (14.05.2026 – wird nach Fix entfernt)
-app.get("/api/admin/check-order-id-fn", async (req, res) => {
-  const secret = req.headers["x-admin-secret"];
-  if (secret !== ENV.jwtSecret) return res.status(403).json({ error: "Forbidden" });
-  try {
-    const pool = await getPool();
-    // Test ob die Funktion existiert
-    const testResult = await pool.query("SELECT next_order_id() as order_id");
-    res.json({ exists: true, sample: testResult.rows[0]?.order_id });
-  } catch (err: any) {
-    res.json({ exists: false, error: err.message });
-  }
-});
-
-app.post("/api/admin/fix-order-id-fn", async (req, res) => {
-  const secret = req.headers["x-admin-secret"];
-  if (secret !== ENV.jwtSecret) return res.status(403).json({ error: "Forbidden" });
-  try {
-    const pool = await getPool();
-    // Prüfen ob Sequenz existiert
-    const seqCheck = await pool.query(`
-      SELECT EXISTS (
-        SELECT 1 FROM pg_sequences WHERE schemaname = 'public' AND sequencename = 'order_id_seq'
-      ) as exists
-    `);
-    if (!seqCheck.rows[0]?.exists) {
-      // Höchste bestehende Bestellnummer ermitteln
-      const maxResult = await pool.query(`
-        SELECT MAX(CAST(SUBSTRING(order_id FROM 5) AS INTEGER)) as max_num
-        FROM orders
-        WHERE order_id ~ '^369-[0-9]+$'
-      `);
-      const startVal = (maxResult.rows[0]?.max_num || 10000) + 1;
-      await pool.query(`CREATE SEQUENCE IF NOT EXISTS order_id_seq START WITH ${startVal} INCREMENT BY 1`);
-    }
-    // Funktion erstellen oder ersetzen
-    await pool.query(`
-      CREATE OR REPLACE FUNCTION next_order_id()
-      RETURNS TEXT AS $$
-      DECLARE
-        next_num INTEGER;
-      BEGIN
-        next_num := nextval('order_id_seq');
-        RETURN '369-' || LPAD(next_num::TEXT, 5, '0');
-      END;
-      $$ LANGUAGE plpgsql;
-    `);
-    // Test
-    const testResult = await pool.query("SELECT next_order_id() as order_id");
-    res.json({ success: true, test: testResult.rows[0]?.order_id });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
 // tRPC middleware
 app.use(
   "/api/trpc",
