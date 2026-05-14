@@ -509,22 +509,106 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
       return { success: true };
     }),
 
+  // PUBLIC: Get all shop-visible products (Single Source of Truth)
+  shopProducts: publicProcedure.query(async () => {
+    const db = await getDb();
+    if (!db) return [];
+    const allArticles = await db.select().from(articles)
+      .where(eq(articles.shopVisible, 1))
+      .orderBy(articles.name);
+
+    // Group by shopProductId to aggregate variants
+    const productMap = new Map<string, any>();
+    for (const a of allArticles) {
+      const pid = a.shopProductId;
+      if (!pid) continue;
+      const price = a.sellingPrice ? parseFloat(a.sellingPrice) : 0;
+      const salePrice = a.salePrice ? parseFloat(a.salePrice) : null;
+      if (!productMap.has(pid)) {
+        productMap.set(pid, {
+          id: pid,
+          shopProductId: pid,
+          name: a.name.replace(/\s*\(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu)\)\s*$/i, '').trim(),
+          category: a.category || '',
+          categories: (a.categories as string[]) || (a.category ? [a.category] : []),
+          price,
+          salePrice,
+          salePriceLabel: a.salePriceLabel || null,
+          mockupImage: a.mockupImageUrl || null,
+          image: a.labelImageUrl || null,
+          casNumber: a.casNumber || '',
+          molecularWeight: a.molecularWeight || '',
+          purity: a.purity || '99%',
+          badge: a.badge || null,
+          labReportImage: a.labReportImageUrl || null,
+          galleryImages: (a.galleryImages as string[]) || null,
+          shortDescription: a.shortDescription || null,
+          beautyData: a.beautyData || null,
+          photoComingSoon: a.photoComingSoon === 1,
+          description: a.description || null,
+          stock: 0,
+          inStock: false,
+          variants: [] as any[],
+        });
+      }
+      const product = productMap.get(pid)!;
+      const dosageMatch = a.name.match(/(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu))\s*$/i);
+      const dosage = dosageMatch ? dosageMatch[1].trim() : '';
+      if (dosage) {
+        product.variants.push({ dosage, label: dosage, price, stock: a.stock, inStock: a.stock > 0, articleId: a.id });
+      }
+      product.stock += a.stock;
+      if (a.stock > 0) product.inStock = true;
+    }
+    return Array.from(productMap.values()).map(p => {
+      p.variants.sort((a: any, b: any) => a.price - b.price);
+      if (p.variants.length > 0) p.price = p.variants[0].price;
+      return p;
+    });
+  }),
+
   // CMS: Get article with description (PUBLIC - for shop product pages)
   shopArticle: publicProcedure
     .input(z.object({ shopProductId: z.string() }))
     .query(async ({ input }) => {
       const db = await getDb();
       if (!db) return null;
-      const allArticles = await db.select().from(articles);
-      const article = allArticles.find(a => a.shopProductId === input.shopProductId && a.shopVisible === 1);
-      if (!article) return null;
+      const allArticles = await db.select().from(articles)
+        .where(eq(articles.shopProductId, input.shopProductId));
+      const visible = allArticles.filter(a => a.shopVisible === 1);
+      if (visible.length === 0) return null;
+      const first = visible[0];
+      const variants = visible.map(a => {
+        const dosageMatch = a.name.match(/(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu))\s*$/i);
+        const dosage = dosageMatch ? dosageMatch[1].trim() : '';
+        return { dosage, label: dosage, price: a.sellingPrice ? parseFloat(a.sellingPrice) : 0, stock: a.stock, inStock: a.stock > 0, articleId: a.id };
+      }).filter(v => v.dosage);
+      variants.sort((a, b) => a.price - b.price);
       return {
-        id: article.id,
-        name: article.name,
-        description: article.description,
-        sellingPrice: article.sellingPrice ? parseFloat(article.sellingPrice) : 0,
-        stock: article.stock,
-        inStock: article.stock > 0,
+        id: first.shopProductId,
+        shopProductId: first.shopProductId,
+        name: first.name.replace(/\s*\(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu)\)\s*$/i, '').trim(),
+        description: first.description,
+        sellingPrice: first.sellingPrice ? parseFloat(first.sellingPrice) : 0,
+        price: variants.length > 0 ? variants[0].price : (first.sellingPrice ? parseFloat(first.sellingPrice) : 0),
+        salePrice: first.salePrice ? parseFloat(first.salePrice) : null,
+        salePriceLabel: first.salePriceLabel || null,
+        mockupImage: first.mockupImageUrl || null,
+        image: first.labelImageUrl || null,
+        casNumber: first.casNumber || '',
+        molecularWeight: first.molecularWeight || '',
+        purity: first.purity || '99%',
+        badge: first.badge || null,
+        labReportImage: first.labReportImageUrl || null,
+        galleryImages: (first.galleryImages as string[]) || null,
+        shortDescription: first.shortDescription || null,
+        beautyData: first.beautyData || null,
+        photoComingSoon: first.photoComingSoon === 1,
+        category: first.category || '',
+        categories: (first.categories as string[]) || (first.category ? [first.category] : []),
+        stock: visible.reduce((sum, a) => sum + a.stock, 0),
+        inStock: visible.some(a => a.stock > 0),
+        variants,
       };
     }),
 

@@ -63,6 +63,23 @@ export const articles = pgTable("articles", {
   shopVisible: integer("shop_visible").default(0).notNull(),
 
   isActive: integer("is_active").default(1).notNull(),
+
+  // Shop-Produktdaten (Single Source of Truth)
+  mockupImageUrl: text("mockup_image_url"),
+  labelImageUrl: text("label_image_url"),
+  casNumber: varchar("cas_number", { length: 50 }),
+  molecularWeight: varchar("molecular_weight", { length: 50 }),
+  purity: varchar("purity", { length: 20 }),
+  badge: text("badge"),
+  salePrice: decimal("sale_price", { precision: 10, scale: 2 }),
+  salePriceLabel: varchar("sale_price_label", { length: 100 }),
+  labReportImageUrl: text("lab_report_image_url"),
+  galleryImages: jsonb("gallery_images"),
+  categories: jsonb("categories"),
+  variants: jsonb("variants"),
+  shortDescription: text("short_description"),
+  beautyData: jsonb("beauty_data"),
+  photoComingSoon: integer("photo_coming_soon").default(0),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
