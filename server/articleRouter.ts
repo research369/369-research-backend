@@ -575,7 +575,7 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
       if (!db) return null;
       const allArticles = await db.select().from(articles)
         .where(eq(articles.shopProductId, input.shopProductId));
-      const visible = allArticles.filter(a => a.shopVisible === 1);
+      const visible = allArticles.filter(a => a.shopVisible === 1 && a.isActive === 1);
       if (visible.length === 0) return null;
       const first = visible[0];
       const variants = visible.map(a => {
