@@ -514,7 +514,7 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
     const db = await getDb();
     if (!db) return [];
     const allArticles = await db.select().from(articles)
-      .where(eq(articles.shopVisible, 1))
+      .where(and(eq(articles.shopVisible, 1), eq(articles.isActive, 1)))
       .orderBy(articles.name);
 
     // Group by shopProductId to aggregate variants
