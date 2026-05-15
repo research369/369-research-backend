@@ -52,6 +52,21 @@ app.post("/api/test/set-price", async (req: any, res: any) => {
   }
 });
 
+// TEMP TEST ENDPOINT – shop_visible Test
+app.post("/api/test/set-visible", async (req: any, res: any) => {
+  const { secret, articleId, shopVisible } = req.body;
+  if (secret !== "test-p0-fix-369") return res.status(403).json({ error: "forbidden" });
+  try {
+    const { getPool } = await import("./db.js");
+    const pool = await getPool();
+    if (!pool) return res.status(500).json({ error: "no db" });
+    await pool.query("UPDATE articles SET shop_visible = $1 WHERE shop_product_id = $2", [shopVisible ? 1 : 0, articleId]);
+    res.json({ ok: true, articleId, shopVisible });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── Rate Limiting ──────────────────────────────────────────────────
 // Helper: detect Railway-internal / server-side requests (skip rate limiting)
 const isInternalRequest = (req: any): boolean => {
