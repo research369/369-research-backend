@@ -528,7 +528,7 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
         productMap.set(pid, {
           id: pid,
           shopProductId: pid,
-          name: a.name.replace(/\s*\(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu)\)\s*$/i, '').trim(),
+          name: a.name.replace(/\s*\(?\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu)\)?\s*$/i, '').trim(),
           category: a.category || '',
           categories: (a.categories as string[]) || (a.category ? [a.category] : []),
           price,
@@ -552,7 +552,8 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
         });
       }
       const product = productMap.get(pid)!;
-      const dosageMatch = a.name.match(/(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu))\s*$/i);
+      // Regex berücksichtigt auch Klammern am Ende: "Tirzepatide (10 mg)" → "10 mg"
+      const dosageMatch = a.name.match(/(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu))\s*\)?\s*$/i);
       const dosage = dosageMatch ? dosageMatch[1].trim() : '';
       if (dosage) {
         product.variants.push({ dosage, label: dosage, price, stock: a.stock, inStock: a.stock > 0, articleId: a.id });
@@ -579,7 +580,8 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
       if (visible.length === 0) return null;
       const first = visible[0];
       const variants = visible.map(a => {
-        const dosageMatch = a.name.match(/(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu))\s*$/i);
+        // Regex berücksichtigt auch Klammern am Ende: "MOTS-c (10 mg)" → "10 mg"
+        const dosageMatch = a.name.match(/(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu))\s*\)?\s*$/i);
         const dosage = dosageMatch ? dosageMatch[1].trim() : '';
         return { dosage, label: dosage, price: a.sellingPrice ? parseFloat(a.sellingPrice) : 0, stock: a.stock, inStock: a.stock > 0, articleId: a.id };
       }).filter(v => v.dosage);
@@ -587,7 +589,7 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
       return {
         id: first.shopProductId,
         shopProductId: first.shopProductId,
-        name: first.name.replace(/\s*\(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu)\)\s*$/i, '').trim(),
+        name: first.name.replace(/\s*\(?\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu)\)?\s*$/i, '').trim(),
         description: first.description,
         sellingPrice: first.sellingPrice ? parseFloat(first.sellingPrice) : 0,
         price: variants.length > 0 ? variants[0].price : (first.sellingPrice ? parseFloat(first.sellingPrice) : 0),
