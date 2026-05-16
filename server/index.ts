@@ -283,6 +283,51 @@ async function start() {
     console.warn("[Server] Failed to create orders indexes:", err);
   }
 
+  // Auto-migrate: Follow-up Modul Tabellen
+  try {
+    const pool = await getPool();
+    if (pool) {
+      await pool.query(`
+        DO $$ BEGIN
+          CREATE TYPE follow_up_status AS ENUM ('pending', 'done', 'skipped');
+        EXCEPTION
+          WHEN duplicate_object THEN null;
+        END $$;
+
+        CREATE TABLE IF NOT EXISTS sales_followups (
+          id SERIAL PRIMARY KEY,
+          order_id VARCHAR(32) NOT NULL UNIQUE,
+          status follow_up_status NOT NULL DEFAULT 'pending',
+          due_at TIMESTAMP NOT NULL,
+          completed_at TIMESTAMP,
+          skipped_at TIMESTAMP,
+          completed_by VARCHAR(100),
+          whatsapp_message TEXT,
+          email_subject VARCHAR(300),
+          email_body TEXT,
+          email_sent_at TIMESTAMP,
+          email_sent_to VARCHAR(320),
+          created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS sales_followup_products (
+          id SERIAL PRIMARY KEY,
+          followup_id INTEGER NOT NULL,
+          article_id INTEGER NOT NULL,
+          created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sales_followups_status ON sales_followups(status);
+        CREATE INDEX IF NOT EXISTS idx_sales_followups_due_at ON sales_followups(due_at);
+        CREATE INDEX IF NOT EXISTS idx_sales_followup_products_followup_id ON sales_followup_products(followup_id);
+      `);
+      console.log("[Server] Follow-up tables ready");
+    }
+  } catch (err) {
+    console.warn("[Server] Failed to create follow-up tables:", err);
+  }
+
   // FEHLER-019 Fix: Backfill customers from orders (one-time, idempotent)
   // Creates customer records for orders that predate the customers table
   try {
