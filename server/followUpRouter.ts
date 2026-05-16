@@ -308,6 +308,148 @@ function generateEmailContent(
   return { subject, body };
 }
 
+// ─── Cross-Sell Empfehlungs-Matrix ──────────────────────────────────────────
+
+/**
+ * Empfehlungs-Matrix: Welche Kategorien werden für welche Ursprungskategorie empfohlen?
+ * Reihenfolge = Priorität (Index 0 = höchste Priorität)
+ */
+const CROSS_SELL_MATRIX: Record<string, string[]> = {
+  intake:       ["output", "regeneration"],
+  output:       ["intake", "signaling"],
+  regeneration: ["regeneration", "signaling"],
+  signaling:    ["signaling", "regeneration"],
+  structural:   ["regeneration", "signaling"],
+};
+
+/**
+ * Begründungs-Texte für Empfehlungen
+ */
+const CROSS_SELL_REASONS: Record<string, Record<string, string>> = {
+  intake: {
+    output:       "Ergänzt deinen GLP-1/Intake-Stack optimal – Output-Peptide verstärken die metabolische Wirkung.",
+    regeneration: "Regenerations-Peptide unterstützen die Gewebereparatur während der Intake-Phase.",
+  },
+  output: {
+    intake:    "SLU-PP-332 und GLP-1 wirken synergistisch – Intake-Peptide optimieren den Output-Effekt.",
+    signaling: "Signaling-Peptide verbessern die Zellkommunikation und verstärken Output-Ergebnisse.",
+  },
+  regeneration: {
+    regeneration: "Kombinierte Regenerations-Peptide (z.B. BPC-157 + TB-500) zeigen synergistische Wirkung.",
+    signaling:    "Signaling-Peptide beschleunigen die Regeneration durch verbesserte Zellkommunikation.",
+  },
+  signaling: {
+    signaling:    "Mehrere Signaling-Peptide können kombiniert werden für breiteres Wirkspektrum.",
+    regeneration: "Regenerations-Peptide ergänzen Signaling-Stacks für umfassendere Forschungsergebnisse.",
+  },
+  structural: {
+    regeneration: "Regenerations-Peptide unterstützen strukturelle Prozesse auf Gewebeebene.",
+    signaling:    "Signaling-Peptide optimieren die strukturelle Peptid-Wirkung.",
+  },
+};
+
+/**
+ * Berechnet Cross-Sell Empfehlungen basierend auf gekauften Artikeln.
+ * Gibt max. 2 Vorschläge zurück, keine bereits gekauften Produkte.
+ */
+function computeCrossSellRecommendations(
+  boughtArticles: Array<{ id: number; name: string; followUpCategory: string | null }>,
+  availableArticles: Array<{
+    id: number;
+    name: string;
+    sellingPrice: number;
+    shopProductId: string | null;
+    category: string | null;
+    followUpCategory: string | null;
+    stock: number;
+    alreadyBought: boolean;
+  }>
+): Array<{
+  articleId: number;
+  name: string;
+  sellingPrice: number;
+  shopProductId: string | null;
+  category: string | null;
+  followUpCategory: string | null;
+  stock: number;
+  reason: string;
+  priority: number;
+}> {
+  // Kategorien der gekauften Artikel
+  const boughtCategories = new Set(
+    boughtArticles
+      .map((a) => a.followUpCategory)
+      .filter((c): c is string => !!c)
+  );
+
+  // Bereits gekaufte Artikel-IDs
+  const boughtIds = new Set(boughtArticles.map((a) => a.id));
+
+  // Kandidaten: nicht gekauft, auf Lager, hat followUpCategory
+  const candidates = availableArticles.filter(
+    (a) => !a.alreadyBought && !boughtIds.has(a.id) && a.followUpCategory && a.stock > 0
+  );
+
+  if (candidates.length === 0) return [];
+
+  // Scoring: Priorität basierend auf Matrix
+  const scored: Array<{ article: typeof candidates[0]; score: number; reason: string }> = [];
+
+  for (const candidate of candidates) {
+    const candidateCat = candidate.followUpCategory!;
+    let bestScore = -1;
+    let bestReason = "Ergänzt deine bisherige Forschung sinnvoll.";
+
+    for (const boughtCat of boughtCategories) {
+      const matrixPriorities = CROSS_SELL_MATRIX[boughtCat] || [];
+      const idx = matrixPriorities.indexOf(candidateCat);
+      if (idx >= 0) {
+        // Score: höher = besser (Index 0 = Prio 1 = Score 10, Index 1 = Score 5)
+        const score = idx === 0 ? 10 : 5;
+        if (score > bestScore) {
+          bestScore = score;
+          const reasons = CROSS_SELL_REASONS[boughtCat]?.[candidateCat];
+          if (reasons) bestReason = reasons;
+        }
+      }
+    }
+
+    if (bestScore >= 0) {
+      scored.push({ article: candidate, score: bestScore, reason: bestReason });
+    }
+  }
+
+  // Nach Score sortieren, dann nach Preis (teurer = besser bei gleichem Score)
+  scored.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return b.article.sellingPrice - a.article.sellingPrice;
+  });
+
+  // Keine doppelten Kategorien (max 1 pro Kategorie)
+  const usedCategories = new Set<string>();
+  const result: ReturnType<typeof computeCrossSellRecommendations> = [];
+
+  for (const { article, score, reason } of scored) {
+    if (result.length >= 2) break;
+    const cat = article.followUpCategory!;
+    if (usedCategories.has(cat)) continue;
+    usedCategories.add(cat);
+    result.push({
+      articleId: article.id,
+      name: article.name,
+      sellingPrice: article.sellingPrice,
+      shopProductId: article.shopProductId,
+      category: article.category,
+      followUpCategory: article.followUpCategory,
+      stock: article.stock,
+      reason,
+      priority: score,
+    });
+  }
+
+  return result;
+}
+
 // ─── Router ───────────────────────────────────────────────────────────────────
 
 export const followUpRouter = router({
@@ -957,6 +1099,88 @@ export const followUpRouter = router({
     }),
 
   /**
+   * Cross-Sell Empfehlungen berechnen (Ranking-Engine)
+   * Gibt max. 2 automatische Vorschläge basierend auf der Empfehlungs-Matrix zurück.
+   */
+  getCrossSellRecommendations: adminProcedure
+    .input(z.object({ followupId: z.number() }))
+    .query(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      // Follow-up + Ursprungsbestellung laden
+      const [followUp] = await db
+        .select()
+        .from(salesFollowups)
+        .where(eq(salesFollowups.id, input.followupId))
+        .limit(1);
+      if (!followUp) throw new Error("Follow-up nicht gefunden");
+
+      const [order] = await db
+        .select()
+        .from(orders)
+        .where(eq(orders.orderId, followUp.orderId))
+        .limit(1);
+
+      // Alle Bestellungen des Kunden für "bereits gekauft" Kennzeichnung
+      const allCustomerOrders = order ? await getCustomerOrderHistory(db, order) : [];
+      const allOrderIds = allCustomerOrders.map((o: any) => o.orderId);
+
+      const allItems = allOrderIds.length > 0
+        ? await db.select({ articleId: orderItems.articleId }).from(orderItems)
+            .where(inArray(orderItems.orderId, allOrderIds))
+        : [];
+
+      const boughtArticleIds = new Set(
+        allItems.map((i: any) => i.articleId).filter(Boolean)
+      );
+
+      // Gekaufte Artikel mit followUpCategory laden
+      const boughtArticleIdArray = Array.from(boughtArticleIds) as number[];
+      const boughtArticlesWithCat = boughtArticleIdArray.length > 0
+        ? await db
+            .select({ id: articles.id, name: articles.name, followUpCategory: articles.followUpCategory })
+            .from(articles)
+            .where(inArray(articles.id, boughtArticleIdArray))
+        : [];
+
+      // Alle aktiven + shopVisible Artikel laden
+      const allArticles = await db
+        .select({
+          id: articles.id,
+          name: articles.name,
+          sellingPrice: articles.sellingPrice,
+          shopProductId: articles.shopProductId,
+          category: articles.category,
+          followUpCategory: articles.followUpCategory,
+          stock: articles.stock,
+        })
+        .from(articles)
+        .where(and(eq(articles.isActive, 1), eq(articles.shopVisible, 1)))
+        .orderBy(articles.name);
+
+      const articlesWithBought = allArticles.map((a: any) => ({
+        ...a,
+        sellingPrice: a.sellingPrice ? parseFloat(a.sellingPrice) : 0,
+        alreadyBought: boughtArticleIds.has(a.id),
+      }));
+
+      const recommendations = computeCrossSellRecommendations(
+        boughtArticlesWithCat as any,
+        articlesWithBought
+      );
+
+      console.log(`[FollowUp] Cross-Sell Empfehlungen für Follow-up ${input.followupId}: ${recommendations.map(r => r.name).join(", ") || "keine"}`);
+
+      return {
+        recommendations,
+        boughtCategories: Array.from(new Set(
+          boughtArticlesWithCat.map((a: any) => a.followUpCategory).filter(Boolean)
+        )),
+      };
+    }),
+
+  /**
    * Verfügbare Produkte für Produktauswahl laden
    * (aktiv + shopVisible, mit "bereits gekauft" Kennzeichnung)
    */
@@ -1004,6 +1228,7 @@ export const followUpRouter = router({
           sellingPrice: articles.sellingPrice,
           shopProductId: articles.shopProductId,
           category: articles.category,
+          followUpCategory: articles.followUpCategory,
           stock: articles.stock,
         })
         .from(articles)
