@@ -656,3 +656,49 @@ export const orderItemBatches = pgTable("order_item_batches", {
 
 export type OrderItemBatch = typeof orderItemBatches.$inferSelect;
 export type InsertOrderItemBatch = typeof orderItemBatches.$inferInsert;
+
+/**
+ * Sales Follow-ups – 7-Tage-Follow-up nach Versand für Cross-Sell
+ * Trigger: order.status = "versendet" AND shipped_at + 7 Tage erreicht
+ * Nur Referenzen auf bestehende Tabellen, KEINE Duplikate von Kunden-/Bestelldaten
+ */
+export const followUpStatusEnum = pgEnum("follow_up_status", ["pending", "done", "skipped"]);
+
+export const salesFollowups = pgTable("sales_followups", {
+  id: serial("id").primaryKey(),
+  // Reference to the triggering order (FK to orders.orderId)
+  orderId: varchar("order_id", { length: 32 }).notNull().unique(), // 1 Follow-up per order max
+  // Status
+  status: followUpStatusEnum("status").notNull().default("pending"),
+  // When the follow-up is due (shipped_at + 7 days)
+  dueAt: timestamp("due_at").notNull(),
+  // Completion tracking
+  completedAt: timestamp("completed_at"),
+  skippedAt: timestamp("skipped_at"),
+  completedBy: varchar("completed_by", { length: 100 }),
+  // Generated message content (stored for audit trail)
+  whatsappMessage: text("whatsapp_message"),
+  emailSubject: varchar("email_subject", { length: 300 }),
+  emailBody: text("email_body"),
+  // Email send tracking
+  emailSentAt: timestamp("email_sent_at"),
+  emailSentTo: varchar("email_sent_to", { length: 320 }),
+  // Timestamps
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+export type SalesFollowup = typeof salesFollowups.$inferSelect;
+export type InsertSalesFollowup = typeof salesFollowups.$inferInsert;
+
+/**
+ * Sales Follow-up Products – selected cross-sell products per follow-up
+ * References articles table only, no product data duplication
+ */
+export const salesFollowupProducts = pgTable("sales_followup_products", {
+  id: serial("id").primaryKey(),
+  followupId: integer("followup_id").notNull(), // FK to salesFollowups.id
+  articleId: integer("article_id").notNull(),   // FK to articles.id
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+export type SalesFollowupProduct = typeof salesFollowupProducts.$inferSelect;
+export type InsertSalesFollowupProduct = typeof salesFollowupProducts.$inferInsert;
