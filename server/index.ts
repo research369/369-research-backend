@@ -322,7 +322,18 @@ async function start() {
         CREATE INDEX IF NOT EXISTS idx_sales_followups_due_at ON sales_followups(due_at);
         CREATE INDEX IF NOT EXISTS idx_sales_followup_products_followup_id ON sales_followup_products(followup_id);
       `);
-      console.log("[Server] Follow-up tables ready");
+      // Idempotent migration: add code fields + reminder_stage to sales_followups
+      await pool.query(`
+        ALTER TABLE sales_followups
+          ADD COLUMN IF NOT EXISTS promo_code_id INTEGER,
+          ADD COLUMN IF NOT EXISTS discount_code VARCHAR(50),
+          ADD COLUMN IF NOT EXISTS code_created_at TIMESTAMP,
+          ADD COLUMN IF NOT EXISTS code_expires_at TIMESTAMP,
+          ADD COLUMN IF NOT EXISTS message_generated_at TIMESTAMP,
+          ADD COLUMN IF NOT EXISTS whatsapp_opened_at TIMESTAMP,
+          ADD COLUMN IF NOT EXISTS reminder_stage INTEGER NOT NULL DEFAULT 1;
+      `);
+      console.log("[Server] Follow-up tables ready (incl. code fields v2)");
     }
   } catch (err) {
     console.warn("[Server] Failed to create follow-up tables:", err);

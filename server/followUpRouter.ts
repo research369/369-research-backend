@@ -4,8 +4,9 @@
  * Logik:
  * - 7 Tage nach shipped_at wird automatisch ein Follow-up erstellt
  * - Nur 1 Follow-up pro Bestellung (unique constraint auf order_id)
- * - Keine Duplikate von Kunden-/Bestelldaten, nur Referenzen
- * - Rabattcode ONCEAGAIN (10%) wird automatisch angelegt falls nicht vorhanden
+ * - Individueller 48h-Rabattcode pro Follow-up (AGAIN-[ORDERNR]-[4CHARS])
+ * - Code wird erst beim Klick auf "Nachricht generieren" erzeugt
+ * - Gültiger Code wird wiederverwendet, abgelaufener Code gibt Warnung zurück
  */
 import { z } from "zod";
 import { eq, and, lte, isNull, desc, or, inArray, ne } from "drizzle-orm";
@@ -23,9 +24,18 @@ import {
 } from "../drizzle/schema.js";
 
 const RESEND_API_URL = "https://api.resend.com/emails";
-const FOLLOWUP_CODE = "ONCEAGAIN";
-const FOLLOWUP_DISCOUNT_PERCENT = 10;
 const SHOP_BASE_URL = "https://www.369research.eu";
+
+/**
+ * Zentrale Konfiguration – alle Parameter hier ändern, nirgendwo sonst hardcoden
+ */
+const FOLLOWUP_CONFIG = {
+  discountPercent: 10,          // Rabatt in Prozent
+  codeValidityHours: 48,        // Gültigkeit des Codes in Stunden
+  reminderDaysAfterShipping: 7, // Tage nach Versand bis Follow-up fällig
+  defaultReminderStage: 1,      // Erste Stufe (für spätere Erweiterung: 1, 2, 3)
+  codePrefix: "AGAIN",          // Prefix für generierten Code
+};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -40,28 +50,80 @@ function normalizePhone(phone: string): string {
   return p;
 }
 
-/** Stellt sicher dass der ONCEAGAIN-Code in der DB existiert */
-async function ensureOnceAgainCode(db: any): Promise<void> {
-  const existing = await db
-    .select({ id: promoCodes.id })
-    .from(promoCodes)
-    .where(eq(promoCodes.code, FOLLOWUP_CODE))
-    .limit(1);
-
-  if (existing.length === 0) {
-    await db.insert(promoCodes).values({
-      code: FOLLOWUP_CODE,
-      discountType: "percent",
-      percentage: String(FOLLOWUP_DISCOUNT_PERCENT),
-      fixedAmount: "0",
-      minOrder: "0",
-      maxUses: 0, // unlimited
-      currentUses: 0,
-      isActive: 1,
-      description: "Follow-up Cross-Sell Code – 10% Rabatt für Bestandskunden",
-    });
-    console.log(`[FollowUp] ONCEAGAIN Promo-Code angelegt`);
+/**
+ * Generiert einen eindeutigen individuellen Rabattcode für ein Follow-up.
+ * Format: AGAIN-[BESTELLNUMMER]-[4CHARS]
+ * Beispiel: AGAIN-369-10145-X7K2
+ * Nur Großbuchstaben und Zahlen, keine Sonderzeichen außer Bindestrichen.
+ */
+function generateCodeForOrder(orderId: string): string {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // ohne O, I, 0, 1 (Verwechslungsgefahr)
+  let suffix = "";
+  for (let i = 0; i < 4; i++) {
+    suffix += chars[Math.floor(Math.random() * chars.length)];
   }
+  // Bestellnummer bereinigen: nur Buchstaben, Zahlen, Bindestriche
+  const cleanOrderId = orderId.replace(/[^A-Z0-9\-]/gi, "").toUpperCase();
+  return `${FOLLOWUP_CONFIG.codePrefix}-${cleanOrderId}-${suffix}`;
+}
+
+/**
+ * Erstellt einen individuellen Promo-Code in der DB und verknüpft ihn mit dem Follow-up.
+ * Gibt den erstellten Code zurück.
+ */
+async function createIndividualCode(db: any, followupId: number, orderId: string): Promise<{
+  code: string;
+  promoCodeId: number;
+  expiresAt: Date;
+}> {
+  const expiresAt = new Date(Date.now() + FOLLOWUP_CONFIG.codeValidityHours * 60 * 60 * 1000);
+  const now = new Date();
+
+  // Eindeutigen Code generieren (Kollisions-Check)
+  let code = generateCodeForOrder(orderId);
+  let attempts = 0;
+  while (attempts < 5) {
+    const existing = await db
+      .select({ id: promoCodes.id })
+      .from(promoCodes)
+      .where(eq(promoCodes.code, code))
+      .limit(1);
+    if (existing.length === 0) break;
+    code = generateCodeForOrder(orderId); // Neuen Code generieren bei Kollision
+    attempts++;
+  }
+
+  // Code in promo_codes anlegen
+  const [inserted] = await db.insert(promoCodes).values({
+    code,
+    discountType: "percent",
+    percentage: String(FOLLOWUP_CONFIG.discountPercent),
+    fixedAmount: "0",
+    minOrder: "0",
+    maxUses: 1,       // Einmalig nutzbar
+    currentUses: 0,
+    validFrom: now,
+    validUntil: expiresAt,
+    isActive: 1,
+    description: `Follow-up Code für Bestellung ${orderId} – ${FOLLOWUP_CONFIG.discountPercent}% Rabatt, gültig ${FOLLOWUP_CONFIG.codeValidityHours}h`,
+  }).returning({ id: promoCodes.id });
+
+  const promoCodeId = inserted.id;
+
+  // Code im Follow-up speichern
+  await db
+    .update(salesFollowups)
+    .set({
+      promoCodeId,
+      discountCode: code,
+      codeCreatedAt: now,
+      codeExpiresAt: expiresAt,
+      updatedAt: now,
+    })
+    .where(eq(salesFollowups.id, followupId));
+
+  console.log(`[FollowUp] Individueller Code ${code} erstellt für Follow-up ${followupId} (Order ${orderId}), gültig bis ${expiresAt.toISOString()}`);
+  return { code, promoCodeId, expiresAt };
 }
 
 /** Lädt alle Bestellungen eines Kunden (Matching: customerId → email → phone) */
@@ -102,16 +164,22 @@ async function getCustomerOrderHistory(db: any, order: any): Promise<any[]> {
   });
 }
 
-/** Generiert WhatsApp-Nachricht */
+/** Generiert WhatsApp-Nachricht mit individuellem Code und Ablaufhinweis */
 function generateWhatsAppMessage(
   order: any,
   selectedArticles: any[],
-  promoCode: string
+  promoCode: string,
+  codeExpiresAt: Date
 ): string {
   const firstName = order.firstName || order.first_name || "";
   const orderDate = order.orderDate
     ? new Date(order.orderDate).toLocaleDateString("de-DE")
     : "";
+
+  const expiryStr = codeExpiresAt.toLocaleDateString("de-DE", {
+    day: "2-digit", month: "2-digit", year: "numeric",
+    hour: "2-digit", minute: "2-digit",
+  });
 
   const productLines = selectedArticles
     .map((a) => {
@@ -130,7 +198,9 @@ Als Dankeschön für dein Vertrauen möchten wir dir heute einige Produkte vorst
 
 ${productLines}
 
-Mit dem Code *${promoCode}* erhältst du *${FOLLOWUP_DISCOUNT_PERCENT}% Rabatt* auf deine nächste Bestellung – einfach im Checkout eingeben.
+Mit dem Code *${promoCode}* erhältst du *${FOLLOWUP_CONFIG.discountPercent}% Rabatt* auf deine nächste Bestellung – einfach im Checkout eingeben.
+
+⏳ _Dieser Code ist nur für dich und nur bis ${expiryStr} Uhr gültig._
 
 Alle Produkte sind ausschließlich für In-vitro-Forschungszwecke bestimmt.
 
@@ -140,16 +210,22 @@ Viele Grüße,
 Dein 369 Research Team`;
 }
 
-/** Generiert E-Mail-Betreff und -Body */
+/** Generiert E-Mail-Betreff und -Body mit individuellem Code und Ablaufhinweis */
 function generateEmailContent(
   order: any,
   selectedArticles: any[],
-  promoCode: string
+  promoCode: string,
+  codeExpiresAt: Date
 ): { subject: string; body: string } {
   const firstName = order.firstName || order.first_name || "";
   const orderDate = order.orderDate
     ? new Date(order.orderDate).toLocaleDateString("de-DE")
     : "";
+
+  const expiryStr = codeExpiresAt.toLocaleDateString("de-DE", {
+    day: "2-digit", month: "2-digit", year: "numeric",
+    hour: "2-digit", minute: "2-digit",
+  });
 
   const productRows = selectedArticles
     .map((a) => {
@@ -168,7 +244,7 @@ function generateEmailContent(
     })
     .join("");
 
-  const subject = `Dein exklusives Angebot von 369 Research – ${FOLLOWUP_DISCOUNT_PERCENT}% Rabatt für dich`;
+  const subject = `Dein exklusives Angebot von 369 Research – ${FOLLOWUP_CONFIG.discountPercent}% Rabatt für dich`;
 
   const body = `<!DOCTYPE html>
 <html lang="de">
@@ -200,11 +276,14 @@ function generateEmailContent(
         <tbody>${productRows}</tbody>
       </table>
       <!-- Promo Code -->
-      <div style="background:#f0f7ff;border:2px dashed #0040C1;border-radius:8px;padding:20px;text-align:center;margin-bottom:24px;">
+      <div style="background:#f0f7ff;border:2px dashed #0040C1;border-radius:8px;padding:20px;text-align:center;margin-bottom:16px;">
         <p style="color:#475569;font-size:14px;margin:0 0 8px;">Dein persönlicher Rabattcode</p>
         <p style="color:#0040C1;font-size:28px;font-weight:800;letter-spacing:0.1em;margin:0 0 8px;">${promoCode}</p>
-        <p style="color:#475569;font-size:14px;margin:0;"><strong>${FOLLOWUP_DISCOUNT_PERCENT}% Rabatt</strong> auf deine nächste Bestellung</p>
+        <p style="color:#475569;font-size:14px;margin:0;"><strong>${FOLLOWUP_CONFIG.discountPercent}% Rabatt</strong> auf deine nächste Bestellung</p>
       </div>
+      <p style="color:#ef4444;font-size:13px;text-align:center;margin:0 0 24px;">
+        ⏳ Dieser Code ist nur für dich und nur bis <strong>${expiryStr} Uhr</strong> gültig.
+      </p>
       <div style="text-align:center;margin-bottom:24px;">
         <a href="${SHOP_BASE_URL}" style="display:inline-block;background:#0040C1;color:#ffffff;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:700;font-size:15px;">Jetzt shoppen →</a>
       </div>
@@ -230,25 +309,26 @@ function generateEmailContent(
 export const followUpRouter = router({
   /**
    * Erstellt fehlende Follow-ups für alle versendeten Bestellungen
-   * die shipped_at + 7 Tage überschritten haben.
+   * die shipped_at + FOLLOWUP_CONFIG.reminderDaysAfterShipping Tage überschritten haben.
    * Wird beim Dashboard-Load aufgerufen (idempotent).
+   * KEIN automatischer Code-Aufruf – Code wird erst bei "Nachricht generieren" erstellt.
    */
   createMissingFollowUps: adminProcedure.mutation(async () => {
     const db = await getDb();
     if (!db) throw new Error("Database not available");
 
-    await ensureOnceAgainCode(db);
+    const cutoff = new Date(
+      Date.now() - FOLLOWUP_CONFIG.reminderDaysAfterShipping * 24 * 60 * 60 * 1000
+    );
 
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-
-    // Alle versendeten Bestellungen mit shipped_at <= 7 Tage ago
+    // Alle versendeten Bestellungen mit shipped_at <= cutoff
     const shippedOrders = await db
       .select({ orderId: orders.orderId, shippedAt: orders.shippedAt })
       .from(orders)
       .where(
         and(
           eq(orders.status, "versendet"),
-          lte(orders.shippedAt, sevenDaysAgo)
+          lte(orders.shippedAt, cutoff)
         )
       );
 
@@ -263,15 +343,19 @@ export const followUpRouter = router({
     let created = 0;
     for (const o of shippedOrders) {
       if (existingOrderIds.has(o.orderId)) continue;
-      if (!o.shippedAt) continue;
 
-      const dueAt = new Date(new Date(o.shippedAt).getTime() + 7 * 24 * 60 * 60 * 1000);
+      if (!o.shippedAt) continue;
+      const dueAt = new Date(
+        new Date(o.shippedAt).getTime() +
+        FOLLOWUP_CONFIG.reminderDaysAfterShipping * 24 * 60 * 60 * 1000
+      );
 
       try {
         await db.insert(salesFollowups).values({
           orderId: o.orderId,
           status: "pending",
           dueAt,
+          reminderStage: FOLLOWUP_CONFIG.defaultReminderStage,
         });
         created++;
       } catch (err: any) {
@@ -302,13 +386,10 @@ export const followUpRouter = router({
 
       const now = new Date();
 
-      // Follow-ups laden
-      let followUpsQuery = db
+      const allFollowUps = await db
         .select()
         .from(salesFollowups)
         .orderBy(desc(salesFollowups.dueAt));
-
-      const allFollowUps = await followUpsQuery;
 
       // Filtern
       const filtered = allFollowUps.filter((f: any) => {
@@ -329,6 +410,9 @@ export const followUpRouter = router({
       return filtered.map((f: any) => {
         const order = orderMap.get(f.orderId) || {};
         const isOverdue = f.status === "pending" && new Date(f.dueAt) < now;
+        const codeExpired = f.discountCode && f.codeExpiresAt
+          ? new Date(f.codeExpiresAt) < now
+          : false;
         return {
           id: f.id,
           orderId: f.orderId,
@@ -337,6 +421,12 @@ export const followUpRouter = router({
           completedAt: f.completedAt,
           skippedAt: f.skippedAt,
           isOverdue,
+          reminderStage: f.reminderStage || 1,
+          // Code-Info
+          discountCode: f.discountCode || null,
+          codeExpiresAt: f.codeExpiresAt || null,
+          codeExpired,
+          messageGeneratedAt: f.messageGeneratedAt || null,
           // Bestelldaten
           orderDate: order.orderDate,
           total: order.total ? parseFloat(order.total) : 0,
@@ -345,7 +435,7 @@ export const followUpRouter = router({
           customerEmail: order.email || "",
           customerPhone: order.phone || "",
           customerId: order.customerId,
-          discountCode: order.discountCode,
+          discountCodeUsed: order.discountCode,
           partnerCode: order.partnerCode,
           trackingNumber: order.trackingNumber,
           shippedAt: order.shippedAt,
@@ -392,6 +482,8 @@ export const followUpRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
+      const now = new Date();
+
       // Follow-up laden
       const [followUp] = await db
         .select()
@@ -400,6 +492,11 @@ export const followUpRouter = router({
         .limit(1);
 
       if (!followUp) throw new Error("Follow-up nicht gefunden");
+
+      // Code-Status berechnen
+      const codeExpired = followUp.discountCode && followUp.codeExpiresAt
+        ? new Date(followUp.codeExpiresAt) < now
+        : false;
 
       // Ursprungsbestellung laden
       const [originOrder] = await db
@@ -461,7 +558,10 @@ export const followUpRouter = router({
         .where(eq(salesFollowupProducts.followupId, input.id));
 
       return {
-        followUp,
+        followUp: {
+          ...followUp,
+          codeExpired,
+        },
         originOrder: {
           ...originOrder,
           items: originItems,
@@ -510,7 +610,13 @@ export const followUpRouter = router({
     }),
 
   /**
-   * Nachrichten generieren (WhatsApp + E-Mail) und im Follow-up speichern
+   * Nachrichten generieren (WhatsApp + E-Mail) und im Follow-up speichern.
+   *
+   * Code-Logik:
+   * 1. Kein Code vorhanden → neuen Code erstellen
+   * 2. Code vorhanden + noch gültig → bestehenden Code wiederverwenden
+   * 3. Code vorhanden + abgelaufen → codeAlreadyExpired=true zurückgeben, KEINEN neuen Code erstellen
+   *    → Nutzer muss explizit "Neuen Code erzeugen" klicken (forceNewCode Prozedur)
    */
   generateMessages: adminProcedure
     .input(z.object({ followupId: z.number() }))
@@ -518,7 +624,7 @@ export const followUpRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
-      await ensureOnceAgainCode(db);
+      const now = new Date();
 
       // Follow-up laden
       const [followUp] = await db
@@ -553,22 +659,86 @@ export const followUpRouter = router({
         throw new Error("Keine Produkte ausgewählt. Bitte zuerst Produkte auswählen.");
       }
 
-      // Nachrichten generieren
-      const whatsappMessage = generateWhatsAppMessage(order, selectedProducts, FOLLOWUP_CODE);
-      const { subject, body } = generateEmailContent(order, selectedProducts, FOLLOWUP_CODE);
+      // ── Code-Logik ──────────────────────────────────────────────────────────
+      let promoCode: string;
+      let codeExpiresAt: Date;
+      let codeAlreadyExpired = false;
 
-      // Im Follow-up speichern
-      await db
-        .update(salesFollowups)
-        .set({
-          whatsappMessage,
-          emailSubject: subject,
-          emailBody: body,
-          updatedAt: new Date(),
-        })
-        .where(eq(salesFollowups.id, input.followupId));
+      if (followUp.discountCode && followUp.codeExpiresAt) {
+        const expiry = new Date(followUp.codeExpiresAt);
+        if (expiry > now) {
+          // Gültiger Code vorhanden → wiederverwenden
+          promoCode = followUp.discountCode;
+          codeExpiresAt = expiry;
+          console.log(`[FollowUp] Bestehenden Code ${promoCode} wiederverwendet (gültig bis ${expiry.toISOString()})`);
+        } else {
+          // Code abgelaufen → Warnung zurückgeben, KEINEN neuen Code erstellen
+          codeAlreadyExpired = true;
+          promoCode = followUp.discountCode; // Abgelaufenen Code für Vorschau anzeigen
+          codeExpiresAt = expiry;
+          console.log(`[FollowUp] Code ${promoCode} abgelaufen – Warnung an Frontend`);
+        }
+      } else {
+        // Kein Code vorhanden → neuen Code erstellen
+        const result = await createIndividualCode(db, input.followupId, followUp.orderId);
+        promoCode = result.code;
+        codeExpiresAt = result.expiresAt;
+      }
 
-      return { whatsappMessage, emailSubject: subject, emailBody: body };
+      // Nachrichten generieren (auch bei abgelaufenem Code für Vorschau)
+      const whatsappMessage = generateWhatsAppMessage(order, selectedProducts, promoCode, codeExpiresAt);
+      const { subject, body } = generateEmailContent(order, selectedProducts, promoCode, codeExpiresAt);
+
+      // Im Follow-up speichern (nur wenn Code gültig)
+      if (!codeAlreadyExpired) {
+        await db
+          .update(salesFollowups)
+          .set({
+            whatsappMessage,
+            emailSubject: subject,
+            emailBody: body,
+            messageGeneratedAt: now,
+            updatedAt: now,
+          })
+          .where(eq(salesFollowups.id, input.followupId));
+      }
+
+      return {
+        whatsappMessage,
+        emailSubject: subject,
+        emailBody: body,
+        promoCode,
+        codeExpiresAt,
+        codeAlreadyExpired,
+      };
+    }),
+
+  /**
+   * Neuen Code erzeugen – nur aufrufen wenn Code abgelaufen ist und Nutzer explizit bestätigt hat.
+   * Erstellt neuen Code in promo_codes und aktualisiert das Follow-up.
+   */
+  forceNewCode: adminProcedure
+    .input(z.object({ followupId: z.number() }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      // Follow-up laden
+      const [followUp] = await db
+        .select()
+        .from(salesFollowups)
+        .where(eq(salesFollowups.id, input.followupId))
+        .limit(1);
+      if (!followUp) throw new Error("Follow-up nicht gefunden");
+
+      // Neuen Code erstellen
+      const result = await createIndividualCode(db, input.followupId, followUp.orderId);
+
+      console.log(`[FollowUp] Neuer Code ${result.code} erzeugt für Follow-up ${input.followupId} nach Ablauf`);
+      return {
+        code: result.code,
+        expiresAt: result.expiresAt,
+      };
     }),
 
   /**
@@ -638,6 +808,11 @@ export const followUpRouter = router({
 
       if (!followUp.emailBody || !followUp.emailSubject) {
         throw new Error("Nachrichten noch nicht generiert. Bitte zuerst Nachrichten generieren.");
+      }
+
+      // Code-Ablauf prüfen
+      if (followUp.codeExpiresAt && new Date(followUp.codeExpiresAt) < new Date()) {
+        throw new Error("Der Rabattcode ist abgelaufen. Bitte zuerst einen neuen Code erzeugen.");
       }
 
       // Bestellung laden für E-Mail-Adresse

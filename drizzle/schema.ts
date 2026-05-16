@@ -683,6 +683,15 @@ export const salesFollowups = pgTable("sales_followups", {
   // Email send tracking
   emailSentAt: timestamp("email_sent_at"),
   emailSentTo: varchar("email_sent_to", { length: 320 }),
+  // Individual promo code (AGAIN-[ORDERNR]-[4CHARS])
+  promoCodeId: integer("promo_code_id"),
+  discountCode: varchar("discount_code", { length: 50 }),
+  codeCreatedAt: timestamp("code_created_at"),
+  codeExpiresAt: timestamp("code_expires_at"),
+  messageGeneratedAt: timestamp("message_generated_at"),
+  whatsappOpenedAt: timestamp("whatsapp_opened_at"),
+  // Reminder stage (1 = first, 2 = second, etc. – for future multi-stage support)
+  reminderStage: integer("reminder_stage").default(1).notNull(),
   // Timestamps
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
