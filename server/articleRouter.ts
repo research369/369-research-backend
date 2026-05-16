@@ -19,6 +19,8 @@ const articleSchema = z.object({
   maxStock: z.number().int().min(0).optional(),
   shopProductId: z.string().optional(),
   notes: z.string().optional(),
+  // Cross-Sell Kategorie für Follow-up Empfehlungs-Engine
+  followUpCategory: z.enum(["intake", "output", "regeneration", "signaling", "structural"]).nullable().optional(),
 });
 
 export const articleRouter = router({
@@ -140,6 +142,7 @@ export const articleRouter = router({
         maxStock: input.maxStock || 100,
         shopProductId: input.shopProductId || null,
         notes: input.notes || null,
+        followUpCategory: input.followUpCategory ?? null,
       }).returning();
 
       // Log initial stock
@@ -178,6 +181,7 @@ export const articleRouter = router({
       if (data.maxStock !== undefined) updateData.maxStock = data.maxStock;
       if (data.shopProductId !== undefined) updateData.shopProductId = data.shopProductId || null;
       if (data.notes !== undefined) updateData.notes = data.notes || null;
+      if (data.followUpCategory !== undefined) updateData.followUpCategory = data.followUpCategory ?? null;
 
       await db.update(articles).set(updateData).where(eq(articles.id, id));
 
