@@ -339,6 +339,20 @@ async function start() {
     console.warn("[Server] Failed to create follow-up tables:", err);
   }
 
+  // Cross-Sell Ranking: followUpCategory Feld in articles
+  try {
+    const pool = await getPool();
+    if (pool) {
+      await pool.query(`
+        ALTER TABLE articles
+          ADD COLUMN IF NOT EXISTS follow_up_category VARCHAR(50);
+      `);
+      console.log("[Server] articles.follow_up_category migration OK");
+    }
+  } catch (err) {
+    console.warn("[Server] Failed to add follow_up_category to articles:", err);
+  }
+
   // FEHLER-019 Fix: Backfill customers from orders (one-time, idempotent)
   // Creates customer records for orders that predate the customers table
   try {
