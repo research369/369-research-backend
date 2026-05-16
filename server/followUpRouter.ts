@@ -164,22 +164,24 @@ async function getCustomerOrderHistory(db: any, order: any): Promise<any[]> {
   });
 }
 
-/** Generiert WhatsApp-Nachricht mit individuellem Code und Ablaufhinweis */
+/** Generiert WhatsApp-Nachricht – entweder mit echtem Code oder Platzhalter */
 function generateWhatsAppMessage(
   order: any,
   selectedArticles: any[],
   promoCode: string,
-  codeExpiresAt: Date
+  codeExpiresAt: Date | null
 ): string {
   const firstName = order.firstName || order.first_name || "";
   const orderDate = order.orderDate
     ? new Date(order.orderDate).toLocaleDateString("de-DE")
     : "";
 
-  const expiryStr = codeExpiresAt.toLocaleDateString("de-DE", {
-    day: "2-digit", month: "2-digit", year: "numeric",
-    hour: "2-digit", minute: "2-digit",
-  });
+  const expiryStr = codeExpiresAt
+    ? codeExpiresAt.toLocaleDateString("de-DE", {
+        day: "2-digit", month: "2-digit", year: "numeric",
+        hour: "2-digit", minute: "2-digit",
+      })
+    : "[ABLAUFDATUM]";
 
   const productLines = selectedArticles
     .map((a) => {
@@ -210,22 +212,24 @@ Viele Grüße,
 Dein 369 Research Team`;
 }
 
-/** Generiert E-Mail-Betreff und -Body mit individuellem Code und Ablaufhinweis */
+/** Generiert E-Mail-Betreff und -Body – entweder mit echtem Code oder Platzhalter */
 function generateEmailContent(
   order: any,
   selectedArticles: any[],
   promoCode: string,
-  codeExpiresAt: Date
+  codeExpiresAt: Date | null
 ): { subject: string; body: string } {
   const firstName = order.firstName || order.first_name || "";
   const orderDate = order.orderDate
     ? new Date(order.orderDate).toLocaleDateString("de-DE")
     : "";
 
-  const expiryStr = codeExpiresAt.toLocaleDateString("de-DE", {
-    day: "2-digit", month: "2-digit", year: "numeric",
-    hour: "2-digit", minute: "2-digit",
-  });
+  const expiryStr = codeExpiresAt
+    ? codeExpiresAt.toLocaleDateString("de-DE", {
+        day: "2-digit", month: "2-digit", year: "numeric",
+        hour: "2-digit", minute: "2-digit",
+      })
+    : "[ABLAUFDATUM]";
 
   const productRows = selectedArticles
     .map((a) => {
@@ -610,13 +614,11 @@ export const followUpRouter = router({
     }),
 
   /**
-   * Nachrichten generieren (WhatsApp + E-Mail) und im Follow-up speichern.
+   * Nachrichten generieren (WhatsApp + E-Mail) mit Platzhalter [DISCOUNT_CODE].
    *
-   * Code-Logik:
-   * 1. Kein Code vorhanden → neuen Code erstellen
-   * 2. Code vorhanden + noch gültig → bestehenden Code wiederverwenden
-   * 3. Code vorhanden + abgelaufen → codeAlreadyExpired=true zurückgeben, KEINEN neuen Code erstellen
-   *    → Nutzer muss explizit "Neuen Code erzeugen" klicken (forceNewCode Prozedur)
+   * WICHTIG: Kein Code wird hier erstellt!
+   * Der Code wird erst beim Klick auf "WhatsApp öffnen" oder "E-Mail senden" erstellt
+   * via resolveCode Prozedur. So startet die 48h-Gültigkeit exakt beim Kundenkontakt.
    */
   generateMessages: adminProcedure
     .input(z.object({ followupId: z.number() }))
@@ -659,69 +661,55 @@ export const followUpRouter = router({
         throw new Error("Keine Produkte ausgewählt. Bitte zuerst Produkte auswählen.");
       }
 
-      // ── Code-Logik ──────────────────────────────────────────────────────────
-      let promoCode: string;
-      let codeExpiresAt: Date;
-      let codeAlreadyExpired = false;
+      // Nachrichten mit Platzhalter generieren – KEIN Code-Erstellen hier
+      const whatsappMessage = generateWhatsAppMessage(order, selectedProducts, "[DISCOUNT_CODE]", null);
+      const { subject, body } = generateEmailContent(order, selectedProducts, "[DISCOUNT_CODE]", null);
 
-      if (followUp.discountCode && followUp.codeExpiresAt) {
-        const expiry = new Date(followUp.codeExpiresAt);
-        if (expiry > now) {
-          // Gültiger Code vorhanden → wiederverwenden
-          promoCode = followUp.discountCode;
-          codeExpiresAt = expiry;
-          console.log(`[FollowUp] Bestehenden Code ${promoCode} wiederverwendet (gültig bis ${expiry.toISOString()})`);
-        } else {
-          // Code abgelaufen → Warnung zurückgeben, KEINEN neuen Code erstellen
-          codeAlreadyExpired = true;
-          promoCode = followUp.discountCode; // Abgelaufenen Code für Vorschau anzeigen
-          codeExpiresAt = expiry;
-          console.log(`[FollowUp] Code ${promoCode} abgelaufen – Warnung an Frontend`);
-        }
-      } else {
-        // Kein Code vorhanden → neuen Code erstellen
-        const result = await createIndividualCode(db, input.followupId, followUp.orderId);
-        promoCode = result.code;
-        codeExpiresAt = result.expiresAt;
-      }
+      // Platzhalter-Text im Follow-up speichern
+      await db
+        .update(salesFollowups)
+        .set({
+          whatsappMessage,
+          emailSubject: subject,
+          emailBody: body,
+          messageGeneratedAt: now,
+          updatedAt: now,
+        })
+        .where(eq(salesFollowups.id, input.followupId));
 
-      // Nachrichten generieren (auch bei abgelaufenem Code für Vorschau)
-      const whatsappMessage = generateWhatsAppMessage(order, selectedProducts, promoCode, codeExpiresAt);
-      const { subject, body } = generateEmailContent(order, selectedProducts, promoCode, codeExpiresAt);
-
-      // Im Follow-up speichern (nur wenn Code gültig)
-      if (!codeAlreadyExpired) {
-        await db
-          .update(salesFollowups)
-          .set({
-            whatsappMessage,
-            emailSubject: subject,
-            emailBody: body,
-            messageGeneratedAt: now,
-            updatedAt: now,
-          })
-          .where(eq(salesFollowups.id, input.followupId));
-      }
+      console.log(`[FollowUp] Nachrichten mit Platzhalter generiert für Follow-up ${input.followupId} – Code wird erst bei Versand erstellt`);
 
       return {
         whatsappMessage,
         emailSubject: subject,
         emailBody: body,
-        promoCode,
-        codeExpiresAt,
-        codeAlreadyExpired,
+        // Kein Code hier – wird erst bei resolveCode erstellt
+        hasCode: false,
+        discountCode: followUp.discountCode || null,
+        codeExpiresAt: followUp.codeExpiresAt || null,
+        codeExpired: followUp.discountCode && followUp.codeExpiresAt
+          ? new Date(followUp.codeExpiresAt) < now
+          : false,
       };
     }),
 
   /**
-   * Neuen Code erzeugen – nur aufrufen wenn Code abgelaufen ist und Nutzer explizit bestätigt hat.
-   * Erstellt neuen Code in promo_codes und aktualisiert das Follow-up.
+   * Code auflösen und Platzhalter ersetzen.
+   *
+   * Wird aufgerufen wenn der Nutzer auf "WhatsApp öffnen" oder "E-Mail senden" klickt.
+   * Logik:
+   * 1. Gültiger Code vorhanden → wiederverwenden
+   * 2. Kein Code oder Code abgelaufen → neuen Code erstellen
+   * 3. Platzhalter [DISCOUNT_CODE] in gespeicherten Nachrichten ersetzen
+   * 4. Finale Nachrichten zurückgeben
    */
-  forceNewCode: adminProcedure
+  resolveCode: adminProcedure
     .input(z.object({ followupId: z.number() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
+
+      const now = new Date();
 
       // Follow-up laden
       const [followUp] = await db
@@ -731,14 +719,106 @@ export const followUpRouter = router({
         .limit(1);
       if (!followUp) throw new Error("Follow-up nicht gefunden");
 
-      // Neuen Code erstellen
-      const result = await createIndividualCode(db, input.followupId, followUp.orderId);
+      if (!followUp.whatsappMessage) {
+        throw new Error("Nachrichten noch nicht generiert. Bitte zuerst 'Nachricht generieren' klicken.");
+      }
 
-      console.log(`[FollowUp] Neuer Code ${result.code} erzeugt für Follow-up ${input.followupId} nach Ablauf`);
+      // Ursprungsbestellung laden (für Nachricht-Regenerierung)
+      const [order] = await db
+        .select()
+        .from(orders)
+        .where(eq(orders.orderId, followUp.orderId))
+        .limit(1);
+      if (!order) throw new Error("Bestellung nicht gefunden");
+
+      // Ausgewählte Produkte laden
+      const selectedProducts = await db
+        .select({
+          id: articles.id,
+          name: articles.name,
+          sellingPrice: articles.sellingPrice,
+          shopProductId: articles.shopProductId,
+          category: articles.category,
+        })
+        .from(salesFollowupProducts)
+        .leftJoin(articles, eq(salesFollowupProducts.articleId, articles.id))
+        .where(eq(salesFollowupProducts.followupId, input.followupId));
+
+      // ── Code-Logik ──────────────────────────────────────────────────────────
+      let promoCode: string;
+      let codeExpiresAt: Date;
+      let isNewCode = false;
+
+      if (followUp.discountCode && followUp.codeExpiresAt) {
+        const expiry = new Date(followUp.codeExpiresAt);
+        if (expiry > now) {
+          // Gültiger Code vorhanden → wiederverwenden
+          promoCode = followUp.discountCode;
+          codeExpiresAt = expiry;
+          console.log(`[FollowUp] Bestehenden Code ${promoCode} wiederverwendet für Follow-up ${input.followupId}`);
+        } else {
+          // Code abgelaufen → neuen Code erstellen (Nutzer hat bereits auf Aktion geklickt)
+          const result = await createIndividualCode(db, input.followupId, followUp.orderId);
+          promoCode = result.code;
+          codeExpiresAt = result.expiresAt;
+          isNewCode = true;
+          console.log(`[FollowUp] Neuer Code ${promoCode} erstellt (alter Code abgelaufen) für Follow-up ${input.followupId}`);
+        }
+      } else {
+        // Kein Code vorhanden → neuen Code erstellen
+        const result = await createIndividualCode(db, input.followupId, followUp.orderId);
+        promoCode = result.code;
+        codeExpiresAt = result.expiresAt;
+        isNewCode = true;
+        console.log(`[FollowUp] Erster Code ${promoCode} erstellt für Follow-up ${input.followupId}`);
+      }
+
+      // Platzhalter in gespeicherten Nachrichten ersetzen
+      const finalWhatsApp = generateWhatsAppMessage(order, selectedProducts, promoCode, codeExpiresAt);
+      const { subject: finalSubject, body: finalBody } = generateEmailContent(order, selectedProducts, promoCode, codeExpiresAt);
+
+      // Finale Nachrichten in DB speichern
+      await db
+        .update(salesFollowups)
+        .set({
+          whatsappMessage: finalWhatsApp,
+          emailSubject: finalSubject,
+          emailBody: finalBody,
+          updatedAt: now,
+        })
+        .where(eq(salesFollowups.id, input.followupId));
+
       return {
-        code: result.code,
-        expiresAt: result.expiresAt,
+        whatsappMessage: finalWhatsApp,
+        emailSubject: finalSubject,
+        emailBody: finalBody,
+        promoCode,
+        codeExpiresAt,
+        isNewCode,
       };
+    }),
+
+  /**
+   * forceNewCode – Legacy, wird nicht mehr aktiv genutzt.
+   * Neuer Code wird jetzt automatisch in resolveCode erstellt wenn der alte abgelaufen ist.
+   * Bleibt für Rückwärtskompatibilität erhalten.
+   */
+  forceNewCode: adminProcedure
+    .input(z.object({ followupId: z.number() }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      const [followUp] = await db
+        .select()
+        .from(salesFollowups)
+        .where(eq(salesFollowups.id, input.followupId))
+        .limit(1);
+      if (!followUp) throw new Error("Follow-up nicht gefunden");
+
+      const result = await createIndividualCode(db, input.followupId, followUp.orderId);
+      console.log(`[FollowUp] forceNewCode: Neuer Code ${result.code} für Follow-up ${input.followupId}`);
+      return { code: result.code, expiresAt: result.expiresAt };
     }),
 
   /**
@@ -810,9 +890,26 @@ export const followUpRouter = router({
         throw new Error("Nachrichten noch nicht generiert. Bitte zuerst Nachrichten generieren.");
       }
 
-      // Code-Ablauf prüfen
+      // Code-Ablauf prüfen – bei abgelaufenem Code resolveCode aufrufen um neuen Code zu erstellen
       if (followUp.codeExpiresAt && new Date(followUp.codeExpiresAt) < new Date()) {
-        throw new Error("Der Rabattcode ist abgelaufen. Bitte zuerst einen neuen Code erzeugen.");
+        // Neuen Code automatisch erstellen (E-Mail-Versand = Kundenkontakt-Moment)
+        const [order2] = await db
+          .select()
+          .from(orders)
+          .where(eq(orders.orderId, followUp.orderId))
+          .limit(1);
+        if (order2) {
+          await createIndividualCode(db, input.followupId, followUp.orderId);
+          // Follow-up neu laden mit neuem Code
+          const [updatedFollowUp] = await db
+            .select()
+            .from(salesFollowups)
+            .where(eq(salesFollowups.id, input.followupId))
+            .limit(1);
+          if (updatedFollowUp) {
+            Object.assign(followUp, updatedFollowUp);
+          }
+        }
       }
 
       // Bestellung laden für E-Mail-Adresse
