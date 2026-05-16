@@ -80,6 +80,9 @@ export const articles = pgTable("articles", {
   shortDescription: text("short_description"),
   beautyData: jsonb("beauty_data"),
   photoComingSoon: integer("photo_coming_soon").default(0),
+  // Cross-Sell Kategorie für Follow-up Empfehlungs-Matrix
+  // Werte: intake | output | regeneration | signaling | structural
+  followUpCategory: varchar("follow_up_category", { length: 50 }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
