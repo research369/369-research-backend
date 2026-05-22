@@ -659,8 +659,11 @@ export const partnerRouter = router({
   // ─── PUBLIC: Checkout integration ──────────────────────────────
 
   // Validate a partner code (public – called from checkout)
+  // Business rules:
+  // - "einmalig" (Creator): Customer gets discount ONLY on their FIRST order
+  // - "dauerhaft" (Partner): Customer gets discount ONLY on their FIRST order (partner earns commission on ALL orders)
   validateCode: publicProcedure
-    .input(z.object({ code: z.string() }))
+    .input(z.object({ code: z.string(), customerEmail: z.string().optional() }))
     .query(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
@@ -673,13 +676,38 @@ export const partnerRouter = router({
         .limit(1);
 
       if (!partner) {
-        return { valid: false, discountPercent: 0, partnerName: null };
+        return { valid: false, discountPercent: 0, partnerName: null, discountEligible: false, reason: "code_not_found" };
+      }
+
+      // Check if customer is eligible for discount (first order only for both types)
+      let discountEligible = true;
+      let reason: string | null = null;
+
+      if (input.customerEmail) {
+        const customerEmail = input.customerEmail.toLowerCase().trim();
+        // Check for previous PAID orders from this customer using this partner code
+        const previousOrders = await db.select().from(orders)
+          .where(and(
+            eq(orders.partnerCode, partner.code),
+            eq(orders.email, customerEmail)
+          ));
+        const previousPaidOrders = previousOrders.filter(o =>
+          o.status === "bezahlt" || o.status === "gepackt" || o.status === "versendet" || o.status === "zugestellt"
+        );
+        if (previousPaidOrders.length > 0) {
+          discountEligible = false;
+          reason = "already_used";
+          console.log(`[Partners] validateCode: Customer ${customerEmail} already has ${previousPaidOrders.length} paid orders with code ${partner.code} – discount not eligible`);
+        }
       }
 
       return {
         valid: true,
-        discountPercent: parseFloat(partner.customerDiscountPercent),
+        discountPercent: discountEligible ? parseFloat(partner.customerDiscountPercent) : 0,
         partnerName: partner.name,
+        commissionType: partner.commissionType,
+        discountEligible,
+        reason,
       };
     }),
 
