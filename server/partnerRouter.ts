@@ -682,8 +682,32 @@ export const partnerRouter = router({
       // Check if customer is eligible for discount (first order only for both types)
       let discountEligible = true;
       let reason: string | null = null;
+      const isEigennutzer = (partner.notes || "").includes("[EIGENNUTZER]");
 
-      if (input.customerEmail) {
+      // Eigennutzer: Code ist auf die eigene E-Mail gesperrt
+      if (isEigennutzer && partner.email) {
+        if (!input.customerEmail) {
+          // Kein E-Mail angegeben – Code nicht zulässig (E-Mail muss eingegeben werden)
+          discountEligible = false;
+          reason = "eigennutzer_email_required";
+        } else {
+          const customerEmail = input.customerEmail.toLowerCase().trim();
+          const partnerEmail = partner.email.toLowerCase().trim();
+          if (customerEmail !== partnerEmail) {
+            // Fremde E-Mail – Code gesperrt
+            return {
+              valid: false,
+              discountPercent: 0,
+              partnerName: null,
+              commissionType: partner.commissionType,
+              discountEligible: false,
+              reason: "eigennutzer_locked",
+            };
+          }
+        }
+      }
+
+      if (input.customerEmail && discountEligible) {
         const customerEmail = input.customerEmail.toLowerCase().trim();
         // Check for previous PAID orders from this customer using this partner code
         const previousOrders = await db.select().from(orders)
