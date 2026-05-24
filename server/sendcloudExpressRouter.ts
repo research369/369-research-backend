@@ -22,16 +22,26 @@ import {
 import { getDb } from "./db.js";
 import { orders } from "../drizzle/schema.js";
 import { eq } from "drizzle-orm";
+import { getUserFromRequest } from "./auth.js";
 
 export const sendcloudExpressRouter = Router();
 
-// ─── Middleware: Admin-Auth für Label-Erstellung ──────────────────────────────
-// Nutzt den bestehenden WAWI_INTERNAL_KEY – kein neues Auth-System
-function requireAdminAuth(req: Request, res: Response, next: () => void): void {
-  const authHeader = req.headers["authorization"] || "";
-  const token = authHeader.replace(/^Bearer\s+/i, "").trim();
-  if (!token || token !== ENV.wawiInternalKey) {
-    res.status(401).json({ error: "Unauthorized" });
+// ─── Middleware: JWT-Auth für Label-Erstellung ────────────────────────────────
+// Nutzt die bestehende WaWi-JWT-Auth (getUserFromRequest aus auth.ts).
+// Nur eingeloggte Admin-User dürfen Labels erstellen.
+// WAWI_INTERNAL_KEY bleibt nur für Server-to-Server-Calls.
+async function requireWawiAdmin(
+  req: Request,
+  res: Response,
+  next: () => void
+): Promise<void> {
+  const user = await getUserFromRequest(req);
+  if (!user) {
+    res.status(401).json({ error: "Nicht angemeldet" });
+    return;
+  }
+  if (user.role !== "admin") {
+    res.status(403).json({ error: "Keine Berechtigung – Admin erforderlich" });
     return;
   }
   next();
@@ -42,7 +52,7 @@ function requireAdminAuth(req: Request, res: Response, next: () => void): void {
 // Schreibt nur in bestehende Felder: trackingNumber, trackingCarrier, shippingLabelUrl
 sendcloudExpressRouter.post(
   "/api/shipping/sendcloud/create-label",
-  requireAdminAuth,
+  requireWawiAdmin,
   async (req: Request, res: Response) => {
     try {
       const { orderId, weightKg } = req.body as {
@@ -234,7 +244,7 @@ sendcloudExpressRouter.post(
 // Gibt verfügbare Sendcloud-Versandmethoden zurück (für Frontend-Auswahl)
 sendcloudExpressRouter.get(
   "/api/shipping/sendcloud/methods",
-  requireAdminAuth,
+  requireWawiAdmin,
   async (_req: Request, res: Response) => {
     const publicKey = ENV.sendcloudPublicKey;
     const secretKey = ENV.sendcloudSecretKey;
