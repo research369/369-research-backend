@@ -11,6 +11,7 @@ import { appRouter } from "./routers.js";
 import { getUserFromRequest, handleLogin, handleLogout, handleMe, seedAdminUser } from "./auth.js";
 import { getPool } from "./db.js";
 import type { Context } from "./trpc.js";
+import { sendcloudExpressRouter } from "./sendcloudExpressRouter.js";
 
 const app = express();
 
@@ -112,6 +113,9 @@ app.use(
     },
   })
 );
+
+// ─── Sendcloud Express Router (additiv, kein Eingriff in bestehende Routes) ───
+app.use(sendcloudExpressRouter);
 
 // Start server
 const port = ENV.port;

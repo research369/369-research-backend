@@ -24,4 +24,19 @@ export const ENV = {
 
   // Internal API key for WaWi frontend calls (no user login required)
   wawiInternalKey: process.env.WAWI_INTERNAL_KEY || "",
+
+  // Sendcloud API (shipping labels)
+  sendcloudPublicKey: process.env.SENDCLOUD_PUBLIC_KEY || "",
+  sendcloudSecretKey: process.env.SENDCLOUD_SECRET_KEY || "",
+  sendcloudWebhookSecret: process.env.SENDCLOUD_WEBHOOK_SECRET || "",
+  sendcloudShipmentIdDe: process.env.SENDCLOUD_SHIPMENT_ID_DE || "8",
+  sendcloudShipmentIdEu: process.env.SENDCLOUD_SHIPMENT_ID_EU || "8",
+
+  // Sender address for labels (Core Versand & Logistik)
+  senderName: process.env.SENDER_NAME || "Core Versand & Logistik",
+  senderStreet: process.env.SENDER_STREET || "",
+  senderHouseNumber: process.env.SENDER_HOUSE_NUMBER || "",
+  senderCity: process.env.SENDER_CITY || "",
+  senderZip: process.env.SENDER_ZIP || "",
+  senderCountry: process.env.SENDER_COUNTRY || "DE",
 };
