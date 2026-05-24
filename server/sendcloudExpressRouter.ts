@@ -149,6 +149,15 @@ sendcloudExpressRouter.post(
   }
 );
 
+// ─── GET /api/webhooks/sendcloud ─────────────────────────────────────────────
+// Sendcloud schickt beim Speichern der Integration einen GET-Request zur Validierung
+sendcloudExpressRouter.get(
+  "/api/webhooks/sendcloud",
+  (_req: Request, res: Response) => {
+    res.status(200).json({ received: true, status: "ok" });
+  }
+);
+
 // ─── POST /api/webhooks/sendcloud ────────────────────────────────────────────
 // Empfängt Status-Updates von Sendcloud (kein Auth – Sendcloud ruft diesen Endpoint auf)
 sendcloudExpressRouter.post(
