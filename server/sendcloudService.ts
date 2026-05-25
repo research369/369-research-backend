@@ -7,7 +7,7 @@
 import { createHmac } from "crypto";
 import { ENV } from "./env.js";
 
-const SENDCLOUD_API_URL = "https://panel.sendcloud.sc/api/v2";
+const SENDCLOUD_API_URL = "https://panel.sendcloud.sc/api/v3";
 
 interface SendcloudAddress {
   name: string;
