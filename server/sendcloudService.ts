@@ -1,63 +1,20 @@
 /**
- * Sendcloud API Service
+ * Sendcloud API Service v3
  * Handles label creation, tracking, and webhook processing
+ * Uses Sendcloud API v3 /shipments endpoint (required for new accounts)
  * Zero-Risk-Mode: only writes to existing + additive optional fields
  */
 
 import { createHmac } from "crypto";
 import { ENV } from "./env.js";
 
-const SENDCLOUD_API_URL = "https://panel.sendcloud.sc/api/v2";
+const SENDCLOUD_API_V2_URL = "https://panel.sendcloud.sc/api/v2";
+const SENDCLOUD_API_V3_URL = "https://panel.sendcloud.sc/api/v3";
 
-interface SendcloudAddress {
-  name: string;
-  company_name?: string;
-  address: string;
-  house_number: string;
-  city: string;
-  postal_code: string;
-  country: string; // ISO 2-letter
-  email?: string;
-  telephone?: string;
-}
-
-interface SendcloudParcelInput {
-  name: string;
-  company_name?: string;
-  address: string;
-  house_number: string;
-  city: string;
-  postal_code: string;
-  country: string;
-  email?: string;
-  telephone?: string;
-  shipment: {
-    id: number; // Sendcloud shipping method ID
-  };
-  weight: string; // in kg, e.g. "2.000"
-  order_number: string;
-  request_label: boolean;
-}
-
-interface SendcloudParcelResponse {
-  parcel: {
-    id: number;
-    tracking_number: string;
-    tracking_url: string;
-    label: {
-      normal_printer: string[];
-      label_printer: string;
-    };
-    status: {
-      id: number;
-      message: string;
-    };
-    shipment: {
-      id: number;
-      name: string;
-    };
-  };
-}
+// Shipping option codes for v3 API (account-specific, fetched dynamically)
+// Fallback defaults for DHL Germany
+const DEFAULT_SHIPPING_OPTION_DE = "dhl_de:dhl_paket";
+const DEFAULT_SHIPPING_OPTION_EU = "dhl_de:dhl_paket";
 
 interface SendcloudWebhookPayload {
   action: string;
@@ -86,7 +43,74 @@ export function mapSendcloudStatus(statusId: number): string {
 }
 
 /**
- * Create a Sendcloud parcel and get a shipping label
+ * Poll Sendcloud v2 parcel endpoint until label is ready (max 30s)
+ */
+async function waitForLabel(
+  parcelId: number,
+  credentials: string,
+  maxWaitMs = 30000
+): Promise<{
+  trackingNumber: string;
+  trackingUrl: string;
+  labelUrl: string;
+} | null> {
+  const pollInterval = 2000;
+  const maxAttempts = Math.ceil(maxWaitMs / pollInterval);
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+    }
+
+    try {
+      const response = await fetch(
+        `${SENDCLOUD_API_V2_URL}/parcels/${parcelId}`,
+        {
+          headers: {
+            Authorization: `Basic ${credentials}`,
+          },
+        }
+      );
+
+      if (!response.ok) continue;
+
+      const data = (await response.json()) as {
+        parcel: {
+          tracking_number: string;
+          tracking_url: string;
+          label: {
+            normal_printer: string[];
+            label_printer: string;
+          };
+          status: { id: number; message: string };
+        };
+      };
+
+      const parcel = data.parcel;
+      const labelUrl =
+        parcel.label?.normal_printer?.[0] ||
+        parcel.label?.label_printer ||
+        null;
+
+      // Status >= 1000 = label ready / ready to send
+      if (parcel.tracking_number && labelUrl) {
+        return {
+          trackingNumber: parcel.tracking_number,
+          trackingUrl: parcel.tracking_url || "",
+          labelUrl,
+        };
+      }
+    } catch {
+      // Continue polling
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Create a Sendcloud shipment using API v3 and get a shipping label
+ * Uses async announcement + polling for label retrieval
  */
 export async function createSendcloudLabel(params: {
   orderId: string;
@@ -121,43 +145,67 @@ export async function createSendcloudLabel(params: {
     };
   }
 
-  // Determine shipping method ID based on country
-  // DHL Paket DE (2kg) = method ID varies by account, default to standard
-  const shipmentId = getShipmentId(params.country);
-  const weight = (params.weightKg || 2.0).toFixed(3);
+  const credentials = Buffer.from(`${publicKey}:${secretKey}`).toString(
+    "base64"
+  );
+  const countryCode = normalizeCountryCode(params.country);
+  const shippingOptionCode = getShippingOptionCode(countryCode);
+  const weight = (params.weightKg || 1.0).toFixed(3);
 
-  const parcelData: SendcloudParcelInput = {
-    name: `${params.firstName} ${params.lastName}`.trim(),
-    company_name: params.company || undefined,
-    address: params.street,
-    house_number: params.houseNumber,
-    city: params.city,
-    postal_code: params.zip,
-    country: normalizeCountryCode(params.country),
-    email: params.email || undefined,
-    telephone: params.phone || undefined,
-    shipment: { id: shipmentId },
-    weight,
-    order_number: params.orderId,
-    request_label: true,
+  // Build address_line_1: street + house number combined
+  const addressLine1 = params.houseNumber
+    ? `${params.street} ${params.houseNumber}`.trim()
+    : params.street;
+
+  const shipmentBody = {
+    to_address: {
+      name: `${params.firstName} ${params.lastName}`.trim(),
+      company_name: params.company || undefined,
+      address_line_1: addressLine1,
+      city: params.city,
+      postal_code: params.zip,
+      country_code: countryCode,
+      email: params.email || undefined,
+      phone_number: params.phone || undefined,
+    },
+    from_address: {
+      name: ENV.senderName || "369 Research",
+      address_line_1: ENV.senderStreet
+        ? `${ENV.senderStreet} ${ENV.senderHouseNumber || ""}`.trim()
+        : undefined,
+      city: ENV.senderCity || undefined,
+      postal_code: ENV.senderZip || undefined,
+      country_code: ENV.senderCountry || "DE",
+    },
+    ship_with: {
+      type: "shipping_option_code",
+      properties: {
+        shipping_option_code: shippingOptionCode,
+      },
+    },
+    parcels: [
+      {
+        weight: { value: weight, unit: "kg" },
+        order_number: params.orderId,
+        request_label: true,
+      },
+    ],
   };
 
   try {
-    const credentials = Buffer.from(`${publicKey}:${secretKey}`).toString("base64");
-    const response = await fetch(`${SENDCLOUD_API_URL}/parcels`, {
+    const response = await fetch(`${SENDCLOUD_API_V3_URL}/shipments`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Basic ${credentials}`,
       },
-      body: JSON.stringify({ parcel: parcelData }),
+      body: JSON.stringify(shipmentBody),
     });
 
     if (!response.ok) {
       const errorBody = await response.text();
-      console.error("[Sendcloud] API error:", response.status, errorBody);
+      console.error("[Sendcloud v3] API error:", response.status, errorBody);
 
-      // Classify error
       let errorCode = "SENDCLOUD_API_ERROR";
       if (response.status === 400) errorCode = "VALIDATION_ERROR";
       if (response.status === 409) errorCode = "DUPLICATE_LABEL";
@@ -170,18 +218,81 @@ export async function createSendcloudLabel(params: {
       };
     }
 
-    const data = (await response.json()) as SendcloudParcelResponse;
-    const parcel = data.parcel;
+    const data = (await response.json()) as {
+      data: {
+        id: string;
+        parcels: Array<{
+          id: number;
+          tracking_number: string;
+          tracking_url: string | null;
+          status: { code: string; message: string };
+          label?: {
+            normal_printer?: string[];
+            label_printer?: string;
+          };
+        }>;
+      };
+    };
 
+    const shipment = data.data;
+    const parcel = shipment?.parcels?.[0];
+
+    if (!parcel) {
+      return {
+        success: false,
+        errorCode: "SENDCLOUD_API_ERROR",
+        errorMessage: "No parcel in Sendcloud response",
+      };
+    }
+
+    const parcelId = parcel.id;
+
+    // Check if label is immediately available
+    const immediateLabel =
+      parcel.label?.normal_printer?.[0] ||
+      parcel.label?.label_printer ||
+      null;
+
+    if (parcel.tracking_number && immediateLabel) {
+      return {
+        success: true,
+        parcelId,
+        trackingNumber: parcel.tracking_number,
+        trackingUrl: parcel.tracking_url || "",
+        labelUrl: immediateLabel,
+      };
+    }
+
+    // Label not yet ready — poll v2 parcels endpoint
+    console.log(
+      `[Sendcloud v3] Parcel ${parcelId} status: ${parcel.status?.message}. Polling for label...`
+    );
+    const labelData = await waitForLabel(parcelId, credentials);
+
+    if (labelData) {
+      return {
+        success: true,
+        parcelId,
+        trackingNumber: labelData.trackingNumber,
+        trackingUrl: labelData.trackingUrl,
+        labelUrl: labelData.labelUrl,
+      };
+    }
+
+    // Label still not ready after polling — return partial success
+    console.warn(
+      `[Sendcloud v3] Label for parcel ${parcelId} not ready after polling`
+    );
     return {
       success: true,
-      parcelId: parcel.id,
-      trackingNumber: parcel.tracking_number,
-      trackingUrl: parcel.tracking_url,
-      labelUrl: parcel.label?.normal_printer?.[0] || parcel.label?.label_printer || undefined,
+      parcelId,
+      trackingNumber: parcel.tracking_number || "",
+      trackingUrl: parcel.tracking_url || "",
+      labelUrl: "",
+      errorMessage: "Label wird noch generiert — bitte in Sendcloud prüfen",
     };
   } catch (err: any) {
-    console.error("[Sendcloud] Network error:", err.message);
+    console.error("[Sendcloud v3] Network error:", err.message);
     return {
       success: false,
       errorCode: "NETWORK_ERROR",
@@ -222,17 +333,22 @@ export function parseSendcloudWebhook(body: unknown): SendcloudWebhookPayload | 
 }
 
 /**
- * Get Sendcloud shipment method ID based on destination country
- * These IDs are account-specific — defaults to DHL Paket (DE)
- * Configure via SENDCLOUD_SHIPMENT_ID_DE / SENDCLOUD_SHIPMENT_ID_EU env vars
+ * Get Sendcloud v3 shipping option code based on destination country
+ * Configure via SENDCLOUD_SHIPPING_OPTION_DE / SENDCLOUD_SHIPPING_OPTION_EU env vars
  */
-function getShipmentId(country: string): number {
-  const normalized = normalizeCountryCode(country);
-  if (normalized === "DE") {
-    return parseInt(ENV.sendcloudShipmentIdDe || "8", 10); // DHL Paket DE default
+function getShippingOptionCode(countryCode: string): string {
+  if (countryCode === "DE") {
+    return (
+      (ENV as any).sendcloudShippingOptionDe ||
+      process.env.SENDCLOUD_SHIPPING_OPTION_DE ||
+      DEFAULT_SHIPPING_OPTION_DE
+    );
   }
-  // EU / international
-  return parseInt(ENV.sendcloudShipmentIdEu || "8", 10);
+  return (
+    (ENV as any).sendcloudShippingOptionEu ||
+    process.env.SENDCLOUD_SHIPPING_OPTION_EU ||
+    DEFAULT_SHIPPING_OPTION_EU
+  );
 }
 
 /**
@@ -240,33 +356,33 @@ function getShipmentId(country: string): number {
  */
 function normalizeCountryCode(country: string): string {
   const map: Record<string, string> = {
-    "Deutschland": "DE",
-    "Germany": "DE",
-    "DE": "DE",
-    "Österreich": "AT",
-    "Austria": "AT",
-    "AT": "AT",
-    "Schweiz": "CH",
-    "Switzerland": "CH",
-    "CH": "CH",
-    "Niederlande": "NL",
-    "Netherlands": "NL",
-    "NL": "NL",
-    "Frankreich": "FR",
-    "France": "FR",
-    "FR": "FR",
-    "Belgien": "BE",
-    "Belgium": "BE",
-    "BE": "BE",
-    "Luxemburg": "LU",
-    "Luxembourg": "LU",
-    "LU": "LU",
-    "Polen": "PL",
-    "Poland": "PL",
-    "PL": "PL",
-    "Tschechien": "CZ",
+    Deutschland: "DE",
+    Germany: "DE",
+    DE: "DE",
+    Österreich: "AT",
+    Austria: "AT",
+    AT: "AT",
+    Schweiz: "CH",
+    Switzerland: "CH",
+    CH: "CH",
+    Niederlande: "NL",
+    Netherlands: "NL",
+    NL: "NL",
+    Frankreich: "FR",
+    France: "FR",
+    FR: "FR",
+    Belgien: "BE",
+    Belgium: "BE",
+    BE: "BE",
+    Luxemburg: "LU",
+    Luxembourg: "LU",
+    LU: "LU",
+    Polen: "PL",
+    Poland: "PL",
+    PL: "PL",
+    Tschechien: "CZ",
     "Czech Republic": "CZ",
-    "CZ": "CZ",
+    CZ: "CZ",
   };
   return map[country] || country.toUpperCase().slice(0, 2);
 }
