@@ -32,6 +32,16 @@ export const ENV = {
   sendcloudShipmentIdDe: process.env.SENDCLOUD_SHIPMENT_ID_DE || "8",
   sendcloudShipmentIdEu: process.env.SENDCLOUD_SHIPMENT_ID_EU || "8",
 
+  // DHL Geschäftskunden API (Phase 1: DE national, V01PAK)
+  dhlApiKey:           process.env.DHL_API_KEY || "",
+  dhlBusinessUsername: process.env.DHL_BUSINESS_USERNAME || "",
+  dhlBusinessPassword: process.env.DHL_BUSINESS_PASSWORD || "",
+  dhlEkp:              process.env.DHL_EKP || "",
+  dhlBillingNumber:    process.env.DHL_BILLING_NUMBER || "",
+  dhlProductCodeDe:    process.env.DHL_PRODUCT_CODE_DE || "V01PAK",
+  // true = Sandbox (Default), false = Production (nur nach expliziter Freigabe)
+  dhlSandbox:          process.env.DHL_SANDBOX !== "false",
+
   // Sender address for labels (Core Versand & Logistik)
   senderName: process.env.SENDER_NAME || "Core Versand & Logistik",
   senderStreet: process.env.SENDER_STREET || "",

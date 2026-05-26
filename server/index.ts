@@ -12,6 +12,7 @@ import { getUserFromRequest, handleLogin, handleLogout, handleMe, seedAdminUser 
 import { getPool } from "./db.js";
 import type { Context } from "./trpc.js";
 import { sendcloudExpressRouter } from "./sendcloudExpressRouter.js";
+import { dhlExpressRouter } from "./dhlExpressRouter.js";
 
 const app = express();
 
@@ -116,6 +117,9 @@ app.use(
 
 // ─── Sendcloud Express Router (additiv, kein Eingriff in bestehende Routes) ───
 app.use(sendcloudExpressRouter);
+
+// ─── DHL Express Router (additiv, Phase 1: DE national, Sandbox) ─────────────
+app.use(dhlExpressRouter);
 
 // Start server
 const port = ENV.port;
