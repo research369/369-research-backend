@@ -176,10 +176,11 @@ export async function createDhlShipmentDE(
   const body = {
     profile: "STANDARD_GRUPPENPROFIL",
     // 100x150mm Thermal Label (Zebra/Munbyn) – kein A4
+    // 910-300-400 = 103x150mm Thermal (Falteetiketten) – korrektes Format für Thermodrucker
     printSettings: {
       printerDpi:   300,
       encodingType: "PDF",
-      labelFormat:  "910-300-700",
+      labelFormat:  "910-300-400",
     },
     shipments: [
       {
