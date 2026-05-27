@@ -265,8 +265,9 @@ export const orders = pgTable("orders", {
   trackingNumber: varchar("tracking_number", { length: 100 }),
   trackingCarrier: varchar("tracking_carrier", { length: 50 }),
 
-  // Shipping label URL
+  // Shipping label: URL = interne Download-Route, Content = Base64-PDF persistent in DB
   shippingLabelUrl: text("shipping_label_url"),
+  shippingLabelContent: text("shipping_label_content"),
 
   // Partner / Affiliate
   partnerCode: varchar("partner_code", { length: 50 }),

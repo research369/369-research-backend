@@ -7,8 +7,14 @@
  * und der Sendcloud-Integration.
  *
  * Endpoints:
- *   POST /api/shipping/dhl/create-label  – DHL-Label für eine Bestellung erstellen
- *   GET  /api/shipping/dhl/status        – Konfigurationsstatus prüfen (kein DHL-Call)
+ *   POST /api/shipping/dhl/create-label     – DHL-Label für eine Bestellung erstellen
+ *   GET  /api/shipping/dhl/label/:orderId   – Label-PDF abrufen (aus DB, kein DHL-Call)
+ *   GET  /api/shipping/dhl/status           – Konfigurationsstatus prüfen (kein DHL-Call)
+ *
+ * Label-Speicherung:
+ *   - Base64-PDF wird in orders.shippingLabelContent (TEXT) gespeichert
+ *   - orders.shippingLabelUrl wird auf /api/shipping/dhl/label/{orderId} gesetzt
+ *   - Download-Route liest aus DB, decoded Base64 → Buffer → PDF-Response
  *
  * Duplikat-Schutz (persistent, server-restart-sicher):
  *   Stufe 1: DB-Prüfung vor dem Call (trackingNumber IS NULL AND shippingLabelUrl IS NULL)
@@ -16,9 +22,8 @@
  *   Stufe 3: Kein blindes Überschreiben nach dem DHL-Call
  *
  * Sicherheit:
- *   - Nur eingeloggte Admin-User dürfen Labels erstellen (JWT via getUserFromRequest)
+ *   - Nur eingeloggte Admin-User dürfen Labels erstellen und abrufen (JWT via getUserFromRequest)
  *   - Keine DHL-Credentials im Response
- *   - Kein Production-Call wenn DHL_SANDBOX=true (Default)
  */
 
 import { Router, type Request, type Response } from "express";
@@ -31,7 +36,7 @@ import { getUserFromRequest } from "./auth.js";
 
 export const dhlExpressRouter = Router();
 
-// ─── Middleware: JWT-Auth für Label-Erstellung ────────────────────────────────
+// ─── Middleware: JWT-Auth für Label-Erstellung und -Abruf ────────────────────
 
 async function requireWawiAdmin(
   req: Request,
@@ -52,7 +57,6 @@ async function requireWawiAdmin(
 
 // ─── GET /api/shipping/dhl/status ─────────────────────────────────────────────
 // Gibt Konfigurationsstatus zurück ohne DHL-Call.
-// Nützlich für Debugging und Sandbox-Verifikation.
 
 dhlExpressRouter.get(
   "/api/shipping/dhl/status",
@@ -77,10 +81,67 @@ dhlExpressRouter.get(
   }
 );
 
+// ─── GET /api/shipping/dhl/label/:orderId ─────────────────────────────────────
+// Liest shippingLabelContent aus DB, decoded Base64 → Buffer → PDF-Response.
+// Kein DHL-Call. Idempotent.
+
+dhlExpressRouter.get(
+  "/api/shipping/dhl/label/:orderId",
+  requireWawiAdmin,
+  async (req: Request, res: Response) => {
+    const orderId = String(req.params.orderId ?? "");
+
+    if (!orderId || orderId.trim() === "") {
+      res.status(400).json({ success: false, error: "orderId fehlt" });
+      return;
+    }
+
+    const db = await getDb();
+    if (!db) {
+      res.status(503).json({ success: false, error: "Datenbank nicht verfügbar" });
+      return;
+    }
+
+    const [order] = await db
+      .select({
+        orderId:              orders.orderId,
+        shippingLabelContent: (orders as any).shippingLabelContent,
+        trackingNumber:       orders.trackingNumber,
+      })
+      .from(orders)
+      .where(eq(orders.orderId, orderId.trim()))
+      .limit(1);
+
+    if (!order) {
+      res.status(404).json({ success: false, error: `Bestellung ${orderId} nicht gefunden` });
+      return;
+    }
+
+    if (!order.shippingLabelContent) {
+      res.status(404).json({
+        success: false,
+        error:   "Kein Label für diese Bestellung gespeichert",
+        orderId: order.orderId,
+      });
+      return;
+    }
+
+    // Base64 → Buffer → PDF
+    const pdfBuffer = Buffer.from(order.shippingLabelContent as string, "base64");
+
+    res.set({
+      "Content-Type":        "application/pdf",
+      "Content-Disposition": `inline; filename="dhl-label-${orderId}.pdf"`,
+      "Content-Length":      String(pdfBuffer.length),
+      "Cache-Control":       "private, no-cache",
+    });
+    res.send(pdfBuffer);
+  }
+);
+
 // ─── POST /api/shipping/dhl/create-label ──────────────────────────────────────
 // Erstellt ein DHL-Label für eine bestehende Bestellung.
-// Schreibt ausschließlich in bestehende Felder:
-//   trackingNumber, trackingCarrier, shippingLabelUrl
+// Schreibt in: trackingNumber, trackingCarrier, shippingLabelUrl, shippingLabelContent
 
 dhlExpressRouter.post(
   "/api/shipping/dhl/create-label",
@@ -121,7 +182,7 @@ dhlExpressRouter.post(
         error:   "Bestellung hat bereits ein Label oder eine Trackingnummer – kein neues Label erstellt",
         existing: {
           trackingNumber: order.trackingNumber ?? null,
-          hasLabel:       !!order.shippingLabelUrl,
+          labelUrl:       order.shippingLabelUrl ?? null,
         },
       });
       return;
@@ -152,7 +213,6 @@ dhlExpressRouter.post(
 
     // ── Stufe 2: Atomares UPDATE als Race-Condition-Schutz ───────────────────
     // Setzt trackingCarrier auf "DHL_PENDING" nur wenn noch kein Tracking vorhanden.
-    // Wenn ein anderer Request gleichzeitig läuft, schlägt dieses UPDATE fehl (0 rows).
     const lockResult = await db
       .update(orders)
       .set({ trackingCarrier: "DHL_PENDING" })
@@ -164,7 +224,6 @@ dhlExpressRouter.post(
         )
       );
 
-    // Drizzle gibt rowCount zurück – wenn 0, hat ein anderer Request bereits gelockt
     const rowsUpdated = (lockResult as any)?.rowCount ?? (lockResult as any)?.rowsAffected ?? 1;
     if (rowsUpdated === 0) {
       res.status(409).json({
@@ -185,25 +244,33 @@ dhlExpressRouter.post(
 
     // ── Stufe 3: Ergebnis in DB schreiben ────────────────────────────────────
     if (result.success && result.trackingNumber) {
+      // Interne Download-Route als shippingLabelUrl
+      const labelRoute = `/api/shipping/dhl/label/${orderId.trim()}`;
+
+      // Base64-PDF in shippingLabelContent speichern
+      const labelContent = result.labelBase64 ?? null;
+
       await db
         .update(orders)
         .set({
-          trackingNumber:  result.trackingNumber,
-          trackingCarrier: "DHL",
-          shippingLabelUrl: result.labelUrl ?? result.labelBase64 ?? null,
+          trackingNumber:   result.trackingNumber,
+          trackingCarrier:  "DHL",
+          shippingLabelUrl: labelRoute,
+          ...(labelContent ? { shippingLabelContent: labelContent } as any : {}),
         })
         .where(eq(orders.orderId, orderId.trim()));
 
-      console.log(`[dhlRouter] Label gespeichert: ${result.trackingNumber}`);
+      console.log(`[dhlRouter] Label gespeichert: ${result.trackingNumber} | Route: ${labelRoute} | Content: ${labelContent ? 'ja' : 'nein'}`);
 
       res.json({
         success:        true,
         trackingNumber: result.trackingNumber,
-        labelUrl:       result.labelUrl ?? null,
+        labelUrl:       labelRoute,
+        hasContent:     !!labelContent,
         sandbox:        ENV.dhlSandbox,
       });
     } else {
-      // Fehlerfall: Lock-Marker zurücksetzen damit ein erneuter Versuch möglich ist
+      // Fehlerfall: Lock-Marker zurücksetzen
       await db
         .update(orders)
         .set({ trackingCarrier: null })

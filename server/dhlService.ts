@@ -29,8 +29,8 @@ const DHL_API_BASE_SANDBOX = "https://api-sandbox.dhl.com/parcel/de/shipping/v2"
 const DHL_API_BASE_PROD    = "https://api-eu.dhl.com/parcel/de/shipping/v2";
 
 /** Standard-Absender gemäß Konfiguration */
-const DEFAULT_SHIPPER = {
-  name1:          "Core Versand und Logistik GmbH",
+  const DEFAULT_SHIPPER = {
+  name1:          "Core Versand und Logistik",
   addressStreet:  "Klingenhagen",
   addressHouse:   "31",
   postalCode:     "48336",
@@ -266,9 +266,16 @@ export async function createDhlShipmentDE(
     };
   }
 
-  const trackingNumber = shipment.shipmentTrackingNumber as string | undefined;
-  const labelUrl       = shipment.label?.url as string | undefined;
-  const labelBase64    = shipment.label?.b64 as string | undefined;
+  // DHL Response-Felder: trackingId ODER shipmentTrackingNumber (je nach Konto)
+  const trackingNumber =
+    (shipment.trackingId as string | undefined) ??
+    (shipment.shipmentTrackingNumber as string | undefined);
+
+  // Label: entweder als URL oder als Base64-PDF (b64 oder content)
+  const labelUrl    = shipment.label?.url as string | undefined;
+  const labelBase64 =
+    (shipment.label?.b64 as string | undefined) ??
+    (shipment.label?.content as string | undefined);
 
   if (!trackingNumber) {
     return {
