@@ -175,6 +175,12 @@ export async function createDhlShipmentDE(
 
   const body = {
     profile: "STANDARD_GRUPPENPROFIL",
+    // 100x150mm Thermal Label (Zebra/Munbyn) – kein A4
+    printSettings: {
+      printerDpi:   300,
+      encodingType: "PDF",
+      labelFormat:  "910-300-700",
+    },
     shipments: [
       {
         product:       "V01PAK",
