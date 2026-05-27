@@ -209,7 +209,7 @@ export async function createDhlShipmentDE(
   };
 
   // 5. DHL API-Call
-  const apiUrl = `${getApiBase()}/orders?validate=false&printOnlyIfCodable=false&docFormat=PDF&labelResponseType=URL`;
+  const apiUrl = `${getApiBase()}/orders?validate=false&printOnlyIfCodable=false&docFormat=PDF&labelResponseType=INCLUDE`;
 
   let rawResponse: Response;
   let responseText: string;
@@ -266,8 +266,9 @@ export async function createDhlShipmentDE(
     };
   }
 
-  // DHL Response-Felder: trackingId ODER shipmentTrackingNumber (je nach Konto)
+  // DHL Response-Felder: shipmentNo (primär), Fallbacks für andere Konto-Typen
   const trackingNumber =
+    (shipment.shipmentNo as string | undefined) ??
     (shipment.trackingId as string | undefined) ??
     (shipment.shipmentTrackingNumber as string | undefined);
 
