@@ -189,13 +189,20 @@ dhlExpressRouter.post(
     }
 
     // ── Adress-Validierung vor DHL-Call ──────────────────────────────────────
+    // Normalisiere Land: "Deutschland", "Germany", "DEU", "de" → "DE"
+    const normalizeCountry = (raw: string | null | undefined): string => {
+      if (!raw) return "";
+      const s = raw.trim().toUpperCase();
+      if (s === "DEUTSCHLAND" || s === "GERMANY" || s === "DEU" || s === "DE") return "DE";
+      return raw.trim();
+    };
     const consignee: DhlConsignee = {
       name1:         `${order.firstName} ${order.lastName}`.trim(),
       addressStreet: order.street,
       addressHouse:  order.houseNumber,
       postalCode:    order.zip,
       city:          order.city,
-      country:       order.country,
+      country:       normalizeCountry(order.country),
       email:         order.email ?? undefined,
       phone:         order.phone ?? undefined,
     };
