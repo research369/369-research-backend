@@ -233,6 +233,7 @@ export const customerRouter = router({
       }
       if (nextNum < 1210) nextNum = 1210;
 
+      console.log(`[customer.create] houseNumber=${JSON.stringify(input.houseNumber)}, street=${JSON.stringify(input.street)}, zip=${JSON.stringify(input.zip)}, city=${JSON.stringify(input.city)}`);
       const [inserted] = await db.insert(customers).values({
         customerNumber: String(nextNum),
         name: input.name,
