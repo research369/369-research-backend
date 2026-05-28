@@ -316,3 +316,124 @@ dhlExpressRouter.post(
     }
   }
 );
+
+// ─── POST /api/shipping/dhl/sandbox-test ─────────────────────────────────────
+/**
+ * Testet eine Billing Number gegen den DHL Sandbox-Endpoint.
+ * KEIN DB-Write, KEIN Label speichern, KEIN Production-Call.
+ * Immer Sandbox – unabhängig von DHL_SANDBOX ENV.
+ *
+ * Body: { billingNumber: string, product: string }
+ *
+ * Beispiel curl:
+ *   curl -X POST https://<host>/api/shipping/dhl/sandbox-test \
+ *     -H "Authorization: Bearer <jwt>" \
+ *     -H "Content-Type: application/json" \
+ *     -d '{"billingNumber":"63979135286201","product":"V62WP"}'
+ */
+dhlExpressRouter.post(
+  "/api/shipping/dhl/sandbox-test",
+  requireWawiAdmin,
+  async (req: Request, res: Response) => {
+    const { billingNumber, product } = req.body as {
+      billingNumber?: string;
+      product?: string;
+    };
+
+    if (!billingNumber || !product) {
+      res.status(400).json({
+        success: false,
+        error: "billingNumber und product sind Pflichtfelder",
+      });
+      return;
+    }
+
+    const apiKey   = ENV.dhlApiKey;
+    const username = ENV.dhlBusinessUsername;
+    const password = ENV.dhlBusinessPassword;
+
+    if (!apiKey || !username || !password) {
+      res.status(500).json({ success: false, error: "DHL-Credentials nicht konfiguriert" });
+      return;
+    }
+
+    const basicToken = Buffer.from(`${username}:${password}`).toString("base64");
+    // Immer Sandbox – unabhängig von ENV.dhlSandbox
+    const sandboxUrl =
+      "https://api-sandbox.dhl.com/parcel/de/shipping/v2/orders?validate=false&mustEncode=false&printFormat=PDF&docFormat=PDF";
+
+    // Minimaler Test-Payload mit Dummy-Adresse (DE national)
+    const testPayload = {
+      profile: "STANDARD_GRUPPENPROFIL",
+      shipments: [
+        {
+          product:       product,
+          billingNumber: billingNumber,
+          refNo:         "SANDBOX-TEST-001",
+          shipper: {
+            name1:         "Core Versand und Logistik",
+            addressStreet: "Klingenhagen",
+            addressHouse:  "31",
+            postalCode:    "48336",
+            city:          "Sassenberg",
+            country:       "DEU",
+            email:         "versand@369research.eu",
+          },
+          consignee: {
+            name1:         "Test Empfaenger",
+            addressStreet: "Musterstrasse",
+            addressHouse:  "1",
+            postalCode:    "10115",
+            city:          "Berlin",
+            country:       "DEU",
+            phone:         "+4915510000000",
+          },
+          details: {
+            weight: { uom: "kg", value: 0.5 },
+          },
+        },
+      ],
+    };
+
+    console.log(
+      `[dhlSandboxTest] Teste billingNumber=${billingNumber} / product=${product} gegen DHL Sandbox`
+    );
+
+    try {
+      const response = await fetch(sandboxUrl, {
+        method: "POST",
+        headers: {
+          "dhl-api-key":   apiKey,
+          "Authorization": `Basic ${basicToken}`,
+          "Content-Type":  "application/json",
+        },
+        body: JSON.stringify(testPayload),
+      });
+
+      const responseText = await response.text();
+      let responseJson: unknown;
+      try {
+        responseJson = JSON.parse(responseText);
+      } catch {
+        responseJson = responseText;
+      }
+
+      console.log(
+        `[dhlSandboxTest] HTTP ${response.status} | billingNumber=${billingNumber} | product=${product}`,
+        responseJson
+      );
+
+      res.status(200).json({
+        success:     response.ok,
+        httpStatus:  response.status,
+        billingNumber,
+        product,
+        dhlResponse: responseJson,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[dhlSandboxTest] Fetch-Fehler:", message);
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+);
