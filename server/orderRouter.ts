@@ -840,7 +840,7 @@ export const orderRouter = router({
         sender: p.counterpartyAlias.name || "Unbekannt",
         description: p.description || "",
         date: p.created,
-        iban: p.counterpartyAlias.iban || "",
+        iban: (p.counterpartyAlias as any).iban || "",
       }));
 
     return {

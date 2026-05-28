@@ -439,9 +439,8 @@ export const partnerRouter = router({
       }).where(eq(customers.id, input.customerId));
 
       // Retroactively calculate commissions for all existing paid orders of this customer
-      const { inArray } = await import("drizzle-orm");
-      const paidStatuses = ["bezahlt", "gepackt", "versendet", "zugestellt"];
-
+            const { inArray } = await import("drizzle-orm");
+      const paidStatuses = ["bezahlt", "gepackt", "versendet", "zugestellt"] as const;
       // Find all paid orders for this customer (by email or customerId)
       const customerOrders = await db.select().from(orders)
         .where(and(
@@ -1050,10 +1049,9 @@ export const partnerRouter = router({
       const limit = input?.limit || 50;
       const offset = input?.offset || 0;
 
-      // Only show paid orders
+            // Only show paid orders
       const { inArray } = await import("drizzle-orm");
-      const paidStatuses = ["bezahlt", "gepackt", "versendet", "zugestellt"];
-
+      const paidStatuses = ["bezahlt", "gepackt", "versendet", "zugestellt"] as const;
       const referredOrders = await db.select({
         orderId: orders.orderId,
         orderDate: orders.orderDate,
@@ -1093,7 +1091,7 @@ export const partnerRouter = router({
 
       // Count total referred orders (paid only)
       const { inArray, ne } = await import("drizzle-orm");
-      const paidStatuses = ["bezahlt", "gepackt", "versendet", "zugestellt"];
+      const paidStatuses = ["bezahlt", "gepackt", "versendet", "zugestellt"] as const;
 
        const referredOrders = await db.select({
         total: orders.total,
@@ -1596,7 +1594,7 @@ export const partnerRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Database not available");
       const { inArray } = await import("drizzle-orm");
-      const paidStatuses = ["bezahlt", "gepackt", "versendet", "zugestellt"];
+      const paidStatuses = ["bezahlt", "gepackt", "versendet", "zugestellt"] as const;
 
       const allPartners = await db.select().from(partners);
       let totalFixed = 0;
