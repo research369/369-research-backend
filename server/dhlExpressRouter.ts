@@ -29,6 +29,7 @@
 import { Router, type Request, type Response } from "express";
 import { ENV } from "./env.js";
 import { createDhlShipmentDE, validateConsignee, type DhlConsignee } from "./dhlService.js";
+import { getDhlProfiles, getActiveProfile, type DhlProfileKey } from "./dhlProfiles.js";
 import { getDb } from "./db.js";
 import { orders } from "../drizzle/schema.js";
 import { eq, and, isNull } from "drizzle-orm";
@@ -147,10 +148,25 @@ dhlExpressRouter.post(
   "/api/shipping/dhl/create-label",
   requireWawiAdmin,
   async (req: Request, res: Response) => {
-    const { orderId, weightGrams } = req.body as {
-      orderId?:     string;
-      weightGrams?: number;
+    const { orderId, weightGrams, shippingProfile } = req.body as {
+      orderId?:        string;
+      weightGrams?:    number;
+      shippingProfile?: string;
     };
+    // ── Profil-Auswahl (Default: DHL_DE_STANDARD) ────────────────────────────
+    const profileKey: DhlProfileKey = (shippingProfile as DhlProfileKey) ?? "DHL_DE_STANDARD";
+    const allProfiles = getDhlProfiles();
+    if (!allProfiles[profileKey]) {
+      res.status(400).json({ success: false, error: `Unbekanntes Versandprofil: ${profileKey}` });
+      return;
+    }
+    let activeProfile;
+    try {
+      activeProfile = getActiveProfile(profileKey);
+    } catch (err: any) {
+      res.status(400).json({ success: false, error: err.message });
+      return;
+    }
 
     // ── Eingabe-Validierung ──────────────────────────────────────────────────
     if (!orderId || typeof orderId !== "string" || orderId.trim() === "") {
@@ -240,13 +256,15 @@ dhlExpressRouter.post(
       return;
     }
 
-    // ── DHL-Call ─────────────────────────────────────────────────────────────
-    console.log(`[dhlRouter] Erstelle DHL-Label für Bestellung ${orderId} (Sandbox: ${ENV.dhlSandbox})`);
-
+        // ── DHL-Call ─────────────────────────────────────────────────────────────
+    console.log(`[dhlRouter] Erstelle DHL-Label für Bestellung ${orderId} | Profil: ${profileKey} | Produkt: ${activeProfile.product} | Sandbox: ${ENV.dhlSandbox}`);
     const result = await createDhlShipmentDE({
-      orderId:     orderId.trim(),
+      orderId:       orderId.trim(),
       consignee,
-      weightGrams: weightGrams ?? undefined,
+      weightGrams:   weightGrams ?? undefined,
+      // Profil-überschreibungen: Produkt und Billing Number aus gewähltem Profil
+      productCode:   activeProfile.product,
+      billingNumber: activeProfile.billingNumber!,
     });
 
     // ── Stufe 3: Ergebnis in DB schreiben ────────────────────────────────────

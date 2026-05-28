@@ -53,10 +53,14 @@ export interface DhlConsignee {
 
 export interface DhlShipmentInput {
   /** Interne Bestellnummer (wird als refNo mitgegeben, min. 8 Zeichen) */
-  orderId:     string;
-  consignee:   DhlConsignee;
+  orderId:      string;
+  consignee:    DhlConsignee;
   /** Gewicht in Gramm (Default: 500g) */
   weightGrams?: number;
+  /** DHL Produktcode – überschreibt ENV-Default (V01PAK). Aus dhlProfiles.ts. */
+  productCode?:   string;
+  /** 14-stellige Billing Number – überschreibt ENV.dhlBillingNumber. Aus dhlProfiles.ts. */
+  billingNumber?: string;
 }
 
 export interface DhlShipmentResult {
@@ -151,14 +155,17 @@ export async function createDhlShipmentDE(
     return { success: false, error: validationError };
   }
 
-  // 2. Billing Number prüfen
-  const billingNumber = ENV.dhlBillingNumber;
+  // 2. Billing Number prüfen (Profil-Überschreibung hat Vorrang vor ENV)
+  const billingNumber = input.billingNumber ?? ENV.dhlBillingNumber;
   if (!billingNumber || billingNumber.length < 14) {
     return {
       success: false,
       error: "DHL_BILLING_NUMBER nicht konfiguriert oder ungültig (14 Zeichen erwartet)",
     };
   }
+
+  // 2b. Produktcode (Profil-Überschreibung hat Vorrang vor Hardcode)
+  const productCode = input.productCode ?? "V01PAK";
 
   // 3. Auth-Header bauen (wirft Error wenn Credentials fehlen)
   let headers: Record<string, string>;
@@ -184,7 +191,7 @@ export async function createDhlShipmentDE(
     },
     shipments: [
       {
-        product:       "V01PAK",
+        product:       productCode,
         billingNumber: billingNumber,
         refNo:         refNo,
         shipper: {
