@@ -234,7 +234,7 @@ export const customerRouter = router({
       if (nextNum < 1210) nextNum = 1210;
 
       console.log(`[customer.create] houseNumber=${JSON.stringify(input.houseNumber)}, street=${JSON.stringify(input.street)}, zip=${JSON.stringify(input.zip)}, city=${JSON.stringify(input.city)}`);
-      const [inserted] = await db.insert(customers).values({
+      await db.insert(customers).values({
         customerNumber: String(nextNum),
         name: input.name,
         firstName: input.firstName || null,
@@ -250,7 +250,14 @@ export const customerRouter = router({
         tags: input.tags || null,
         source: input.source || "manual",
         notes: input.notes || null,
-      }).returning();
+      });
+
+      // SELECT after INSERT - more robust than RETURNING (works on all DB systems)
+      const [inserted] = await db.select().from(customers)
+        .where(eq(customers.customerNumber, String(nextNum)))
+        .limit(1);
+      if (!inserted) throw new Error("Customer was not created");
+      console.log(`[customer.create] saved houseNumber=${JSON.stringify(inserted.houseNumber)}`);
 
       return { success: true, id: inserted.id, customerNumber: inserted.customerNumber };
     }),
