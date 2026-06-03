@@ -33,11 +33,12 @@ export const articleRouter = router({
       shopProductId: articles.shopProductId,
       stock: articles.stock,
       name: articles.name,
+      isActive: articles.isActive,
     }).from(articles);
 
-    // Return only articles that have a shopProductId (linked to shop)
+    // Return only active articles that have a shopProductId (linked to shop)
     return allArticles
-      .filter(a => a.shopProductId && a.shopProductId.trim() !== "")
+      .filter(a => a.shopProductId && a.shopProductId.trim() !== "" && a.isActive !== 0)
       .map(a => ({
         shopProductId: a.shopProductId!,
         inStock: (a.stock ?? 0) > 0,
