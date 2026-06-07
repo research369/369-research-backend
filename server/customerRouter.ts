@@ -6,7 +6,7 @@ import { z } from "zod";
 import { eq, desc, sql, and, gte, lte, like, or } from "drizzle-orm";
 import { router, adminProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
-import { customers, orders, orderItems, customerCommunications, emailTemplates, emailCampaigns } from "../drizzle/schema.js";
+import { customers, orders, orderItems, customerCommunications, emailTemplates, emailCampaigns, partners } from "../drizzle/schema.js";
 
 const RESEND_API_URL = "https://api.resend.com/emails";
 
@@ -135,10 +135,20 @@ export const customerRouter = router({
         });
       }
 
+      // Enrich with partner code for customers who have an assigned partner
+      const partnerIds = [...new Set(allCustomers.map(c => c.acquiredByPartnerId).filter((id): id is number => id !== null && id !== undefined))];
+      const partnerCodeMap: Record<number, string> = {};
+      if (partnerIds.length > 0) {
+        const partnerRows = await db.select({ id: partners.id, code: partners.code }).from(partners);
+        for (const p of partnerRows) {
+          if (partnerIds.includes(p.id)) partnerCodeMap[p.id] = p.code;
+        }
+      }
       return allCustomers.map(c => ({
         ...c,
         totalSpent: parseFloat(c.totalSpent),
         tags: c.tags ? JSON.parse(c.tags) : [],
+        acquiredByPartnerCode: c.acquiredByPartnerId ? (partnerCodeMap[c.acquiredByPartnerId] || null) : null,
       }));
     }),
 
