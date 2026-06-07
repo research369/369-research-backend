@@ -21,6 +21,14 @@ const articleSchema = z.object({
   notes: z.string().optional(),
   // Cross-Sell Kategorie für Follow-up Empfehlungs-Engine
   followUpCategory: z.enum(["intake", "output", "regeneration", "signaling", "structural"]).nullable().optional(),
+  // Shop-Produktdaten
+  mockupImageUrl: z.string().nullable().optional(),
+  labelImageUrl: z.string().nullable().optional(),
+  casNumber: z.string().nullable().optional(),
+  molecularWeight: z.string().nullable().optional(),
+  purity: z.string().nullable().optional(),
+  badge: z.string().nullable().optional(),
+  shortDescription: z.string().nullable().optional(),
 });
 
 export const articleRouter = router({
@@ -183,6 +191,13 @@ export const articleRouter = router({
       if (data.shopProductId !== undefined) updateData.shopProductId = data.shopProductId || null;
       if (data.notes !== undefined) updateData.notes = data.notes || null;
       if (data.followUpCategory !== undefined) updateData.followUpCategory = data.followUpCategory ?? null;
+      if (data.mockupImageUrl !== undefined) updateData.mockupImageUrl = data.mockupImageUrl || null;
+      if (data.labelImageUrl !== undefined) updateData.labelImageUrl = data.labelImageUrl || null;
+      if (data.casNumber !== undefined) updateData.casNumber = data.casNumber || null;
+      if (data.molecularWeight !== undefined) updateData.molecularWeight = data.molecularWeight || null;
+      if (data.purity !== undefined) updateData.purity = data.purity || null;
+      if (data.badge !== undefined) updateData.badge = data.badge || null;
+      if (data.shortDescription !== undefined) updateData.shortDescription = data.shortDescription || null;
 
       await db.update(articles).set(updateData).where(eq(articles.id, id));
 
