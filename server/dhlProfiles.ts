@@ -79,13 +79,13 @@ export function getDhlProfiles(): Record<DhlProfileKey, DhlProfile> {
     DHL_EU: {
       label:           "DHL Paket EU",
       product:         "V53WPAK",
-      billingNumber:   null, // Noch nicht aktiviert – International-Vertrag nötig
-      active:          false,
+      billingNumber:   ENV.dhlBillingNumberEu || null,
+      active:          !!(ENV.dhlBillingNumberEu),
       countries:       EU_COUNTRIES,
       maxWeightG:      31500,
       customsRequired: false,
       labelFormat:     "910-300-400",
-      inactiveReason:  "DHL Paket International noch nicht aktiviert – Billing Number fehlt",
+      inactiveReason:  ENV.dhlBillingNumberEu ? undefined : "DHL_BILLING_NUMBER_EU nicht gesetzt",
     },
 
     DHL_CH: {

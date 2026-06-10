@@ -57,6 +57,13 @@
       "when": 1777321600000,
       "tag": "0007_widen_varchar_fields",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1781087935054,
+      "tag": "0008_boring_vertigo",
+      "breakpoints": true
     }
   ]
 }

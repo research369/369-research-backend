@@ -268,6 +268,8 @@ export const orders = pgTable("orders", {
   // Shipping label: URL = interne Download-Route, Content = Base64-PDF persistent in DB
   shippingLabelUrl: text("shipping_label_url"),
   shippingLabelContent: text("shipping_label_content"),
+  // Versandgewicht in Gramm (für DHL-Label, optional – Default 500g wenn leer)
+  weightGrams: integer("weight_grams"),
 
   // Partner / Affiliate
   partnerCode: varchar("partner_code", { length: 50 }),

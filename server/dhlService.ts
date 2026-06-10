@@ -123,13 +123,57 @@ export function validateConsignee(c: DhlConsignee): string | null {
   if (!c.city?.trim())          return "Empfänger: Stadt fehlt";
   if (!c.country?.trim())       return "Empfänger: Land fehlt";
 
-  // Phase 1: nur DE national
-  const countryUpper = c.country.toUpperCase();
-  if (countryUpper !== "DEU" && countryUpper !== "DE") {
-    return `Empfänger: Nur DE national unterstützt (erhalten: ${c.country})`;
-  }
-
   return null;
+}
+
+/**
+ * Normalisiert einen Ländernamen/-code auf ISO-3166-1 Alpha-3 (für DHL API).
+ * Unterstützt Alpha-2, Alpha-3 und deutsche Freitexte.
+ */
+export function normalizeCountryToAlpha3(raw: string): string {
+  if (!raw) return "";
+  const s = raw.trim().toUpperCase();
+
+  const alpha2Map: Record<string, string> = {
+    DE: "DEU", AT: "AUT", CH: "CHE", FR: "FRA", NL: "NLD",
+    BE: "BEL", LU: "LUX", PL: "POL", CZ: "CZE", SK: "SVK",
+    HU: "HUN", RO: "ROU", BG: "BGR", HR: "HRV", SI: "SVN",
+    IT: "ITA", ES: "ESP", PT: "PRT", GR: "GRC", CY: "CYP",
+    MT: "MLT", IE: "IRL", FI: "FIN", SE: "SWE", DK: "DNK",
+    EE: "EST", LV: "LVA", LT: "LTU", NO: "NOR", IS: "ISL", LI: "LIE",
+  };
+
+  const textMap: Record<string, string> = {
+    DEUTSCHLAND: "DEU", GERMANY: "DEU",
+    AUSTRIA: "AUT", OESTERREICH: "AUT",
+    SCHWEIZ: "CHE", SWITZERLAND: "CHE",
+    FRANKREICH: "FRA", FRANCE: "FRA",
+    NIEDERLANDE: "NLD", NETHERLANDS: "NLD",
+    BELGIEN: "BEL", BELGIUM: "BEL",
+    LUXEMBURG: "LUX", LUXEMBOURG: "LUX",
+    POLEN: "POL", POLAND: "POL",
+    TSCHECHIEN: "CZE",
+    ITALIEN: "ITA", ITALY: "ITA",
+    SPANIEN: "ESP", SPAIN: "ESP",
+    PORTUGAL: "PRT",
+    GRIECHENLAND: "GRC", GREECE: "GRC",
+    SCHWEDEN: "SWE", SWEDEN: "SWE",
+    NORWEGEN: "NOR", NORWAY: "NOR",
+    FINNLAND: "FIN", FINLAND: "FIN",
+    IRLAND: "IRL", IRELAND: "IRL",
+    UNGARN: "HUN", HUNGARY: "HUN",
+    KROATIEN: "HRV", CROATIA: "HRV",
+    SLOWENIEN: "SVN", SLOVENIA: "SVN",
+    SLOWAKEI: "SVK", SLOVAKIA: "SVK",
+    ESTLAND: "EST", ESTONIA: "EST",
+    LETTLAND: "LVA", LATVIA: "LVA",
+    LITAUEN: "LTU", LITHUANIA: "LTU",
+  };
+
+  if (/^[A-Z]{3}$/.test(s)) return s;
+  if (alpha2Map[s]) return alpha2Map[s];
+  if (textMap[s]) return textMap[s];
+  return raw.trim();
 }
 
 // ─── Haupt-Funktion ───────────────────────────────────────────────────────────
@@ -301,6 +345,189 @@ export async function createDhlShipmentDE(
   }
 
   console.log(`[dhlService] Label erstellt: ${trackingNumber} (Sandbox: ${ENV.dhlSandbox})`);
+
+  return {
+    success:       true,
+    trackingNumber,
+    labelUrl:      labelUrl ?? undefined,
+    labelBase64:   labelBase64 ?? undefined,
+    statusCode:    rawResponse.status,
+  };
+}
+
+// ─── EU-Funktion (Phase 2) ────────────────────────────────────────────────────
+
+/**
+ * Erstellt ein DHL-Label für EU-internationale Sendungen (V53WPAK).
+ *
+ * Phase 2 Scope:
+ *   - Produkt: V53WPAK (DHL Paket International)
+ *   - Alle EU-Länder + NO, IS, LI
+ *   - Billing Number: DHL_BILLING_NUMBER_EU (63979135285301)
+ *   - Kein Zoll (customsDetails nicht erforderlich)
+ *   - Sandbox-Modus wenn ENV.dhlSandbox = true
+ *
+ * DHL_DE_STANDARD (createDhlShipmentDE) bleibt vollständig unverändert.
+ */
+export async function createDhlShipmentEU(
+  input: DhlShipmentInput
+): Promise<DhlShipmentResult> {
+  // 1. Billing Number prüfen
+  const billingNumber = input.billingNumber ?? ENV.dhlBillingNumberEu;
+  if (!billingNumber || billingNumber.length < 14) {
+    return {
+      success: false,
+      error: "DHL_BILLING_NUMBER_EU nicht konfiguriert oder ungültig (14 Zeichen erwartet)",
+    };
+  }
+
+  // 2. Produktcode
+  const productCode = input.productCode ?? "V53WPAK";
+
+  // 3. Ländernormalisierung (Freitext → Alpha-3)
+  const countryAlpha3 = normalizeCountryToAlpha3(input.consignee.country);
+  if (!countryAlpha3) {
+    return { success: false, error: "Empfänger: Land fehlt oder nicht erkannt" };
+  }
+
+  // 4. Basis-Validierung (ohne DE-Einschränkung)
+  const c = input.consignee;
+  if (!c.name1?.trim())         return { success: false, error: "Empfänger: Name fehlt" };
+  if (!c.addressStreet?.trim()) return { success: false, error: "Empfänger: Straße fehlt" };
+  if (!c.addressHouse?.trim())  return { success: false, error: "Empfänger: Hausnummer fehlt" };
+  if (!c.postalCode?.trim())    return { success: false, error: "Empfänger: PLZ fehlt" };
+  if (!c.city?.trim())          return { success: false, error: "Empfänger: Stadt fehlt" };
+
+  // 5. Auth-Header
+  let headers: Record<string, string>;
+  try {
+    headers = buildAuthHeaders();
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+
+  // 6. Request-Body
+  const refNo = input.orderId.length >= 8
+    ? input.orderId
+    : input.orderId.padEnd(8, "0");
+
+  const body = {
+    profile: "STANDARD_GRUPPENPROFIL",
+    printSettings: {
+      printerDpi:   300,
+      encodingType: "PDF",
+      labelFormat:  "910-300-400",
+    },
+    shipments: [
+      {
+        product:       productCode,
+        billingNumber: billingNumber,
+        refNo:         refNo,
+        shipper: {
+          name1:         DEFAULT_SHIPPER.name1,
+          addressStreet: DEFAULT_SHIPPER.addressStreet,
+          addressHouse:  DEFAULT_SHIPPER.addressHouse,
+          postalCode:    DEFAULT_SHIPPER.postalCode,
+          city:          DEFAULT_SHIPPER.city,
+          country:       DEFAULT_SHIPPER.country,
+        },
+        consignee: {
+          name1:         c.name1,
+          addressStreet: c.addressStreet,
+          addressHouse:  c.addressHouse,
+          postalCode:    c.postalCode,
+          city:          c.city,
+          country:       countryAlpha3,
+          ...(c.email ? { email: c.email } : {}),
+          ...(c.phone ? { phone: c.phone } : {}),
+        },
+        details: {
+          weight: {
+            uom:   "g",
+            value: input.weightGrams ?? 500,
+          },
+        },
+      },
+    ],
+  };
+
+  // 7. DHL API-Call
+  const apiUrl = `${getApiBase()}/orders?validate=false&printOnlyIfCodable=false&docFormat=PDF&labelResponseType=INCLUDE`;
+
+  let rawResponse: Response;
+  let responseText: string;
+
+  try {
+    rawResponse = await fetch(apiUrl, {
+      method:  "POST",
+      headers,
+      body:    JSON.stringify(body),
+    });
+    responseText = await rawResponse.text();
+  } catch (err: any) {
+    return {
+      success:    false,
+      error:      `DHL API nicht erreichbar: ${err.message}`,
+      statusCode: 0,
+    };
+  }
+
+  // 8. Antwort parsen
+  let data: any;
+  try {
+    data = JSON.parse(responseText);
+  } catch {
+    return {
+      success:    false,
+      error:      `DHL API: Ungültige JSON-Antwort (HTTP ${rawResponse.status})`,
+      statusCode: rawResponse.status,
+    };
+  }
+
+  // 9. Fehlerbehandlung
+  if (!rawResponse.ok) {
+    const detail =
+      data?.detail ||
+      data?.title ||
+      data?.items?.[0]?.validationMessages?.[0]?.validationMessage ||
+      JSON.stringify(data).slice(0, 300);
+    console.error(`[dhlService/EU] DHL API Fehler HTTP ${rawResponse.status}:`, detail);
+    return {
+      success:    false,
+      error:      `DHL Fehler EU (${rawResponse.status}): ${detail}`,
+      statusCode: rawResponse.status,
+    };
+  }
+
+  // 10. Erfolg
+  const shipment = data?.items?.[0];
+  if (!shipment) {
+    return {
+      success:    false,
+      error:      "DHL API: Keine Sendungsdaten in der Antwort",
+      statusCode: rawResponse.status,
+    };
+  }
+
+  const trackingNumber =
+    (shipment.shipmentNo as string | undefined) ??
+    (shipment.trackingId as string | undefined) ??
+    (shipment.shipmentTrackingNumber as string | undefined);
+
+  const labelUrl    = shipment.label?.url as string | undefined;
+  const labelBase64 =
+    (shipment.label?.b64 as string | undefined) ??
+    (shipment.label?.content as string | undefined);
+
+  if (!trackingNumber) {
+    return {
+      success:    false,
+      error:      "DHL API: Keine Trackingnummer in der Antwort",
+      statusCode: rawResponse.status,
+    };
+  }
+
+  console.log(`[dhlService/EU] Label erstellt: ${trackingNumber} (Sandbox: ${ENV.dhlSandbox})`);
 
   return {
     success:       true,

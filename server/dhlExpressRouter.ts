@@ -28,7 +28,7 @@
 
 import { Router, type Request, type Response } from "express";
 import { ENV } from "./env.js";
-import { createDhlShipmentDE, validateConsignee, type DhlConsignee } from "./dhlService.js";
+import { createDhlShipmentDE, createDhlShipmentEU, validateConsignee, normalizeCountryToAlpha3, type DhlConsignee } from "./dhlService.js";
 import { getDhlProfiles, getActiveProfile, type DhlProfileKey } from "./dhlProfiles.js";
 import { getDb } from "./db.js";
 import { orders } from "../drizzle/schema.js";
@@ -218,7 +218,8 @@ dhlExpressRouter.post(
       addressHouse:  order.houseNumber,
       postalCode:    order.zip,
       city:          order.city,
-      country:       normalizeCountry(order.country),
+      // DE: normalisiert auf "DE"; EU: Rohwert – normalizeCountryToAlpha3 läuft in createDhlShipmentEU
+      country:       profileKey === "DHL_DE_STANDARD" ? normalizeCountry(order.country) : (order.country ?? ""),
       email:         order.email ?? undefined,
       phone:         order.phone ?? undefined,
     };
@@ -258,14 +259,18 @@ dhlExpressRouter.post(
 
         // ── DHL-Call ─────────────────────────────────────────────────────────────
     console.log(`[dhlRouter] Erstelle DHL-Label für Bestellung ${orderId} | Profil: ${profileKey} | Produkt: ${activeProfile.product} | Sandbox: ${ENV.dhlSandbox}`);
-    const result = await createDhlShipmentDE({
+    const shipmentInput = {
       orderId:       orderId.trim(),
       consignee,
       weightGrams:   weightGrams ?? undefined,
-      // Profil-überschreibungen: Produkt und Billing Number aus gewähltem Profil
       productCode:   activeProfile.product,
       billingNumber: activeProfile.billingNumber!,
-    });
+    };
+    // DHL_DE_STANDARD → createDhlShipmentDE (unverändert)
+    // DHL_EU          → createDhlShipmentEU (Phase 2, V53WPAK)
+    const result = profileKey === "DHL_EU"
+      ? await createDhlShipmentEU(shipmentInput)
+      : await createDhlShipmentDE(shipmentInput);
 
     // ── Stufe 3: Ergebnis in DB schreiben ────────────────────────────────────
     if (result.success && result.trackingNumber) {

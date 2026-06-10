@@ -457,6 +457,20 @@ async function start() {
     console.warn('[Server] FEHLER-019 Backfill failed (non-fatal):', err);
   }
 
+  // Auto-migrate: DHL EU – weight_grams column for orders
+  try {
+    const pool = await getPool();
+    if (pool) {
+      await pool.query(`
+        ALTER TABLE orders
+          ADD COLUMN IF NOT EXISTS weight_grams INTEGER;
+      `);
+      console.log('[Server] orders.weight_grams column ready (DHL EU)');
+    }
+  } catch (err) {
+    console.warn('[Server] Failed to add weight_grams column (non-fatal):', err);
+  }
+
   app.listen(port, "0.0.0.0", () => {
     console.log(`[Server] 369 Research Backend running on port ${port}`);
   });
