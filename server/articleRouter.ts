@@ -30,6 +30,7 @@ const articleSchema = z.object({
   badge: z.string().nullable().optional(),
   shortDescription: z.string().nullable().optional(),
   categories: z.array(z.string()).nullable().optional(),
+  beautyData: z.record(z.unknown()).nullable().optional(),
 });
 
 export const articleRouter = router({
@@ -200,6 +201,7 @@ export const articleRouter = router({
       if (data.badge !== undefined) updateData.badge = data.badge || null;
       if (data.shortDescription !== undefined) updateData.shortDescription = data.shortDescription || null;
       if (data.categories !== undefined) updateData.categories = data.categories && data.categories.length > 0 ? data.categories : null;
+      if (data.beautyData !== undefined) updateData.beautyData = data.beautyData || null;
 
       await db.update(articles).set(updateData).where(eq(articles.id, id));
 
