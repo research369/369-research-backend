@@ -224,9 +224,11 @@ dhlExpressRouter.post(
       phone:         order.phone ?? undefined,
     };
 
-    // Firmenname als name1 wenn vorhanden
+    // Firmenname als name1 wenn vorhanden, Personenname dann in name2
     if (order.company?.trim()) {
-      consignee.name1 = order.company.trim();
+      const fullName = `${order.firstName} ${order.lastName}`.trim();
+      consignee.name1 = order.company.trim().slice(0, 50);
+      if (fullName) consignee.name2 = fullName.slice(0, 50);
     }
 
     const validationError = validateConsignee(consignee);

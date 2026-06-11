@@ -42,6 +42,8 @@ const DHL_API_BASE_PROD    = "https://api-eu.dhl.com/parcel/de/shipping/v2";
 
 export interface DhlConsignee {
   name1:         string;
+  name2?:        string;  // Zusatzzeile (z.B. Vorname Nachname wenn name1 = Firma)
+  name3?:        string;  // Weitere Zusatzzeile
   addressStreet: string;
   addressHouse:  string;
   postalCode:    string;
@@ -247,7 +249,9 @@ export async function createDhlShipmentDE(
           country:       DEFAULT_SHIPPER.country,
         },
         consignee: {
-          name1:         input.consignee.name1,
+          name1:         input.consignee.name1.slice(0, 50),
+          ...(input.consignee.name2 ? { name2: input.consignee.name2.slice(0, 50) } : {}),
+          ...(input.consignee.name3 ? { name3: input.consignee.name3.slice(0, 50) } : {}),
           addressStreet: input.consignee.addressStreet,
           addressHouse:  input.consignee.addressHouse,
           postalCode:    input.consignee.postalCode,
@@ -432,7 +436,9 @@ export async function createDhlShipmentEU(
           country:       DEFAULT_SHIPPER.country,
         },
         consignee: {
-          name1:         c.name1,
+          name1:         c.name1.slice(0, 50),
+          ...(c.name2 ? { name2: c.name2.slice(0, 50) } : {}),
+          ...(c.name3 ? { name3: c.name3.slice(0, 50) } : {}),
           addressStreet: c.addressStreet,
           addressHouse:  c.addressHouse,
           postalCode:    c.postalCode,
