@@ -915,6 +915,20 @@ export const orderRouter = router({
       return { success: true, results };
     }),
 
+  // ADMIN: Delete order WITHOUT stock restoration (items vanish, no restock)
+  deleteNoRestock: adminProcedure
+    .input(z.object({ orderId: z.string() }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+      const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1);
+      if (!order) throw new Error("Bestellung nicht gefunden");
+      await db.delete(orderItems).where(eq(orderItems.orderId, input.orderId));
+      await db.delete(orders).where(eq(orders.orderId, input.orderId));
+      console.log(`[Orders] Deleted order ${input.orderId} WITHOUT stock restoration`);
+      return { success: true };
+    }),
+
   // ADMIN: Delete order with stock restoration
   delete: adminProcedure
     .input(z.object({ orderId: z.string() }))
