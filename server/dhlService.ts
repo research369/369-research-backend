@@ -148,6 +148,8 @@ export function normalizeCountryToAlpha3(raw: string): string {
   const textMap: Record<string, string> = {
     DEUTSCHLAND: "DEU", GERMANY: "DEU",
     AUSTRIA: "AUT", OESTERREICH: "AUT",
+    // Mit Umlaut (direkt aus DB-Werten)
+    "\u00d6STERREICH": "AUT",  // Österreich
     SCHWEIZ: "CHE", SWITZERLAND: "CHE",
     FRANKREICH: "FRA", FRANCE: "FRA",
     NIEDERLANDE: "NLD", NETHERLANDS: "NLD",
