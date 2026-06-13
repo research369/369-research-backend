@@ -471,6 +471,21 @@ async function start() {
     console.warn('[Server] Failed to add weight_grams column (non-fatal):', err);
   }
 
+  // Auto-migrate: SNAP-8 neues Vial-Mockup-Bild
+  try {
+    const pool = await getPool();
+    if (pool) {
+      const newImage = 'https://d2xsxph8kpxj0f.cloudfront.net/119871539/Pbxbt3ufs2MSgiEmtAeTCd/snap-8-vial-mockup-NPaq4ogk8uuXj3mBWNBGW5.png';
+      await pool.query(
+        `UPDATE articles SET mockup_image_url = $1 WHERE shop_product_id = 'snap-8' AND (mockup_image_url IS NULL OR mockup_image_url != $1)`,
+        [newImage]
+      );
+      console.log('[Server] SNAP-8 Vial-Mockup aktualisiert');
+    }
+  } catch (err) {
+    console.warn('[Server] SNAP-8 Bild-Update fehlgeschlagen (non-fatal):', err);
+  }
+
   app.listen(port, "0.0.0.0", () => {
     console.log(`[Server] 369 Research Backend running on port ${port}`);
   });
