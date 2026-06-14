@@ -837,3 +837,214 @@ export const categoryTranslations = pgTable("category_translations", {
 });
 export type CategoryTranslation = typeof categoryTranslations.$inferSelect;
 export type InsertCategoryTranslation = typeof categoryTranslations.$inferInsert;
+
+// ============================================================
+// SPRINT 4: KNOWLEDGE LAYER – Use Cases, FAQ, Studies, Bundles, Tags
+// Datum: 2026-06-14 | Rein additiv – keine bestehenden Felder geändert
+// ZERO RISK: Keine Änderungen an orders, articles (Kern), customers, WaWi
+// ============================================================
+
+/**
+ * use_cases – Anwendungsfall-Landingpages (z.B. "fat-loss", "anti-aging", "sleep")
+ * Jeder Use Case bekommt eine eigene SEO-Landingpage unter /de/fat-loss etc.
+ * featured_article_id: Welches Produkt wird als Hauptprodukt auf der Landingpage gezeigt
+ */
+export const useCases = pgTable("use_cases", {
+  id: serial("id").primaryKey(),
+  slug: varchar("slug", { length: 200 }).notNull().unique(), // z.B. "fat-loss", "anti-aging"
+  featuredArticleId: integer("featured_article_id"),         // FK zu articles.id (optional)
+  imageUrl: text("image_url"),
+  sortOrder: integer("sort_order").default(0),
+  visible: integer("visible").default(1),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+export type UseCase = typeof useCases.$inferSelect;
+export type InsertUseCase = typeof useCases.$inferInsert;
+
+/**
+ * use_case_translations – Mehrsprachige Use-Case-Texte und SEO-Daten
+ * UNIQUE(useCaseId, lang) – keine doppelten Einträge pro Sprache
+ */
+export const useCaseTranslations = pgTable("use_case_translations", {
+  id: serial("id").primaryKey(),
+  useCaseId: integer("use_case_id").notNull().references(() => useCases.id, { onDelete: "cascade" }),
+  lang: varchar("lang", { length: 5 }).notNull(), // z.B. "de", "en", "fr"
+  name: varchar("name", { length: 200 }),           // z.B. "Fettabbau", "Fat Loss"
+  description: text("description"),
+  seoTitle: varchar("seo_title", { length: 70 }),
+  seoDescription: varchar("seo_description", { length: 160 }),
+  imageAlt: varchar("image_alt", { length: 200 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+export type UseCaseTranslation = typeof useCaseTranslations.$inferSelect;
+export type InsertUseCaseTranslation = typeof useCaseTranslations.$inferInsert;
+
+/**
+ * article_use_cases – N:M Verknüpfung Artikel ↔ Use Cases
+ * sort_order: Reihenfolge der Produkte auf der Use-Case-Landingpage
+ * is_primary: Ist dieses Produkt das Hauptprodukt für diesen Use Case?
+ */
+export const articleUseCases = pgTable("article_use_cases", {
+  id: serial("id").primaryKey(),
+  articleId: integer("article_id").notNull().references(() => articles.id, { onDelete: "cascade" }),
+  useCaseId: integer("use_case_id").notNull().references(() => useCases.id, { onDelete: "cascade" }),
+  sortOrder: integer("sort_order").default(0),
+  isPrimary: integer("is_primary").default(0), // 1 = Hauptprodukt für diesen Use Case
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+export type ArticleUseCase = typeof articleUseCases.$inferSelect;
+export type InsertArticleUseCase = typeof articleUseCases.$inferInsert;
+
+/**
+ * article_tags – Flexible Tag-Struktur für Produkte
+ * Ermöglicht: Filterung, Cross-Sell-Matrix, PepGPT-Kontext, TikTok-Content-Planung
+ * Beispiele: "glp-1", "longevity", "anti-aging", "skin", "performance", "sleep"
+ */
+export const articleTags = pgTable("article_tags", {
+  id: serial("id").primaryKey(),
+  articleId: integer("article_id").notNull().references(() => articles.id, { onDelete: "cascade" }),
+  tag: varchar("tag", { length: 100 }).notNull(),
+  source: varchar("source", { length: 50 }).default("manual"), // "manual" | "ai" | "import"
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+export type ArticleTag = typeof articleTags.$inferSelect;
+export type InsertArticleTag = typeof articleTags.$inferInsert;
+
+/**
+ * article_faq – FAQ-Einträge pro Produkt (für Schema.org FAQPage + Rich Results)
+ * Mehrsprachig via lang-Feld. Google zeigt FAQs direkt in den Suchergebnissen.
+ * WICHTIG: Keine medizinischen Aussagen – immer "Research Use Only" Framing
+ */
+export const articleFaq = pgTable("article_faq", {
+  id: serial("id").primaryKey(),
+  articleId: integer("article_id").notNull().references(() => articles.id, { onDelete: "cascade" }),
+  lang: varchar("lang", { length: 5 }).notNull().default("de"),
+  question: text("question").notNull(),
+  answer: text("answer").notNull(),
+  sortOrder: integer("sort_order").default(0),
+  isVisible: integer("is_visible").default(1),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+export type ArticleFaq = typeof articleFaq.$inferSelect;
+export type InsertArticleFaq = typeof articleFaq.$inferInsert;
+
+/**
+ * article_studies – PubMed/DOI-Studienreferenzen pro Produkt
+ * Für: Academy-Content, PepGPT-Kontext, Produktseiten-Quellenangaben
+ * Stärkt E-E-A-T (Experience, Expertise, Authoritativeness, Trustworthiness)
+ */
+export const articleStudies = pgTable("article_studies", {
+  id: serial("id").primaryKey(),
+  articleId: integer("article_id").notNull().references(() => articles.id, { onDelete: "cascade" }),
+  pubmedId: varchar("pubmed_id", { length: 20 }),   // z.B. "12345678"
+  doi: varchar("doi", { length: 200 }),              // z.B. "10.1016/j.peptides.2020.01.001"
+  title: text("title").notNull(),
+  authors: text("authors"),
+  journal: varchar("journal", { length: 200 }),
+  year: integer("year"),
+  url: text("url"),                                  // Direktlink zur Studie
+  summary: text("summary"),                          // Kurzzusammenfassung (DE oder EN)
+  relevance: varchar("relevance", { length: 50 }),   // "primary" | "supporting" | "context"
+  sortOrder: integer("sort_order").default(0),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+export type ArticleStudy = typeof articleStudies.$inferSelect;
+export type InsertArticleStudy = typeof articleStudies.$inferInsert;
+
+/**
+ * article_bundles – Bundle-Definitionen für Cross-Sell und Forscher-Bundles
+ * Ermöglicht: "Stack"-Logik, Bundle-Preise, Forscher-Bundle-Kategorie
+ * bundle_type: "stack" = Empfohlene Kombination, "kit" = Starter-Kit, "custom" = Sonderangebot
+ */
+export const bundleTypeEnum = pgEnum("bundle_type", ["stack", "kit", "custom"]);
+
+export const articleBundles = pgTable("article_bundles", {
+  id: serial("id").primaryKey(),
+  slug: varchar("slug", { length: 200 }).notNull().unique(), // z.B. "fat-loss-stack"
+  bundleType: bundleTypeEnum("bundle_type").notNull().default("stack"),
+  name: varchar("name", { length: 200 }).notNull(),
+  description: text("description"),
+  imageUrl: text("image_url"),
+  // Preis-Override (optional – wenn leer, wird Summe der Einzelpreise berechnet)
+  bundlePrice: decimal("bundle_price", { precision: 10, scale: 2 }),
+  discountPercent: decimal("discount_percent", { precision: 5, scale: 2 }).default("0"),
+  sortOrder: integer("sort_order").default(0),
+  isVisible: integer("is_visible").default(1),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+export type ArticleBundle = typeof articleBundles.$inferSelect;
+export type InsertArticleBundle = typeof articleBundles.$inferInsert;
+
+/**
+ * article_bundle_items – Artikel in einem Bundle (N:M)
+ * quantity: Wie viele Einheiten dieses Artikels im Bundle enthalten sind
+ */
+export const articleBundleItems = pgTable("article_bundle_items", {
+  id: serial("id").primaryKey(),
+  bundleId: integer("bundle_id").notNull().references(() => articleBundles.id, { onDelete: "cascade" }),
+  articleId: integer("article_id").notNull().references(() => articles.id, { onDelete: "cascade" }),
+  quantity: integer("quantity").notNull().default(1),
+  sortOrder: integer("sort_order").default(0),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+export type ArticleBundleItem = typeof articleBundleItems.$inferSelect;
+export type InsertArticleBundleItem = typeof articleBundleItems.$inferInsert;
+
+/**
+ * article_comparisons – Vergleichstabellen für Produktseiten und SEO
+ * Ermöglicht: "Retatrutide vs. Tirzepatide" Seiten (hohe SEO-Relevanz)
+ * Diese Seiten ranken extrem gut für "Peptid A vs Peptid B" Suchanfragen
+ */
+export const articleComparisons = pgTable("article_comparisons", {
+  id: serial("id").primaryKey(),
+  articleAId: integer("article_a_id").notNull().references(() => articles.id, { onDelete: "cascade" }),
+  articleBId: integer("article_b_id").notNull().references(() => articles.id, { onDelete: "cascade" }),
+  slug: varchar("slug", { length: 200 }).notNull().unique(), // z.B. "retatrutide-vs-tirzepatide"
+  comparisonData: jsonb("comparison_data"),                  // Strukturierter Vergleich als JSON
+  isVisible: integer("is_visible").default(1),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+export type ArticleComparison = typeof articleComparisons.$inferSelect;
+export type InsertArticleComparison = typeof articleComparisons.$inferInsert;
+
+// ============================================================
+// SPRINT 5: SEO CONTENT ENGINE – Schema-Erweiterungen
+// Datum: 2026-06-14 | Rein additiv – ALTER TABLE only
+// ZERO RISK: Keine Änderungen an bestehenden Feldern
+// ============================================================
+
+/**
+ * Sprint 5 Erweiterungen – werden als ALTER TABLE in Migration 0013 umgesetzt
+ *
+ * use_cases: + icon (Emoji/Icon-Name für Landingpage-Hero), + is_active (Alias für visible, expliziter)
+ * use_case_translations: + title (SEO-H1, getrennt von name), + hero_text (kurzer Hero-Subtext)
+ * article_faq: + schema_enabled (0/1 – ob dieser FAQ in Schema.org FAQPage erscheint)
+ * article_studies: + study_type (RCT/observational/in-vitro/in-vivo/meta-analysis/case-report)
+ *                  + population (z.B. "human", "rat", "in-vitro", "mixed")
+ *                  + keywords (JSON-Array für PepGPT-Kontext und Filterung)
+ * article_merchant: + sale_price (Aktionspreis, optional)
+ *                   + sale_price_effective_date (ISO 8601 Zeitraum, optional)
+ *                   + shipping (JSON: {country, service, price} für Feed)
+ *                   + identifier_exists (yes/no – für Produkte ohne GTIN)
+ *                   + merchant_title (DE-Titel für Feed, überschreibt articles.name)
+ *                   + merchant_description (DE-Beschreibung für Feed)
+ *                   + canonical_url (kanonische URL für Feed-Link)
+ *                   + image_link (Haupt-Bild-URL für Feed, überschreibt mockup_image_url)
+ *                   + alt_image_link (Zusatz-Bild-URL für Feed)
+ *                   + price_override (Preis-Override für Feed, wenn leer → articles.selling_price)
+ *                   + currency (ISO 4217, default "EUR")
+ *
+ * HINWEIS: Diese Felder sind in schema.ts als Kommentar dokumentiert.
+ * Die eigentlichen ALTER TABLE Statements stehen in Migration 0013.
+ * Drizzle kann ALTER TABLE nicht direkt aus schema.ts ableiten wenn die Tabelle bereits existiert –
+ * daher werden die Felder in der Migration manuell definiert.
+ */
+
+// Keine neuen pgTable-Definitionen hier – nur ALTER TABLE in 0013_sprint5_schema_extensions.sql
+// Die TypeScript-Typen werden nach Anwendung der Migration durch Drizzle-Introspection aktualisiert.
