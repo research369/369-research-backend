@@ -757,6 +757,11 @@ export const articleSeo = pgTable("article_seo", {
   id: serial("id").primaryKey(),
   articleId: integer("article_id").notNull().references(() => articles.id, { onDelete: "cascade" }),
   slug: varchar("slug", { length: 200 }).notNull().unique(),
+  // Sprint 2: SEO-Texte und hreflang (additiv)
+  seoTitle: varchar("seo_title", { length: 70 }),
+  seoDescription: varchar("seo_description", { length: 160 }),
+  imageAlt: varchar("image_alt", { length: 200 }),
+  hreflang: text("hreflang"),
   canonical: text("canonical"),
   robots: varchar("robots", { length: 50 }).default("index,follow"),
   schemaEnabled: integer("schema_enabled").default(1),
@@ -778,6 +783,8 @@ export const articleMerchant = pgTable("article_merchant", {
   id: serial("id").primaryKey(),
   articleId: integer("article_id").notNull().references(() => articles.id, { onDelete: "cascade" }),
   googleProductCategory: varchar("google_product_category", { length: 10 }),
+  // Sprint 2: brand (additiv)
+  brand: varchar("brand", { length: 100 }).default("369 Research"),
   productType: varchar("product_type", { length: 200 }),
   gtin: varchar("gtin", { length: 14 }),
   mpn: varchar("mpn", { length: 70 }),

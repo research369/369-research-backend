@@ -603,6 +603,23 @@ async function start() {
     console.warn('[Server] Sprint 1 Migration fehlgeschlagen (non-fatal):', err);
   }
 
+  // Auto-migrate: Sprint 2 – article_seo und article_merchant erweitern (additiv, idempotent)
+  try {
+    const pool2 = await getPool();
+    if (pool2) {
+      // article_seo: seoTitle, seoDescription, imageAlt, hreflang
+      await pool2.query(`ALTER TABLE article_seo ADD COLUMN IF NOT EXISTS seo_title VARCHAR(70)`);
+      await pool2.query(`ALTER TABLE article_seo ADD COLUMN IF NOT EXISTS seo_description VARCHAR(160)`);
+      await pool2.query(`ALTER TABLE article_seo ADD COLUMN IF NOT EXISTS image_alt VARCHAR(200)`);
+      await pool2.query(`ALTER TABLE article_seo ADD COLUMN IF NOT EXISTS hreflang TEXT`);
+      // article_merchant: brand
+      await pool2.query(`ALTER TABLE article_merchant ADD COLUMN IF NOT EXISTS brand VARCHAR(100) DEFAULT '369 Research'`);
+      console.log('[Server] Sprint 2 Migration: article_seo + article_merchant erweitert (idempotent)');
+    }
+  } catch (err) {
+    console.warn('[Server] Sprint 2 Migration fehlgeschlagen (non-fatal):', err);
+  }
+
   app.listen(port, "0.0.0.0", () => {
     console.log(`[Server] 369 Research Backend running on port ${port}`);
   });
