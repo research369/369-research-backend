@@ -486,6 +486,123 @@ async function start() {
     console.warn('[Server] SNAP-8 Bild-Update fehlgeschlagen (non-fatal):', err);
   }
 
+  // Auto-migrate: Sprint 1 – Mehrsprachigkeit, SEO, Merchant Center (additiv, idempotent)
+  try {
+    const pool = await getPool();
+    if (pool) {
+      // 1. articles: 3 neue Felder
+      await pool.query(`ALTER TABLE articles ADD COLUMN IF NOT EXISTS published_at TIMESTAMP`);
+      await pool.query(`ALTER TABLE articles ADD COLUMN IF NOT EXISTS nasal_spray_image_url TEXT`);
+      await pool.query(`ALTER TABLE articles ADD COLUMN IF NOT EXISTS bundle_deal JSONB`);
+
+      // 2. article_translations
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS article_translations (
+          id SERIAL PRIMARY KEY,
+          article_id INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+          lang VARCHAR(5) NOT NULL,
+          name VARCHAR(200),
+          short_description TEXT,
+          description JSONB,
+          seo_title VARCHAR(70),
+          seo_description VARCHAR(160),
+          merchant_title VARCHAR(150),
+          merchant_description TEXT,
+          image_alt VARCHAR(200),
+          created_at TIMESTAMP DEFAULT NOW() NOT NULL,
+          updated_at TIMESTAMP DEFAULT NOW() NOT NULL,
+          CONSTRAINT article_translations_article_lang_unique UNIQUE (article_id, lang)
+        )
+      `);
+
+      // 3. article_seo
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS article_seo (
+          id SERIAL PRIMARY KEY,
+          article_id INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+          slug VARCHAR(200) NOT NULL,
+          canonical TEXT,
+          robots VARCHAR(50) DEFAULT 'index,follow',
+          schema_enabled INTEGER DEFAULT 1,
+          faq_enabled INTEGER DEFAULT 0,
+          og_image TEXT,
+          priority DECIMAL(2,1) DEFAULT 0.8,
+          changefreq VARCHAR(20) DEFAULT 'weekly',
+          created_at TIMESTAMP DEFAULT NOW() NOT NULL,
+          updated_at TIMESTAMP DEFAULT NOW() NOT NULL,
+          CONSTRAINT article_seo_article_id_unique UNIQUE (article_id),
+          CONSTRAINT article_seo_slug_unique UNIQUE (slug)
+        )
+      `);
+
+      // 4. article_merchant
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS article_merchant (
+          id SERIAL PRIMARY KEY,
+          article_id INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+          google_product_category VARCHAR(10),
+          product_type VARCHAR(200),
+          gtin VARCHAR(14),
+          mpn VARCHAR(70),
+          availability VARCHAR(20) DEFAULT 'in_stock',
+          shipping_label VARCHAR(50),
+          condition VARCHAR(10) DEFAULT 'new',
+          age_group VARCHAR(20) DEFAULT 'adult',
+          custom_label_0 VARCHAR(100),
+          custom_label_1 VARCHAR(100),
+          custom_label_2 VARCHAR(100),
+          created_at TIMESTAMP DEFAULT NOW() NOT NULL,
+          updated_at TIMESTAMP DEFAULT NOW() NOT NULL,
+          CONSTRAINT article_merchant_article_id_unique UNIQUE (article_id)
+        )
+      `);
+
+      // 5. categories
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS categories (
+          id SERIAL PRIMARY KEY,
+          slug VARCHAR(200) NOT NULL,
+          parent_id INTEGER,
+          image_url TEXT,
+          sort_order INTEGER DEFAULT 0,
+          visible INTEGER DEFAULT 1,
+          type VARCHAR(50) DEFAULT 'shop',
+          created_at TIMESTAMP DEFAULT NOW() NOT NULL,
+          updated_at TIMESTAMP DEFAULT NOW() NOT NULL,
+          CONSTRAINT categories_slug_unique UNIQUE (slug)
+        )
+      `);
+
+      // 6. category_translations
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS category_translations (
+          id SERIAL PRIMARY KEY,
+          category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+          lang VARCHAR(5) NOT NULL,
+          name VARCHAR(200),
+          description TEXT,
+          seo_title VARCHAR(70),
+          seo_description VARCHAR(160),
+          image_alt VARCHAR(200),
+          created_at TIMESTAMP DEFAULT NOW() NOT NULL,
+          updated_at TIMESTAMP DEFAULT NOW() NOT NULL,
+          CONSTRAINT category_translations_category_lang_unique UNIQUE (category_id, lang)
+        )
+      `);
+
+      // Performance-Indizes
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_article_translations_article_id ON article_translations(article_id)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_article_translations_lang ON article_translations(lang)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_article_seo_slug ON article_seo(slug)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_article_merchant_article_id ON article_merchant(article_id)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_category_translations_category_id ON category_translations(category_id)`);
+
+      console.log('[Server] Sprint 1 Migration: alle Tabellen und Felder angelegt (idempotent)');
+    }
+  } catch (err) {
+    console.warn('[Server] Sprint 1 Migration fehlgeschlagen (non-fatal):', err);
+  }
+
   app.listen(port, "0.0.0.0", () => {
     console.log(`[Server] 369 Research Backend running on port ${port}`);
   });
