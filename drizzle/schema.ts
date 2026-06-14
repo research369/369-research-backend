@@ -82,11 +82,14 @@ export const articles = pgTable("articles", {
   photoComingSoon: integer("photo_coming_soon").default(0),
   // Cross-Sell Kategorie für Follow-up Empfehlungs-Matrix
   // Werte: intake | output | regeneration | signaling | structural
-  followUpCategory: varchar("follow_up_category", { length: 50 }),
+    followUpCategory: varchar("follow_up_category", { length: 50 }),
+  // Sprint 1: SEO/Merchant/i18n Vorbereitung (additiv)
+  publishedAt: timestamp("published_at"),
+  nasalSprayImageUrl: text("nasal_spray_image_url"),
+  bundleDeal: jsonb("bundle_deal"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
-
 export type Article = typeof articles.$inferSelect;
 export type InsertArticle = typeof articles.$inferInsert;
 
@@ -717,3 +720,113 @@ export const salesFollowupProducts = pgTable("sales_followup_products", {
 });
 export type SalesFollowupProduct = typeof salesFollowupProducts.$inferSelect;
 export type InsertSalesFollowupProduct = typeof salesFollowupProducts.$inferInsert;
+
+// ============================================================
+// SPRINT 1: MEHRSPRACHIGKEIT, SEO, MERCHANT CENTER
+// Datum: 2026-06-14 | Rein additiv – keine bestehenden Felder geändert
+// ============================================================
+
+/**
+ * article_translations – Mehrsprachige Produkttexte
+ * Fallback-Regel: Wenn Übersetzung fehlt, immer DE verwenden.
+ * UNIQUE(articleId, lang) – keine doppelten Einträge pro Sprache
+ */
+export const articleTranslations = pgTable("article_translations", {
+  id: serial("id").primaryKey(),
+  articleId: integer("article_id").notNull().references(() => articles.id, { onDelete: "cascade" }),
+  lang: varchar("lang", { length: 5 }).notNull(),
+  name: varchar("name", { length: 200 }),
+  shortDescription: text("short_description"),
+  description: jsonb("description"),
+  seoTitle: varchar("seo_title", { length: 70 }),
+  seoDescription: varchar("seo_description", { length: 160 }),
+  merchantTitle: varchar("merchant_title", { length: 150 }),
+  merchantDescription: text("merchant_description"),
+  imageAlt: varchar("image_alt", { length: 200 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+export type ArticleTranslation = typeof articleTranslations.$inferSelect;
+export type InsertArticleTranslation = typeof articleTranslations.$inferInsert;
+
+/**
+ * article_seo – SEO-Konfiguration pro Produkt (1:1 zu articles)
+ * Slugs sind dauerhaft stabil – niemals ohne 301-Redirect ändern.
+ */
+export const articleSeo = pgTable("article_seo", {
+  id: serial("id").primaryKey(),
+  articleId: integer("article_id").notNull().references(() => articles.id, { onDelete: "cascade" }),
+  slug: varchar("slug", { length: 200 }).notNull().unique(),
+  canonical: text("canonical"),
+  robots: varchar("robots", { length: 50 }).default("index,follow"),
+  schemaEnabled: integer("schema_enabled").default(1),
+  faqEnabled: integer("faq_enabled").default(0),
+  ogImage: text("og_image"),
+  priority: decimal("priority", { precision: 2, scale: 1 }).default("0.8"),
+  changefreq: varchar("changefreq", { length: 20 }).default("weekly"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+export type ArticleSeo = typeof articleSeo.$inferSelect;
+export type InsertArticleSeo = typeof articleSeo.$inferInsert;
+
+/**
+ * article_merchant – Google Merchant Center Daten (1:1 zu articles)
+ * availability = Override für Sonderfälle; Feed berechnet dynamisch aus articles.stock
+ */
+export const articleMerchant = pgTable("article_merchant", {
+  id: serial("id").primaryKey(),
+  articleId: integer("article_id").notNull().references(() => articles.id, { onDelete: "cascade" }),
+  googleProductCategory: varchar("google_product_category", { length: 10 }),
+  productType: varchar("product_type", { length: 200 }),
+  gtin: varchar("gtin", { length: 14 }),
+  mpn: varchar("mpn", { length: 70 }),
+  availability: varchar("availability", { length: 20 }).default("in_stock"),
+  shippingLabel: varchar("shipping_label", { length: 50 }),
+  condition: varchar("condition", { length: 10 }).default("new"),
+  ageGroup: varchar("age_group", { length: 20 }).default("adult"),
+  customLabel0: varchar("custom_label_0", { length: 100 }),
+  customLabel1: varchar("custom_label_1", { length: 100 }),
+  customLabel2: varchar("custom_label_2", { length: 100 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+export type ArticleMerchant = typeof articleMerchant.$inferSelect;
+export type InsertArticleMerchant = typeof articleMerchant.$inferInsert;
+
+/**
+ * categories – Kategorie-/Landingpage-Struktur
+ * Redesign-sicher: Kategorien frei änderbar ohne Produkte oder Orders zu berühren.
+ */
+export const shopCategories = pgTable("categories", {
+  id: serial("id").primaryKey(),
+  slug: varchar("slug", { length: 200 }).notNull().unique(),
+  parentId: integer("parent_id"),
+  imageUrl: text("image_url"),
+  sortOrder: integer("sort_order").default(0),
+  visible: integer("visible").default(1),
+  type: varchar("type", { length: 50 }).default("shop"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+export type ShopCategory = typeof shopCategories.$inferSelect;
+export type InsertShopCategory = typeof shopCategories.$inferInsert;
+
+/**
+ * category_translations – Mehrsprachige Kategorie-Texte und SEO-Daten
+ * UNIQUE(categoryId, lang) – keine doppelten Einträge pro Sprache
+ */
+export const categoryTranslations = pgTable("category_translations", {
+  id: serial("id").primaryKey(),
+  categoryId: integer("category_id").notNull().references(() => shopCategories.id, { onDelete: "cascade" }),
+  lang: varchar("lang", { length: 5 }).notNull(),
+  name: varchar("name", { length: 200 }),
+  description: text("description"),
+  seoTitle: varchar("seo_title", { length: 70 }),
+  seoDescription: varchar("seo_description", { length: 160 }),
+  imageAlt: varchar("image_alt", { length: 200 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+export type CategoryTranslation = typeof categoryTranslations.$inferSelect;
+export type InsertCategoryTranslation = typeof categoryTranslations.$inferInsert;

@@ -64,6 +64,20 @@
       "when": 1781087935054,
       "tag": "0008_boring_vertigo",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1781409144240,
+      "tag": "0009_tiny_puck",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1781409186689,
+      "tag": "0010_lively_gorilla_man",
+      "breakpoints": true
     }
   ]
 }
