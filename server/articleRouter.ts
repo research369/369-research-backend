@@ -3,7 +3,7 @@
  */
 import { z } from "zod";
 import { eq, desc, asc, like, and, sql, gte, lte } from "drizzle-orm";
-import { router, adminProcedure, publicProcedure } from "./trpc.js";
+import { router, adminProcedure, productManagerProcedure, publicProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
 import { articles, stockHistory, orderItems, orders } from "../drizzle/schema.js";
 
@@ -58,7 +58,7 @@ export const articleRouter = router({
   }),
 
   // List all articles with search/sort
-  list: adminProcedure
+  list: productManagerProcedure
     .input(z.object({
       search: z.string().optional(),
       sortBy: z.enum(["name", "sku", "stock", "sellingPrice", "createdAt"]).optional(),
@@ -117,7 +117,7 @@ export const articleRouter = router({
     }),
 
   // Get single article
-  get: adminProcedure
+  get: productManagerProcedure
     .input(z.object({ id: z.number() }))
     .query(async ({ input }) => {
       const db = await getDb();
@@ -135,7 +135,7 @@ export const articleRouter = router({
     }),
 
   // Create article
-  create: adminProcedure
+  create: productManagerProcedure
     .input(articleSchema)
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
@@ -173,7 +173,7 @@ export const articleRouter = router({
     }),
 
   // Update article
-  update: adminProcedure
+  update: productManagerProcedure
     .input(z.object({ id: z.number() }).merge(articleSchema.partial()))
     .mutation(async ({ input }) => {
       const db = await getDb();
@@ -209,7 +209,7 @@ export const articleRouter = router({
     }),
 
   // Delete (archive) article
-  archive: adminProcedure
+  archive: productManagerProcedure
     .input(z.object({ id: z.number() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
@@ -220,7 +220,7 @@ export const articleRouter = router({
     }),
 
   // Clone article
-  clone: adminProcedure
+  clone: productManagerProcedure
     .input(z.object({ id: z.number() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
@@ -246,7 +246,7 @@ export const articleRouter = router({
     }),
 
   // Update article(Wareneingang / Korrektur)
-  adjustStock: adminProcedure
+  adjustStock: productManagerProcedure
     .input(z.object({
       id: z.number(),
       change: z.number().int(),
@@ -281,7 +281,7 @@ export const articleRouter = router({
     }),
 
   // Stock history for an article
-  history: adminProcedure
+  history: productManagerProcedure
     .input(z.object({
       articleId: z.number().optional(),
       limit: z.number().optional(),
@@ -421,7 +421,7 @@ export const articleRouter = router({
     }),
 
   // CMS: Update article description (manual or AI-generated)
-  updateDescription: adminProcedure
+  updateDescription: productManagerProcedure
     .input(z.object({
       id: z.number(),
       description: z.object({
@@ -443,7 +443,7 @@ export const articleRouter = router({
     }),
 
   // CMS: Generate description via AI
-  generateDescription: adminProcedure
+  generateDescription: productManagerProcedure
     .input(z.object({
       id: z.number(),
       name: z.string(),
@@ -519,7 +519,7 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
     }),
 
   // CMS: Toggle shop visibility
-  toggleShopVisible: adminProcedure
+  toggleShopVisible: productManagerProcedure
     .input(z.object({
       id: z.number(),
       visible: z.boolean(),
@@ -639,7 +639,7 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
     }),
 
   // Check stock availability for shop products (PUBLIC)
-  checkAvailability: adminProcedure
+  checkAvailability: productManagerProcedure
     .input(z.object({
       shopProductIds: z.array(z.string()),
     }))
