@@ -41,3 +41,17 @@ const isAdmin = middleware(({ ctx, next }) => {
 
 export const protectedProcedure = t.procedure.use(isAuthed);
 export const adminProcedure = t.procedure.use(isAdmin);
+
+// Product Manager: role = "admin" OR role = "product_manager"
+// Kein Zugriff auf orders, customers, invoices, payments, checkout, users, migrations
+const isProductManager = middleware(({ ctx, next }) => {
+  if (!ctx.user) {
+    throw new TRPCError({ code: "UNAUTHORIZED", message: "Bitte anmelden" });
+  }
+  if (ctx.user.role !== "admin" && ctx.user.role !== "product_manager") {
+    throw new TRPCError({ code: "FORBIDDEN", message: "Keine Berechtigung – product_manager oder admin erforderlich" });
+  }
+  return next({ ctx: { ...ctx, user: ctx.user } });
+});
+
+export const productManagerProcedure = t.procedure.use(isProductManager);

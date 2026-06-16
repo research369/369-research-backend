@@ -1048,3 +1048,40 @@ export type InsertArticleComparison = typeof articleComparisons.$inferInsert;
 
 // Keine neuen pgTable-Definitionen hier – nur ALTER TABLE in 0013_sprint5_schema_extensions.sql
 // Die TypeScript-Typen werden nach Anwendung der Migration durch Drizzle-Introspection aktualisiert.
+
+// ============================================================
+// PRODUCT MANAGER API – Sprint PM
+// Datum: 2026-06-16 | Rein additiv – keine bestehenden Felder geändert
+// ZERO RISK: Keine Änderungen an orders, customers, invoices, WaWi-Logik
+// ============================================================
+
+/**
+ * product_audit_log – Vollständiges Audit-Trail für Produktänderungen
+ * Jede Änderung über die Product Manager API wird hier protokolliert.
+ * rollback_data enthält einen vollständigen Snapshot des Artikels vor der Änderung.
+ * WICHTIG: Rollback betrifft NUR Produktdaten (articles, article_seo, article_merchant, article_translations).
+ * Niemals: orders, customers, invoices, payments, stock_history, users, migrations.
+ */
+export const productAuditLog = pgTable("product_audit_log", {
+  id: serial("id").primaryKey(),
+  articleId: integer("article_id").notNull().references(() => articles.id),
+  action: varchar("action", { length: 50 }).notNull(),
+  // 'create' | 'update' | 'price_change' | 'seo_update' | 'merchant_update'
+  // 'image_update' | 'publish' | 'archive' | 'stock_change' | 'rollback'
+  fieldName: varchar("field_name", { length: 100 }),
+  oldValue: text("old_value"),
+  newValue: text("new_value"),
+  changedBy: varchar("changed_by", { length: 100 }).notNull(),
+  changedAt: timestamp("changed_at").defaultNow().notNull(),
+  rollbackData: jsonb("rollback_data"),
+  // Snapshot: { article, seo, merchant } – für Rollback verwendet
+});
+
+export type ProductAuditLog = typeof productAuditLog.$inferSelect;
+export type InsertProductAuditLog = typeof productAuditLog.$inferInsert;
+
+// NOTE: userRoleEnum muss auf ["user", "admin", "product_manager"] erweitert werden.
+// Da PostgreSQL-ENUMs nicht einfach via ALTER TYPE in allen Versionen idempotent sind,
+// wird die Erweiterung in Migration 0014 als:
+//   ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'product_manager';
+// umgesetzt. Die TypeScript-Typen werden nach der Migration aktualisiert.

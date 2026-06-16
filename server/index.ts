@@ -808,6 +808,58 @@ async function start() {
       } else {
         console.log('[Migrations] 0013_sprint5_extensions: already applied, skipping');
       }
+
+      // 4. Migration 0014: Product Manager API
+      const m0014 = await pool.query(
+        `SELECT 1 FROM schema_migrations WHERE migration_name = '0014_product_manager_api' LIMIT 1`
+      );
+      if ((m0014.rowCount ?? 0) === 0) {
+        console.log('[Migrations] Running 0014_product_manager_api...');
+
+        // 4a. product_manager Rolle zur ENUM hinzufügen (idempotent)
+        await pool.query(`
+          DO $$ BEGIN
+            ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'product_manager';
+          EXCEPTION WHEN duplicate_object THEN NULL;
+          END $$;
+        `);
+
+        // 4b. product_audit_log Tabelle erstellen
+        await pool.query(`
+          CREATE TABLE IF NOT EXISTS product_audit_log (
+            id SERIAL PRIMARY KEY,
+            article_id INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+            action VARCHAR(50) NOT NULL,
+            field_name VARCHAR(100),
+            old_value TEXT,
+            new_value TEXT,
+            changed_by VARCHAR(100) NOT NULL,
+            changed_at TIMESTAMP DEFAULT NOW() NOT NULL,
+            rollback_data JSONB
+          );
+        `);
+
+        // 4c. Indizes für schnelle Abfragen
+        await pool.query(`
+          CREATE INDEX IF NOT EXISTS idx_product_audit_log_article_id
+            ON product_audit_log(article_id);
+          CREATE INDEX IF NOT EXISTS idx_product_audit_log_changed_at
+            ON product_audit_log(changed_at DESC);
+        `);
+
+        // 4d. published_at Spalte zu articles hinzufügen (für Publish-Workflow)
+        await pool.query(`
+          ALTER TABLE articles ADD COLUMN IF NOT EXISTS published_at TIMESTAMP;
+        `);
+
+        await pool.query(
+          `INSERT INTO schema_migrations (migration_name) VALUES ('0014_product_manager_api')
+           ON CONFLICT (migration_name) DO NOTHING`
+        );
+        console.log('[Migrations] 0014_product_manager_api: DONE');
+      } else {
+        console.log('[Migrations] 0014_product_manager_api: already applied, skipping');
+      }
     }
   } catch (err) {
     console.warn('[Migrations] Migration system error (non-fatal):', err);
