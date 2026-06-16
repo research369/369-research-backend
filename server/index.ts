@@ -620,6 +620,200 @@ async function start() {
     console.warn('[Server] Sprint 2 Migration fehlgeschlagen (non-fatal):', err);
   }
 
+  // ============================================================
+  // MIGRATION SYSTEM – schema_migrations Versionstabelle
+  // Jede Migration wird nur EINMAL ausgeführt.
+  // KEINE Änderungen an: orders, customers, invoices, stock_history,
+  //   checkout, payments, academy, DHL, WaWi Business Logik.
+  // Nur: Knowledge Layer, SEO, Merchant, FAQ, Use Cases.
+  // ============================================================
+  try {
+    const pool = await getPool();
+    if (pool) {
+      // 1. schema_migrations Tabelle erstellen (falls nicht vorhanden)
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          id             SERIAL PRIMARY KEY,
+          migration_name VARCHAR(200) NOT NULL,
+          executed_at    TIMESTAMP NOT NULL DEFAULT NOW(),
+          CONSTRAINT schema_migrations_name_unique UNIQUE (migration_name)
+        )
+      `);
+      console.log('[Migrations] schema_migrations table ready');
+
+      // 2. Migration 0012: Knowledge Layer
+      const m0012 = await pool.query(
+        `SELECT 1 FROM schema_migrations WHERE migration_name = '0012_knowledge_layer' LIMIT 1`
+      );
+      if ((m0012.rowCount ?? 0) === 0) {
+        console.log('[Migrations] Running 0012_knowledge_layer...');
+        await pool.query(`
+          CREATE TABLE IF NOT EXISTS use_cases (
+            id          SERIAL PRIMARY KEY,
+            slug        VARCHAR(100) NOT NULL,
+            icon        VARCHAR(50),
+            is_active   SMALLINT NOT NULL DEFAULT 1,
+            sort_order  INTEGER NOT NULL DEFAULT 0,
+            created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+            updated_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+            CONSTRAINT use_cases_slug_unique UNIQUE (slug)
+          )
+        `);
+        await pool.query(`
+          CREATE TABLE IF NOT EXISTS use_case_translations (
+            id              SERIAL PRIMARY KEY,
+            use_case_id     INTEGER NOT NULL REFERENCES use_cases(id) ON DELETE CASCADE,
+            lang            VARCHAR(10) NOT NULL,
+            title           VARCHAR(200) NOT NULL,
+            hero_text       TEXT,
+            seo_title       VARCHAR(70),
+            seo_description VARCHAR(160),
+            created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+            CONSTRAINT use_case_translations_unique UNIQUE (use_case_id, lang)
+          )
+        `);
+        await pool.query(`
+          CREATE TABLE IF NOT EXISTS article_use_cases (
+            id          SERIAL PRIMARY KEY,
+            article_id  INTEGER NOT NULL,
+            use_case_id INTEGER NOT NULL REFERENCES use_cases(id) ON DELETE CASCADE,
+            sort_order  INTEGER NOT NULL DEFAULT 0,
+            created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+            CONSTRAINT article_use_cases_unique UNIQUE (article_id, use_case_id)
+          )
+        `);
+        await pool.query(`
+          CREATE TABLE IF NOT EXISTS article_tags (
+            id          SERIAL PRIMARY KEY,
+            article_id  INTEGER NOT NULL,
+            tag         VARCHAR(100) NOT NULL,
+            created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+            CONSTRAINT article_tags_unique UNIQUE (article_id, tag)
+          )
+        `);
+        await pool.query(`
+          CREATE TABLE IF NOT EXISTS article_faq (
+            id             SERIAL PRIMARY KEY,
+            article_id     INTEGER NOT NULL,
+            lang           VARCHAR(10) NOT NULL,
+            question       TEXT NOT NULL,
+            answer         TEXT NOT NULL,
+            sort_order     INTEGER NOT NULL DEFAULT 0,
+            schema_enabled SMALLINT NOT NULL DEFAULT 1,
+            created_at     TIMESTAMP NOT NULL DEFAULT NOW(),
+            CONSTRAINT article_faq_unique UNIQUE (article_id, lang, sort_order)
+          )
+        `);
+        await pool.query(`
+          CREATE TABLE IF NOT EXISTS article_studies (
+            id               SERIAL PRIMARY KEY,
+            article_id       INTEGER NOT NULL,
+            pubmed_id        VARCHAR(20),
+            doi              VARCHAR(200),
+            title            TEXT NOT NULL,
+            authors          TEXT,
+            journal          VARCHAR(200),
+            year             SMALLINT,
+            study_type       VARCHAR(50),
+            population       VARCHAR(100),
+            keywords         TEXT,
+            summary_de       TEXT,
+            summary_en       TEXT,
+            url              TEXT,
+            created_at       TIMESTAMP NOT NULL DEFAULT NOW()
+          )
+        `);
+        await pool.query(`
+          CREATE TABLE IF NOT EXISTS article_bundles (
+            id             SERIAL PRIMARY KEY,
+            slug           VARCHAR(100) NOT NULL,
+            name_de        VARCHAR(200) NOT NULL,
+            name_en        VARCHAR(200),
+            description_de TEXT,
+            description_en TEXT,
+            is_active      SMALLINT NOT NULL DEFAULT 1,
+            sort_order     INTEGER NOT NULL DEFAULT 0,
+            created_at     TIMESTAMP NOT NULL DEFAULT NOW(),
+            CONSTRAINT article_bundles_slug_unique UNIQUE (slug)
+          )
+        `);
+        await pool.query(`
+          CREATE TABLE IF NOT EXISTS article_bundle_items (
+            id          SERIAL PRIMARY KEY,
+            bundle_id   INTEGER NOT NULL REFERENCES article_bundles(id) ON DELETE CASCADE,
+            article_id  INTEGER NOT NULL,
+            quantity    INTEGER NOT NULL DEFAULT 1,
+            sort_order  INTEGER NOT NULL DEFAULT 0,
+            created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+            CONSTRAINT article_bundle_items_unique UNIQUE (bundle_id, article_id)
+          )
+        `);
+        await pool.query(`
+          CREATE TABLE IF NOT EXISTS article_comparisons (
+            id             SERIAL PRIMARY KEY,
+            article_id_a   INTEGER NOT NULL,
+            article_id_b   INTEGER NOT NULL,
+            slug           VARCHAR(200) NOT NULL,
+            summary_de     TEXT,
+            summary_en     TEXT,
+            winner_note_de TEXT,
+            winner_note_en TEXT,
+            created_at     TIMESTAMP NOT NULL DEFAULT NOW(),
+            CONSTRAINT article_comparisons_unique UNIQUE (article_id_a, article_id_b)
+          )
+        `);
+        await pool.query(
+          `INSERT INTO schema_migrations (migration_name) VALUES ('0012_knowledge_layer')
+           ON CONFLICT (migration_name) DO NOTHING`
+        );
+        console.log('[Migrations] 0012_knowledge_layer: DONE');
+      } else {
+        console.log('[Migrations] 0012_knowledge_layer: already applied, skipping');
+      }
+
+      // 3. Migration 0013: Sprint 5 Extensions
+      const m0013 = await pool.query(
+        `SELECT 1 FROM schema_migrations WHERE migration_name = '0013_sprint5_extensions' LIMIT 1`
+      );
+      if ((m0013.rowCount ?? 0) === 0) {
+        console.log('[Migrations] Running 0013_sprint5_extensions...');
+        await pool.query(`ALTER TABLE use_cases ADD COLUMN IF NOT EXISTS icon VARCHAR(50)`);
+        await pool.query(`ALTER TABLE use_cases ADD COLUMN IF NOT EXISTS is_active SMALLINT NOT NULL DEFAULT 1`);
+        await pool.query(`ALTER TABLE article_faq ADD COLUMN IF NOT EXISTS schema_enabled SMALLINT NOT NULL DEFAULT 1`);
+        await pool.query(`ALTER TABLE article_studies ADD COLUMN IF NOT EXISTS study_type VARCHAR(50)`);
+        await pool.query(`ALTER TABLE article_studies ADD COLUMN IF NOT EXISTS population VARCHAR(100)`);
+        await pool.query(`ALTER TABLE article_studies ADD COLUMN IF NOT EXISTS keywords TEXT`);
+        await pool.query(`
+          DO $$ BEGIN
+            IF EXISTS (
+              SELECT 1 FROM information_schema.tables
+              WHERE table_name = 'article_merchant' AND table_schema = 'public'
+            ) THEN
+              ALTER TABLE article_merchant ADD COLUMN IF NOT EXISTS sale_price DECIMAL(10,2);
+              ALTER TABLE article_merchant ADD COLUMN IF NOT EXISTS sale_price_effective_date VARCHAR(50);
+              ALTER TABLE article_merchant ADD COLUMN IF NOT EXISTS shipping TEXT;
+              ALTER TABLE article_merchant ADD COLUMN IF NOT EXISTS identifier_exists VARCHAR(10);
+              ALTER TABLE article_merchant ADD COLUMN IF NOT EXISTS merchant_title VARCHAR(200);
+              ALTER TABLE article_merchant ADD COLUMN IF NOT EXISTS merchant_description TEXT;
+              ALTER TABLE article_merchant ADD COLUMN IF NOT EXISTS canonical_url TEXT;
+              ALTER TABLE article_merchant ADD COLUMN IF NOT EXISTS image_link TEXT;
+            END IF;
+          END $$
+        `);
+        await pool.query(
+          `INSERT INTO schema_migrations (migration_name) VALUES ('0013_sprint5_extensions')
+           ON CONFLICT (migration_name) DO NOTHING`
+        );
+        console.log('[Migrations] 0013_sprint5_extensions: DONE');
+      } else {
+        console.log('[Migrations] 0013_sprint5_extensions: already applied, skipping');
+      }
+    }
+  } catch (err) {
+    console.warn('[Migrations] Migration system error (non-fatal):', err);
+  }
+  // ============================================================
+
   app.listen(port, "0.0.0.0", () => {
     console.log(`[Server] 369 Research Backend running on port ${port}`);
   });
