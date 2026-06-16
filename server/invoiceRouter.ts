@@ -4,7 +4,7 @@
  */
 import { z } from "zod";
 import { eq, desc } from "drizzle-orm";
-import { router, protectedProcedure } from "./trpc.js";
+import { router, adminProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
 import { invoices } from "../drizzle/schema.js";
 
@@ -26,7 +26,7 @@ const storedInvoiceSchema = z.object({
 
 export const invoiceRouter = router({
   /** Save or update a single invoice */
-  save: protectedProcedure
+  save: adminProcedure
     .input(storedInvoiceSchema)
     .mutation(async ({ input }) => {
       const db = await getDb();
@@ -59,7 +59,7 @@ export const invoiceRouter = router({
     }),
 
   /** Save multiple invoices at once (batch import from localStorage) */
-  saveBatch: protectedProcedure
+  saveBatch: adminProcedure
     .input(z.array(storedInvoiceSchema))
     .mutation(async ({ input }) => {
       const db = await getDb();
@@ -98,7 +98,7 @@ export const invoiceRouter = router({
     }),
 
   /** Get all invoices (sorted by date desc) */
-  getAll: protectedProcedure
+  getAll: adminProcedure
     .query(async () => {
       const db = await getDb();
       if (!db) return [];
@@ -123,7 +123,7 @@ export const invoiceRouter = router({
     }),
 
   /** Get invoices for a specific order */
-  getByOrder: protectedProcedure
+  getByOrder: adminProcedure
     .input(z.object({ orderNumber: z.string() }))
     .query(async ({ input }) => {
       const db = await getDb();
@@ -150,7 +150,7 @@ export const invoiceRouter = router({
     }),
 
   /** Delete all invoices for an order */
-  deleteByOrder: protectedProcedure
+  deleteByOrder: adminProcedure
     .input(z.object({ orderNumber: z.string() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
