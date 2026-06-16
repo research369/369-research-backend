@@ -214,9 +214,12 @@ export const productAdminRouter = router({
     .input(z.object({
       shopProductId: z.string(),
       lang: z.string().default("de"),
+      slug: z.string().max(200).optional(),
       seoTitle: z.string().max(70).optional(),
       seoDescription: z.string().max(160).optional(),
       seoKeywords: z.string().max(500).optional(),
+      canonical: z.string().max(500).optional(),
+      ogImage: z.string().max(500).optional(),
       schemaJson: z.string().optional(),
     }))
     .mutation(async ({ input, ctx }) => {
@@ -241,11 +244,15 @@ export const productAdminRouter = router({
       if (input.seoTitle !== undefined) patch.seoTitle = input.seoTitle;
       if (input.seoDescription !== undefined) patch.seoDescription = input.seoDescription;
       if (input.seoKeywords !== undefined) patch.seoKeywords = input.seoKeywords;
+      if (input.canonical !== undefined) patch.canonical = input.canonical;
+      if (input.ogImage !== undefined) patch.ogImage = input.ogImage;
       if (input.schemaJson !== undefined) patch.schemaJson = input.schemaJson;
 
       if (existing[0]) {
+        if (input.slug !== undefined) patch.slug = input.slug;
         await db.update(articleSeo).set(patch as any).where(eq(articleSeo.id, existing[0].id));
       } else {
+        patch.slug = input.slug ?? input.shopProductId.toLowerCase().replace(/[^a-z0-9-]/g, '-');
         await db.insert(articleSeo).values(patch as any);
       }
 

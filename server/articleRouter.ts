@@ -19,6 +19,7 @@ const articleSchema = z.object({
   maxStock: z.number().int().min(0).optional(),
   shopProductId: z.string().optional(),
   notes: z.string().optional(),
+  description: z.string().nullable().optional(),
   // Cross-Sell Kategorie für Follow-up Empfehlungs-Engine
   followUpCategory: z.enum(["intake", "output", "regeneration", "signaling", "structural"]).nullable().optional(),
   // Shop-Produktdaten
