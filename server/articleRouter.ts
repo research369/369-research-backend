@@ -201,9 +201,11 @@ export const articleRouter = router({
       if (data.purity !== undefined) updateData.purity = data.purity || null;
       if (data.badge !== undefined) updateData.badge = data.badge || null;
       if (data.shortDescription !== undefined) updateData.shortDescription = data.shortDescription || null;
+      if (data.description !== undefined) updateData.description = data.description || null;
       if (data.categories !== undefined) updateData.categories = data.categories && data.categories.length > 0 ? data.categories : null;
       if (data.beautyData !== undefined) updateData.beautyData = data.beautyData || null;
 
+      if (Object.keys(updateData).length === 0) return { success: true };
       await db.update(articles).set(updateData).where(eq(articles.id, id));
 
       return { success: true };
