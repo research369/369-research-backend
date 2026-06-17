@@ -4,7 +4,7 @@
 import { z } from "zod";
 import { eq, desc, asc, like, and, sql, gte, lte, inArray } from "drizzle-orm";
 import { router, adminProcedure, productManagerProcedure, publicProcedure } from "./trpc.js";
-import { getDb } from "./db.js";
+import { getDb, getPool } from "./db.js";
 import { articles, stockHistory, orderItems, orders, articleTranslations, articleFaq } from "../drizzle/schema.js";
 
 const articleSchema = z.object({
@@ -657,9 +657,21 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
       const articleIds = arts.map(a => a.id);
 
       // Translations für alle Varianten laden
-      const allTranslations = await db.select()
-        .from(articleTranslations)
-        .where(inArray(articleTranslations.articleId, articleIds));
+      // Verwende getPool() für Raw-SQL um Drizzle inArray()-Probleme mit mehreren IDs zu umgehen
+      const pool = await getPool();
+      const translationsResult = pool
+        ? await pool.query(
+            `SELECT * FROM article_translations WHERE article_id = ANY($1)`,
+            [articleIds]
+          )
+        : { rows: [] };
+      const allTranslations = translationsResult.rows as Array<{
+        id: number; article_id: number; lang: string; name: string | null;
+        description: Record<string, unknown> | null; meta_title: string | null;
+        meta_description: string | null; keywords: string | null;
+        slug: string | null; benefits: string | null; research_summary: string | null;
+        created_at: Date; updated_at: Date;
+      }>;
 
       // Deduplizieren + Mergen: pro lang alle Einträge zusammenführen
       // (verschiedene article_ids = Varianten desselben Produkts)
@@ -689,13 +701,42 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
       }
 
       // FAQs für alle Varianten laden
-      const allFaqs = await db.select()
-        .from(articleFaq)
-        .where(inArray(articleFaq.articleId, articleIds));
+      const faqsResult = pool
+        ? await pool.query(
+            `SELECT * FROM article_faq WHERE article_id = ANY($1) AND is_visible = 1`,
+            [articleIds]
+          )
+        : { rows: [] };
+      const allFaqs = faqsResult.rows as Array<{
+        id: number; article_id: number; lang: string; question: string;
+        answer: string; sort_order: number | null; is_visible: number;
+        created_at: Date; updated_at: Date;
+      }>;
 
       return {
-        translations: Array.from(byLang.values()),
-        faqs: allFaqs.filter(f => f.isVisible === 1),
+        translations: Array.from(byLang.values()).map(t => ({
+          id: (t as unknown as { id: number }).id,
+          articleId: (t as unknown as { article_id: number }).article_id,
+          lang: t.lang,
+          title: (t as unknown as { name: string | null }).name,
+          shortDescription: null,
+          description: t.description,
+          metaTitle: (t as unknown as { meta_title: string | null }).meta_title,
+          metaDescription: (t as unknown as { meta_description: string | null }).meta_description,
+          keywords: (t as unknown as { keywords: string | null }).keywords,
+          slug: (t as unknown as { slug: string | null }).slug,
+          benefits: (t as unknown as { benefits: string | null }).benefits,
+          researchSummary: (t as unknown as { research_summary: string | null }).research_summary,
+        })),
+        faqs: allFaqs.map(f => ({
+          id: f.id,
+          articleId: f.article_id,
+          lang: f.lang,
+          question: f.question,
+          answer: f.answer,
+          sortOrder: f.sort_order,
+          isVisible: f.is_visible,
+        })),
       };
     }),
 
