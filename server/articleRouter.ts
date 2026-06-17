@@ -667,8 +667,8 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
         : { rows: [] };
       const allTranslations = translationsResult.rows as Array<{
         id: number; article_id: number; lang: string; name: string | null;
-        description: Record<string, unknown> | null; meta_title: string | null;
-        meta_description: string | null; keywords: string | null;
+        description: Record<string, unknown> | null; seo_title: string | null;
+        seo_description: string | null; keywords: string | null;
         slug: string | null; benefits: string | null; research_summary: string | null;
         created_at: Date; updated_at: Date;
       }>;
@@ -721,8 +721,8 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
           title: (t as unknown as { name: string | null }).name,
           shortDescription: null,
           description: t.description,
-          metaTitle: (t as unknown as { meta_title: string | null }).meta_title,
-          metaDescription: (t as unknown as { meta_description: string | null }).meta_description,
+          metaTitle: (t as unknown as { seo_title: string | null }).seo_title,
+          metaDescription: (t as unknown as { seo_description: string | null }).seo_description,
           keywords: (t as unknown as { keywords: string | null }).keywords,
           slug: (t as unknown as { slug: string | null }).slug,
           benefits: (t as unknown as { benefits: string | null }).benefits,
