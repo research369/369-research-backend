@@ -661,10 +661,31 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
         .from(articleTranslations)
         .where(sql`${articleTranslations.articleId} = ANY(ARRAY[${sql.raw(articleIds.join(','))}]::int[])`);
 
-      // Deduplizieren: pro lang nur einen Eintrag (erste Variante mit Daten)
+      // Deduplizieren + Mergen: pro lang alle Einträge zusammenführen
+      // (verschiedene article_ids = Varianten desselben Produkts)
+      // Alle Felder aus allen Einträgen zusammenführen – Accordion-Felder haben Vorrang
       const byLang = new Map<string, typeof allTranslations[0]>();
       for (const t of allTranslations) {
-        if (!byLang.has(t.lang)) byLang.set(t.lang, t);
+        if (!byLang.has(t.lang)) {
+          byLang.set(t.lang, t);
+        } else {
+          const existing = byLang.get(t.lang)!;
+          const existingDesc = (existing.description as Record<string, unknown>) || {};
+          const newDesc = (t.description as Record<string, unknown>) || {};
+          const mergedDesc: Record<string, unknown> = { ...existingDesc };
+          for (const [key, value] of Object.entries(newDesc)) {
+            if (value === null || value === undefined) continue;
+            if (Array.isArray(value) && (value as unknown[]).length === 0) continue;
+            if (typeof value === 'string' && value.trim() === '') continue;
+            const ev = mergedDesc[key];
+            if (ev === null || ev === undefined ||
+                (Array.isArray(ev) && (ev as unknown[]).length === 0) ||
+                (typeof ev === 'string' && ev.trim() === '')) {
+              mergedDesc[key] = value;
+            }
+          }
+          byLang.set(t.lang, { ...existing, description: mergedDesc as typeof existing.description });
+        }
       }
 
       // FAQs für alle Varianten laden
