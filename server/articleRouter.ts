@@ -5,7 +5,7 @@ import { z } from "zod";
 import { eq, desc, asc, like, and, sql, gte, lte } from "drizzle-orm";
 import { router, adminProcedure, productManagerProcedure, publicProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
-import { articles, stockHistory, orderItems, orders } from "../drizzle/schema.js";
+import { articles, stockHistory, orderItems, orders, articleTranslations, articleFaq } from "../drizzle/schema.js";
 
 const articleSchema = z.object({
   sku: z.string().min(1),
@@ -638,6 +638,43 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
         stock: visible.reduce((sum, a) => sum + a.stock, 0),
         inStock: visible.some(a => a.stock > 0),
         variants,
+      };
+    }),
+
+  // PUBLIC: Translations + FAQs für ein Produkt (mehrsprachige Produktseiten)
+  shopArticleTranslations: publicProcedure
+    .input(z.object({ shopProductId: z.string() }))
+    .query(async ({ input }) => {
+      const db = await getDb();
+      if (!db) return { translations: [], faqs: [] };
+
+      // Alle article_ids für dieses shopProductId holen
+      const arts = await db.select({ id: articles.id })
+        .from(articles)
+        .where(eq(articles.shopProductId, input.shopProductId));
+      if (arts.length === 0) return { translations: [], faqs: [] };
+
+      const articleIds = arts.map(a => a.id);
+
+      // Translations für alle Varianten laden
+      const allTranslations = await db.select()
+        .from(articleTranslations)
+        .where(sql`${articleTranslations.articleId} = ANY(ARRAY[${sql.raw(articleIds.join(','))}]::int[])`);
+
+      // Deduplizieren: pro lang nur einen Eintrag (erste Variante mit Daten)
+      const byLang = new Map<string, typeof allTranslations[0]>();
+      for (const t of allTranslations) {
+        if (!byLang.has(t.lang)) byLang.set(t.lang, t);
+      }
+
+      // FAQs für alle Varianten laden
+      const allFaqs = await db.select()
+        .from(articleFaq)
+        .where(sql`${articleFaq.articleId} = ANY(ARRAY[${sql.raw(articleIds.join(','))}]::int[])`);
+
+      return {
+        translations: Array.from(byLang.values()),
+        faqs: allFaqs.filter(f => f.isVisible === 1),
       };
     }),
 
