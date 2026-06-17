@@ -703,7 +703,7 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
       // FAQs für alle Varianten laden
       const faqsResult = pool
         ? await pool.query(
-            `SELECT * FROM article_faq WHERE article_id = ANY($1) AND is_visible = 1`,
+            `SELECT * FROM article_faq WHERE article_id = ANY($1) AND active = 1`,
             [articleIds]
           )
         : { rows: [] };
@@ -735,7 +735,7 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
           question: f.question,
           answer: f.answer,
           sortOrder: f.sort_order,
-          isVisible: f.is_visible,
+          isVisible: 1,
         })),
       };
     }),
