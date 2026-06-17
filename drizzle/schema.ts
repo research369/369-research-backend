@@ -87,6 +87,8 @@ export const articles = pgTable("articles", {
   publishedAt: timestamp("published_at"),
   nasalSprayImageUrl: text("nasal_spray_image_url"),
   bundleDeal: jsonb("bundle_deal"),
+  // Produktreihenfolge im Shop (niedrigere Zahl = weiter vorne, Default 9999)
+  sortOrder: integer("sort_order").default(9999),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

@@ -542,7 +542,7 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
     if (!db) return [];
     const allArticles = await db.select().from(articles)
       .where(and(eq(articles.shopVisible, 1), eq(articles.isActive, 1)))
-      .orderBy(articles.name);
+      .orderBy(asc(articles.sortOrder), asc(articles.name));
 
     // Group by shopProductId to aggregate variants
     const productMap = new Map<string, any>();
