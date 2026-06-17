@@ -2,7 +2,7 @@
  * Article Router – tRPC routes for article/inventory management
  */
 import { z } from "zod";
-import { eq, desc, asc, like, and, sql, gte, lte } from "drizzle-orm";
+import { eq, desc, asc, like, and, sql, gte, lte, inArray } from "drizzle-orm";
 import { router, adminProcedure, productManagerProcedure, publicProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
 import { articles, stockHistory, orderItems, orders, articleTranslations, articleFaq } from "../drizzle/schema.js";
@@ -659,7 +659,7 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
       // Translations für alle Varianten laden
       const allTranslations = await db.select()
         .from(articleTranslations)
-        .where(sql`${articleTranslations.articleId} = ANY(ARRAY[${sql.raw(articleIds.join(','))}]::int[])`);
+        .where(inArray(articleTranslations.articleId, articleIds));
 
       // Deduplizieren + Mergen: pro lang alle Einträge zusammenführen
       // (verschiedene article_ids = Varianten desselben Produkts)
@@ -691,7 +691,7 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
       // FAQs für alle Varianten laden
       const allFaqs = await db.select()
         .from(articleFaq)
-        .where(sql`${articleFaq.articleId} = ANY(ARRAY[${sql.raw(articleIds.join(','))}]::int[])`);
+        .where(inArray(articleFaq.articleId, articleIds));
 
       return {
         translations: Array.from(byLang.values()),
