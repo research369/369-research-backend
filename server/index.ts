@@ -121,6 +121,22 @@ app.use(sendcloudExpressRouter);
 // ─── DHL Express Router (additiv, Phase 1: DE national, Sandbox) ─────────────
 app.use(dhlExpressRouter);
 
+// ─── TEMP: Warenpost-Status-Check (kein Auth, nur ENV-Werte) ─────────────────
+// TODO: nach Verifikation entfernen
+app.get("/api/debug/warenpost-status", (_req, res) => {
+  const { getDhlProfiles } = require("./dhlProfiles.js");
+  const profiles = getDhlProfiles();
+  const wp = profiles["DHL_DE_ECONOMY"];
+  res.json({
+    label: wp.label,
+    product: wp.product,
+    active: wp.active,
+    hasBillingNumber: !!wp.billingNumber,
+    billingNumberLength: wp.billingNumber?.length ?? 0,
+    inactiveReason: wp.inactiveReason ?? null,
+  });
+});
+
 // Start server
 const port = ENV.port;
 
