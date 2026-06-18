@@ -13,6 +13,7 @@ import { getPool } from "./db.js";
 import type { Context } from "./trpc.js";
 import { sendcloudExpressRouter } from "./sendcloudExpressRouter.js";
 import { dhlExpressRouter } from "./dhlExpressRouter.js";
+import { getDhlProfiles as getDhlProfilesForDebug } from "./dhlProfiles.js";
 
 const app = express();
 
@@ -124,8 +125,7 @@ app.use(dhlExpressRouter);
 // ─── TEMP: Warenpost-Status-Check (kein Auth, nur ENV-Werte) ─────────────────
 // TODO: nach Verifikation entfernen
 app.get("/api/debug/warenpost-status", (_req, res) => {
-  const { getDhlProfiles } = require("./dhlProfiles.js");
-  const profiles = getDhlProfiles();
+  const profiles = getDhlProfilesForDebug();
   const wp = profiles["DHL_DE_ECONOMY"];
   res.json({
     label: wp.label,
