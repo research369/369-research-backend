@@ -67,13 +67,13 @@ export function getDhlProfiles(): Record<DhlProfileKey, DhlProfile> {
     DHL_DE_ECONOMY: {
       label:           "DHL Warenpost DE Economy",
       product:         "V62WP",
-      billingNumber:   null, // Noch nicht aktiviert – Billing Number aus GKP eintragen
-      active:          false,
+      billingNumber:   ENV.dhlBillingNumber ?? null, // Gleiche Abrechnungsnummer wie DHL Paket
+      active:          !!(ENV.dhlBillingNumber),
       countries:       ["DE"],
       maxWeightG:      1000,
       customsRequired: false,
       labelFormat:     "910-300-400",
-      inactiveReason:  "Warenpost-Vertrag noch nicht aktiviert – Billing Number fehlt",
+      inactiveReason:  ENV.dhlBillingNumber ? undefined : "DHL_BILLING_NUMBER nicht gesetzt",
     },
 
     DHL_EU: {
