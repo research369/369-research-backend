@@ -1087,3 +1087,39 @@ export type InsertProductAuditLog = typeof productAuditLog.$inferInsert;
 // wird die Erweiterung in Migration 0014 als:
 //   ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'product_manager';
 // umgesetzt. Die TypeScript-Typen werden nach der Migration aktualisiert.
+
+// ============================================================
+// FORSCHER-BUNDLES – Sprint Bundles 2026-06
+// Datum: 2026-06-20 | Rein additiv – keine bestehenden Felder geändert
+// ============================================================
+export const bundles = pgTable('bundles', {
+  id: serial('id').primaryKey(),
+  slug: varchar('slug', { length: 100 }).notNull().unique(),
+  name: varchar('name', { length: 200 }).notNull(),
+  category: varchar('category', { length: 50 }).notNull(),
+  tagline: text('tagline'),
+  description: text('description'),
+  discountPercent: decimal('discount_percent', { precision: 5, scale: 2 }).notNull().default('0'),
+  allowsPlugPlay: integer('allows_plug_play').notNull().default(0),
+  allowsNasalSpray: integer('allows_nasal_spray').notNull().default(0),
+  imageUrl: text('image_url'),
+  isActive: integer('is_active').notNull().default(1),
+  sortOrder: integer('sort_order').notNull().default(0),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+export type Bundle = typeof bundles.$inferSelect;
+export type InsertBundle = typeof bundles.$inferInsert;
+
+export const bundleItems = pgTable('bundle_items', {
+  id: serial('id').primaryKey(),
+  bundleId: integer('bundle_id').notNull().references(() => bundles.id, { onDelete: 'cascade' }),
+  articleSku: varchar('article_sku', { length: 100 }).notNull(),
+  quantity: integer('quantity').notNull().default(1),
+  isFreeGift: integer('is_free_gift').notNull().default(0),
+  isTablet: integer('is_tablet').notNull().default(0),
+  fixedDosageMg: integer('fixed_dosage_mg'),
+  sortOrder: integer('sort_order').notNull().default(0),
+});
+export type BundleItem = typeof bundleItems.$inferSelect;
+export type InsertBundleItem = typeof bundleItems.$inferInsert;
+
