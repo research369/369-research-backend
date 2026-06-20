@@ -70,6 +70,7 @@ export const bundleRouter = router({
             categories: articles.categories,
             mockupImageUrl: articles.mockupImageUrl,
             shortDescription: articles.shortDescription,
+            variants: articles.variants,
           })
           .from(articles)
           .where(sql`${articles.sku} = ANY(ARRAY[${sql.join(skus.map(s => sql`${s}`), sql`, `)}])`)
