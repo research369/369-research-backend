@@ -78,14 +78,45 @@ export const bundleRouter = router({
 
       const articleMap = new Map(articleDetails.map(a => [a.sku, a]));
 
+      // Build stock map for ALL articles (for per-variant stock check)
+      // SKU pattern: SUBSTANZ-XMGX → we load all articles to check variant stock
+      // Variant "5 mg" of BPC-157-10MG corresponds to BPC-157-5MG
+      const allArticlesForStock = await db
+        .select({ sku: articles.sku, stock: articles.stock })
+        .from(articles);
+      const globalStockMap = new Map(allArticlesForStock.map(a => [a.sku, a.stock ?? 0]));
+
+      // Helper: derive variant SKU from base SKU + dosage label
+      // e.g. BPC-157-10MG + "5 mg" → BPC-157-5MG
+      function getVariantSku(baseSku: string, dosageLabel: string): string {
+        // Remove trailing dosage from base SKU (e.g. "-10MG", "-1MG", "-100MG")
+        const basePrefix = baseSku.replace(/-\d+(\.\d+)?MG$/i, '');
+        // Convert dosage label to SKU suffix (e.g. "5 mg" → "5MG", "1500 mg" → "1500MG")
+        const suffix = dosageLabel.replace(/\s+/g, '').toUpperCase();
+        return `${basePrefix}-${suffix}`;
+      }
+
       // Assemble result
       return filteredBundles.map(bundle => {
         const items = allItems
           .filter(i => i.bundleId === bundle.id)
-          .map(item => ({
-            ...item,
-            article: articleMap.get(item.articleSku) ?? null,
-          }));
+          .map(item => {
+            const art = articleMap.get(item.articleSku) ?? null;
+            // Enrich variants with inStock flag
+            const enrichedVariants = art?.variants
+              ? (art.variants as Array<{ label: string; price: number; dosage?: string }>).map(v => {
+                  const variantSku = getVariantSku(item.articleSku, v.label);
+                  const variantStock = globalStockMap.get(variantSku);
+                  // If variant SKU not found, fall back to main article stock
+                  const inStock = variantStock !== undefined ? variantStock > 0 : (art.stock ?? 0) > 0;
+                  return { ...v, inStock, variantSku };
+                })
+              : art?.variants;
+            return {
+              ...item,
+              article: art ? { ...art, variants: enrichedVariants } : null,
+            };
+          });
 
         // Calculate base price (sum of non-free items at full price)
         const basePrice = items
@@ -180,6 +211,7 @@ export const bundleRouter = router({
         name: articles.name,
         sellingPrice: articles.sellingPrice,
         stock: articles.stock,
+        mockupImageUrl: articles.mockupImageUrl,
       })
       .from(articles)
       .where(sql`${articles.sku} = ANY(ARRAY[${sql.join(penSkus.map(s => sql`${s}`), sql`, `)}])`);
@@ -192,6 +224,7 @@ export const bundleRouter = router({
         price: parseFloat(p.sellingPrice ?? "39"),
         stock: p.stock ?? 0,
         color: p.sku.replace('PEN-', '').toLowerCase(), // blau, lila, rosa, gold
+        imageUrl: p.mockupImageUrl ?? null,
       }));
   }),
 
