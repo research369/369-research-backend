@@ -1,0 +1,62 @@
+name: Wöchentliches DB-Backup (Railway PostgreSQL)
+
+on:
+  schedule:
+    # Jeden Sonntag um 02:00 UTC (04:00 Uhr DE-Zeit)
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+    # Manuell auslösbar über GitHub Actions UI
+
+jobs:
+  backup:
+    name: PostgreSQL Backup erstellen
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: PostgreSQL Client installieren
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y postgresql-client
+
+      - name: Backup erstellen
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          # Datum für Dateiname
+          TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+          BACKUP_FILE="backup_369research_${TIMESTAMP}.sql.gz"
+          
+          echo "🗄️ Starte Backup: $BACKUP_FILE"
+          
+          # pg_dump mit Komprimierung
+          pg_dump "$DATABASE_URL" \
+            --no-password \
+            --format=plain \
+            --no-owner \
+            --no-acl \
+            | gzip > "$BACKUP_FILE"
+          
+          # Dateigröße prüfen
+          SIZE=$(du -sh "$BACKUP_FILE" | cut -f1)
+          echo "✅ Backup erstellt: $BACKUP_FILE ($SIZE)"
+          
+          # Für nächsten Schritt verfügbar machen
+          echo "BACKUP_FILE=$BACKUP_FILE" >> $GITHUB_ENV
+          echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
+
+      - name: Backup als Artifact hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-backup-${{ env.TIMESTAMP }}
+          path: ${{ env.BACKUP_FILE }}
+          retention-days: 30
+
+      - name: Backup-Status melden
+        run: |
+          echo "✅ Backup erfolgreich abgeschlossen"
+          echo "📦 Datei: $BACKUP_FILE"
+          echo "🗓️ Datum: $TIMESTAMP"
+          echo "⏳ Aufbewahrung: 30 Tage"
+          echo ""
+          echo "📥 Download: GitHub → Actions → Artifacts"
