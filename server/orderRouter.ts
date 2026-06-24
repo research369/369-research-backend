@@ -327,6 +327,45 @@ export const orderRouter = router({
         });
       }
 
+      // ── Nasenspray: automatisch BAC Wasser 10ml (0€) hinzufügen und Bestand abziehen ──
+      const nasalSprayCount = input.items.filter(i => i.name.toLowerCase().includes('[nasenspray]')).length;
+      if (nasalSprayCount > 0) {
+        const [bacWasser10ml] = await db.select().from(articles)
+          .where(eq(articles.shopProductId, 'bac-wasser'))
+          .limit(1);
+        const bacArticleId = bacWasser10ml?.id ?? null;
+        // Als 0€-Position in die Bestellung einfügen
+        await db.insert(orderItems).values({
+          orderId: orderId,
+          name: 'BAC Wasser 10ml (GRATIS)',
+          dosage: null,
+          variant: '10ml',
+          type: 'accessory',
+          price: '0.00',
+          quantity: nasalSprayCount,
+          articleId: bacArticleId,
+        });
+        // Bestand abziehen
+        if (bacWasser10ml && (bacWasser10ml.stock ?? 0) > 0) {
+          const deduct = Math.min(nasalSprayCount, bacWasser10ml.stock ?? 0);
+          const newStock = (bacWasser10ml.stock ?? 0) - deduct;
+          await db.update(articles).set({ stock: newStock, updatedAt: new Date() }).where(eq(articles.id, bacWasser10ml.id));
+          await db.insert(stockHistory).values({
+            articleId: bacWasser10ml.id,
+            quantityChange: -deduct,
+            changeType: 'verkauf',
+            quantityBefore: bacWasser10ml.stock ?? 0,
+            quantityAfter: newStock,
+            reason: `Automatischer Abzug: Nasenspray-Bestellung ${orderId}`,
+            orderId: orderId,
+            userName: 'system',
+          });
+          console.log(`[Orders] BAC Wasser 10ml Bestand abgezogen: ${bacWasser10ml.stock} → ${newStock} (${nasalSprayCount}x Nasenspray, order ${orderId})`);
+        } else {
+          console.warn(`[Orders] BAC Wasser 10ml nicht gefunden oder kein Bestand für Nasenspray-Bestellung ${orderId}`);
+        }
+      }
+
       // ── Auto-create or link customer ──
       let customerId: number | null = null;
       try {
