@@ -212,6 +212,12 @@ dhlExpressRouter.post(
       if (s === "DEUTSCHLAND" || s === "GERMANY" || s === "DEU" || s === "DE") return "DE";
       return raw.trim();
     };
+    // ── Packstation-Erkennung ────────────────────────────────────────────────
+    // Prüft delivery_type aus DB ODER erkennt "Packstation" im street-Feld (Fallback)
+    const isPackstation =
+      (order as any).deliveryType === "packstation" ||
+      /^packstation$/i.test((order.street ?? "").trim());
+
     const consignee: DhlConsignee = {
       name1:         `${order.firstName} ${order.lastName}`.trim(),
       addressStreet: order.street,
@@ -224,8 +230,29 @@ dhlExpressRouter.post(
       phone:         order.phone ?? undefined,
     };
 
-    // Firmenname als name1 wenn vorhanden, Personenname dann in name2
-    if (order.company?.trim()) {
+    if (isPackstation) {
+      // DHL Packstation-Adressformat:
+      //   name1 = Kundenname
+      //   name2 = DHL-Postnummer (Pflichtfeld für Packstation-Zustellung)
+      //   addressStreet = "Packstation"
+      //   addressHouse  = Packstation-Nummer (z.B. "123")
+      const dhlPostNumber = (order as any).dhlPostNumber ?? "";
+      if (!dhlPostNumber) {
+        // Sicherheitsnetz: Wenn keine Postnummer hinterlegt, Label-Erstellung blockieren
+        res.status(422).json({
+          success: false,
+          error: "Packstation-Lieferung: DHL-Postnummer fehlt. Bitte Bestellung manuell prüfen.",
+        });
+        return;
+      }
+      consignee.addressStreet = "Packstation";
+      // houseNumber enthält die Packstation-Nummer
+      consignee.addressHouse  = order.houseNumber;
+      // name2 = Postnummer (DHL-Pflichtfeld)
+      consignee.name2 = dhlPostNumber.slice(0, 20);
+      console.log(`[dhlRouter] Packstation-Lieferung: Packstation ${order.houseNumber}, Post-Nr. ${dhlPostNumber}`);
+    } else if (order.company?.trim()) {
+      // Firmenname als name1 wenn vorhanden, Personenname dann in name2
       const fullName = `${order.firstName} ${order.lastName}`.trim();
       consignee.name1 = order.company.trim().slice(0, 50);
       if (fullName) consignee.name2 = fullName.slice(0, 50);

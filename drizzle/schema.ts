@@ -249,6 +249,11 @@ export const orders = pgTable("orders", {
   country: varchar("country", { length: 100 }).notNull(),
   company: varchar("company", { length: 200 }),
 
+  // Delivery type: 'home' (default) or 'packstation'
+  deliveryType: varchar("delivery_type", { length: 20 }).notNull().default("home"),
+  // DHL Postnummer des Kunden (nur bei Packstation, 6-10 Ziffern)
+  dhlPostNumber: varchar("dhl_post_number", { length: 20 }),
+
   // Link to customer record (optional)
   customerId: integer("customer_id"),
 

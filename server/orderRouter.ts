@@ -37,6 +37,9 @@ const createOrderSchema = z.object({
     city: z.string(),
     country: z.string(),
     company: z.string().optional(),
+    // Packstation support
+    deliveryType: z.enum(["home", "packstation"]).optional().default("home"),
+    dhlPostNumber: z.string().optional(),
   }),
   subtotal: z.number(),
   discount: z.number(),
@@ -297,6 +300,8 @@ export const orderRouter = router({
         city: input.customer.city,
         country: input.customer.country,
         company: input.customer.company || null,
+        deliveryType: input.customer.deliveryType || "home",
+        dhlPostNumber: input.customer.dhlPostNumber || null,
         subtotal: input.subtotal.toFixed(2),
         discount: input.discount.toFixed(2),
         discountCode: input.discountCode,
