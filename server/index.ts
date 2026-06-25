@@ -867,6 +867,20 @@ async function start() {
   }
   // ============================================================
 
+  // Auto-migrate: Packstation – dhl_post_number in customers
+  try {
+    const pool = await getPool();
+    if (pool) {
+      await pool.query(`
+        ALTER TABLE customers
+          ADD COLUMN IF NOT EXISTS dhl_post_number VARCHAR(20);
+      `);
+      console.log('[Server] customers.dhl_post_number column ready (Packstation)');
+    }
+  } catch (err) {
+    console.warn('[Server] Failed to add dhl_post_number to customers (non-fatal):', err);
+  }
+
   // Auto-migrate: Packstation – delivery_type + dhl_post_number in orders
   try {
     const pool = await getPool();

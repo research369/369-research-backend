@@ -25,6 +25,7 @@ const customerSchema = z.object({
   tags: z.string().optional(), // JSON array string
   source: z.string().optional(),
   notes: z.string().optional(),
+  dhlPostNumber: z.string().optional(), // DHL-Postnummer für Packstation-Lieferungen
 });
 
 export const customerRouter = router({
@@ -296,6 +297,7 @@ export const customerRouter = router({
       if (data.tags !== undefined) updateData.tags = data.tags || null;
       if (data.source !== undefined) updateData.source = data.source || null;
       if (data.notes !== undefined) updateData.notes = data.notes || null;
+      if (data.dhlPostNumber !== undefined) updateData.dhlPostNumber = data.dhlPostNumber || null;
 
       await db.update(customers).set(updateData).where(eq(customers.id, id));
 
@@ -337,6 +339,7 @@ export const customerRouter = router({
             if (data.zip !== undefined) orderUpdate.zip = data.zip || null;
             if (data.city !== undefined) orderUpdate.city = data.city || null;
             if (data.country !== undefined) orderUpdate.country = data.country || null;
+            if (data.dhlPostNumber !== undefined) orderUpdate.dhlPostNumber = data.dhlPostNumber || null;
 
             if (Object.keys(orderUpdate).length > 0) {
               await db.update(orders).set(orderUpdate).where(eq(orders.orderId, orderId));

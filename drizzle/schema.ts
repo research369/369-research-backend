@@ -135,6 +135,7 @@ export const customers = pgTable("customers", {
   zip: varchar("zip", { length: 30 }),
   city: varchar("city", { length: 100 }),
   country: varchar("country", { length: 100 }),
+  dhlPostNumber: varchar("dhl_post_number", { length: 20 }), // DHL-Postnummer für Packstation
 
   // CRM fields
   tags: text("tags"), // JSON array of tags, e.g. ["VIP", "Stammkunde", "B2B"]
