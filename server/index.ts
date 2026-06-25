@@ -867,6 +867,21 @@ async function start() {
   }
   // ============================================================
 
+  // Auto-migrate: Packstation – delivery_type + dhl_post_number in orders
+  try {
+    const pool = await getPool();
+    if (pool) {
+      await pool.query(`
+        ALTER TABLE orders
+          ADD COLUMN IF NOT EXISTS delivery_type VARCHAR(20) NOT NULL DEFAULT 'home',
+          ADD COLUMN IF NOT EXISTS dhl_post_number VARCHAR(20);
+      `);
+      console.log('[Server] orders.delivery_type + dhl_post_number columns ready (Packstation)');
+    }
+  } catch (err) {
+    console.warn('[Server] Failed to add packstation columns (non-fatal):', err);
+  }
+
   app.listen(port, "0.0.0.0", () => {
     console.log(`[Server] 369 Research Backend running on port ${port}`);
   });
