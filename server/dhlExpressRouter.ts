@@ -214,9 +214,15 @@ dhlExpressRouter.post(
     };
     // ── Packstation-Erkennung ────────────────────────────────────────────────
     // Prüft delivery_type aus DB ODER erkennt "Packstation" im street-Feld (Fallback)
+    // Drei Erkennungswege (OR-Logik, alle idempotent):
+    // 1. delivery_type = "packstation" (gesetzt beim Checkout)
+    // 2. street-Feld enthaelt "Packstation" (manuell eingetragen oder aeltere Bestellungen)
+    // 3. dhlPostNumber vorhanden + street leer (WaWi-Kunden mit Packstation-Nr. in houseNumber)
+    const dhlPostNumberRaw = ((order as any).dhlPostNumber ?? "").trim();
     const isPackstation =
       (order as any).deliveryType === "packstation" ||
-      /^packstation$/i.test((order.street ?? "").trim());
+      /^packstation$/i.test((order.street ?? "").trim()) ||
+      (!!dhlPostNumberRaw && !(order.street ?? "").trim());
 
     const consignee: DhlConsignee = {
       name1:         `${order.firstName} ${order.lastName}`.trim(),
@@ -236,7 +242,7 @@ dhlExpressRouter.post(
       //   name2 = DHL-Postnummer (Pflichtfeld für Packstation-Zustellung)
       //   addressStreet = "Packstation"
       //   addressHouse  = Packstation-Nummer (z.B. "123")
-      const dhlPostNumber = (order as any).dhlPostNumber ?? "";
+      const dhlPostNumber = dhlPostNumberRaw; // bereits oben aus order gelesen
       if (!dhlPostNumber) {
         // Sicherheitsnetz: Wenn keine Postnummer hinterlegt, Label-Erstellung blockieren
         res.status(422).json({
