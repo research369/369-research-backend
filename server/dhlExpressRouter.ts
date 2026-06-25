@@ -221,7 +221,7 @@ dhlExpressRouter.post(
     const dhlPostNumberRaw = ((order as any).dhlPostNumber ?? "").trim();
     const isPackstation =
       (order as any).deliveryType === "packstation" ||
-      /^packstation$/i.test((order.street ?? "").trim()) ||
+      /^packstation\b/i.test((order.street ?? "").trim()) ||
       (!!dhlPostNumberRaw && !(order.street ?? "").trim());
 
     const consignee: DhlConsignee = {
@@ -252,11 +252,18 @@ dhlExpressRouter.post(
         return;
       }
       consignee.addressStreet = "Packstation";
-      // houseNumber enthält die Packstation-Nummer
-      consignee.addressHouse  = order.houseNumber;
+      // Packstation-Nummer: aus houseNumber ODER aus street-Feld parsen (z.B. "Packstation 135 118" → "135")
+      let packstationNr = (order.houseNumber ?? "").trim();
+      if (!packstationNr) {
+        // Fallback: street-Feld parsen → "Packstation 135 118" → erster Token nach "Packstation" ist die Nr.
+        const streetParts = (order.street ?? "").trim().split(/\s+/);
+        // streetParts[0] = "Packstation", streetParts[1] = Packstation-Nr., streetParts[2] = ggf. Zusatz
+        if (streetParts.length >= 2) packstationNr = streetParts[1];
+      }
+      consignee.addressHouse = packstationNr || "";
       // name2 = Postnummer (DHL-Pflichtfeld)
       consignee.name2 = dhlPostNumber.slice(0, 20);
-      console.log(`[dhlRouter] Packstation-Lieferung: Packstation ${order.houseNumber}, Post-Nr. ${dhlPostNumber}`);
+      console.log(`[dhlRouter] Packstation-Lieferung: Packstation ${packstationNr}, Post-Nr. ${dhlPostNumber}`);
     } else if (order.company?.trim()) {
       // Firmenname als name1 wenn vorhanden, Personenname dann in name2
       const fullName = `${order.firstName} ${order.lastName}`.trim();
