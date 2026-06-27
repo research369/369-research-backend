@@ -777,6 +777,8 @@ export const articleSeo = pgTable("article_seo", {
   ogImage: text("og_image"),
   priority: decimal("priority", { precision: 2, scale: 1 }).default("0.8"),
   changefreq: varchar("changefreq", { length: 20 }).default("weekly"),
+  // Sprint 3: seoKeywords (additiv)
+  seoKeywords: varchar("seo_keywords", { length: 500 }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -803,6 +805,9 @@ export const articleMerchant = pgTable("article_merchant", {
   customLabel0: varchar("custom_label_0", { length: 100 }),
   customLabel1: varchar("custom_label_1", { length: 100 }),
   customLabel2: varchar("custom_label_2", { length: 100 }),
+  // Sprint 3: merchantTitle + merchantDescription (additiv)
+  merchantTitle: varchar("merchant_title", { length: 150 }),
+  merchantDescription: text("merchant_description"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

@@ -896,6 +896,19 @@ async function start() {
     console.warn('[Server] Failed to add packstation columns (non-fatal):', err);
   }
 
+  // Auto-migrate: Sprint 3 – seoKeywords, merchantTitle, merchantDescription (additiv, idempotent)
+  try {
+    const pool3 = await getPool();
+    if (pool3) {
+      await pool3.query(`ALTER TABLE article_seo ADD COLUMN IF NOT EXISTS seo_keywords VARCHAR(500)`);
+      await pool3.query(`ALTER TABLE article_merchant ADD COLUMN IF NOT EXISTS merchant_title VARCHAR(150)`);
+      await pool3.query(`ALTER TABLE article_merchant ADD COLUMN IF NOT EXISTS merchant_description TEXT`);
+      console.log('[Server] Sprint 3 Migration: seoKeywords + merchantTitle + merchantDescription ready (idempotent)');
+    }
+  } catch (err) {
+    console.warn('[Server] Sprint 3 Migration fehlgeschlagen (non-fatal):', err);
+  }
+
   app.listen(port, "0.0.0.0", () => {
     console.log(`[Server] 369 Research Backend running on port ${port}`);
   });

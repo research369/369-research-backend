@@ -381,12 +381,14 @@ export const productAdminRouter = router({
     }),
 
   // ─── 7. UPDATE IMAGES ─────────────────────────────────────
-  /** Bilder: mockupImageUrl, labelImageUrl – nur URL-Felder, kein Upload */
+  /** Bilder: mockupImageUrl, labelImageUrl, labReportImageUrl, galleryImages – nur URL-Felder, kein Upload */
   updateImages: productManagerProcedure
     .input(z.object({
       shopProductId: z.string(),
       mockupImageUrl: z.string().url().optional().nullable(),
       labelImageUrl: z.string().url().optional().nullable(),
+      labReportImageUrl: z.string().url().optional().nullable(),
+      galleryImages: z.array(z.string().url()).optional().nullable(),
     }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
@@ -404,6 +406,8 @@ export const productAdminRouter = router({
       const patch: Record<string, unknown> = {};
       if (input.mockupImageUrl !== undefined) patch.mockupImageUrl = input.mockupImageUrl;
       if (input.labelImageUrl !== undefined) patch.labelImageUrl = input.labelImageUrl;
+      if (input.labReportImageUrl !== undefined) patch.labReportImageUrl = input.labReportImageUrl;
+      if (input.galleryImages !== undefined) patch.galleryImages = input.galleryImages;
 
       if (Object.keys(patch).length === 0) return { success: true, message: "Keine Änderungen" };
 
@@ -412,10 +416,10 @@ export const productAdminRouter = router({
       await writeAuditLog(db, {
         articleId: old.id,
         action: "UPDATE_IMAGES",
-        oldValue: { mockupImageUrl: old.mockupImageUrl, labelImageUrl: old.labelImageUrl },
+        oldValue: { mockupImageUrl: old.mockupImageUrl, labelImageUrl: old.labelImageUrl, labReportImageUrl: old.labReportImageUrl },
         newValue: patch,
         changedBy: ctx.user?.email ?? "product_manager",
-        rollbackData: { mockupImageUrl: old.mockupImageUrl, labelImageUrl: old.labelImageUrl },
+        rollbackData: { mockupImageUrl: old.mockupImageUrl, labelImageUrl: old.labelImageUrl, labReportImageUrl: old.labReportImageUrl },
       });
 
       return { success: true, articleId: old.id };
