@@ -110,6 +110,7 @@ export const productAdminRouter = router({
     .input(z.object({
       shopProductId: z.string(),
       name: z.string().min(1).max(200).optional(),
+      description: z.string().optional(),
       shortDescription: z.string().max(500).optional(),
       badge: z.string().max(50).optional(),
       casNumber: z.string().max(50).optional(),
@@ -135,6 +136,7 @@ export const productAdminRouter = router({
       // Nur definierte Felder aktualisieren
       const patch: Record<string, unknown> = {};
       if (updates.name !== undefined) patch.name = updates.name;
+      if (updates.description !== undefined) patch.description = updates.description;
       if (updates.shortDescription !== undefined) patch.shortDescription = updates.shortDescription;
       if (updates.badge !== undefined) patch.badge = updates.badge;
       if (updates.casNumber !== undefined) patch.casNumber = updates.casNumber;
@@ -240,7 +242,7 @@ export const productAdminRouter = router({
         .where(eq(articleSeo.articleId, article[0].id))
         .limit(1);
 
-      const patch: Record<string, unknown> = { articleId: article[0].id, lang: input.lang };
+      const patch: Record<string, unknown> = { articleId: article[0].id };
       if (input.seoTitle !== undefined) patch.seoTitle = input.seoTitle;
       if (input.seoDescription !== undefined) patch.seoDescription = input.seoDescription;
       if (input.seoKeywords !== undefined) patch.seoKeywords = input.seoKeywords;
@@ -300,7 +302,7 @@ export const productAdminRouter = router({
         .where(eq(articleMerchant.articleId, article[0].id))
         .limit(1);
 
-      const patch: Record<string, unknown> = { articleId: article[0].id, lang: input.lang };
+      const patch: Record<string, unknown> = { articleId: article[0].id };
       if (input.merchantTitle !== undefined) patch.merchantTitle = input.merchantTitle;
       if (input.merchantDescription !== undefined) patch.merchantDescription = input.merchantDescription;
       if (input.availability !== undefined) patch.availability = input.availability;
