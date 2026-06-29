@@ -486,20 +486,8 @@ export const orderRouter = router({
           await db.update(orders).set({ customerId }).where(eq(orders.orderId, orderId));
         }
 
-        // Log the order confirmation email as communication
-        if (customerId) {
-          await db.insert(customerCommunications).values({
-            customerId,
-            type: "email",
-            status: "sent",
-            subject: `Bestellbestätigung ${orderId}`,
-            body: `Automatische Bestellbestätigung für Bestellung ${orderId} (${input.total.toFixed(2)} EUR)`,
-            recipientEmail: customerEmail,
-            senderName: "369 Research",
-            orderId: orderId,
-            createdBy: "system",
-          });
-        }
+        // NOTE: Communication log is written AFTER successful email send (see below)
+        // Do NOT log here to avoid false-positive idempotency check
       } catch (err) {
         console.warn("[Customers] Failed to auto-create/link customer:", err);
       }
@@ -511,45 +499,49 @@ export const orderRouter = router({
 
       // Send order confirmation email to customer (idempotent: only once per orderId)
       try {
-        // Check if email was already sent for this order (via communication log OR order email_sent flag)
-        // We use customerCommunications as the sent-marker; also check the order's email field directly
+        // Check if email was already sent for this order
+        // Only check for type='email' entries to avoid false positives from other log types
         const existingEmailLog = await db.select().from(customerCommunications)
-          .where(eq(customerCommunications.orderId, orderId))
+          .where(
+            and(
+              eq(customerCommunications.orderId, orderId),
+              eq(customerCommunications.type, "email")
+            )
+          )
           .limit(1);
         const alreadySent = existingEmailLog.length > 0;
         if (alreadySent) {
           console.warn(`[Orders] Confirmation email already sent for order ${orderId} – skipping duplicate`);
         } else {
-          // Log BEFORE sending to prevent race conditions
-          if (customerId) {
-            // Already logged above – skip
-          } else {
-            // No customer found, but still log to prevent duplicate emails
+          const emailSent = await sendOrderConfirmationEmail({
+            orderId: orderId,
+            customer: input.customer,
+            items: input.items.map(i => ({ ...i, dosage: i.dosage || null, variant: i.variant || null })),
+            subtotal: input.subtotal,
+            discount: input.discount,
+            discountCode: input.discountCode,
+            shipping: input.shipping,
+            total: input.total,
+            paymentMethod: input.paymentMethod,
+          });
+          // Log AFTER successful send to prevent false-positive idempotency checks
+          if (emailSent) {
             try {
               await db.insert(customerCommunications).values({
-                customerId: null as any,
+                customerId: customerId || null as any,
                 type: "email",
                 status: "sent",
                 subject: `Bestellbestätigung ${orderId}`,
-                body: `Automatische Bestellbestätigung für Bestellung ${orderId}`,
+                body: `Automatische Bestellbestätigung für Bestellung ${orderId} (${input.total.toFixed(2)} EUR)`,
                 recipientEmail: input.customer.email,
                 senderName: "369 Research",
                 orderId: orderId,
                 createdBy: "system",
               });
-            } catch (_) { /* ignore */ }
+            } catch (_) { /* ignore log errors */ }
+          } else {
+            console.warn(`[Orders] Email send failed for order ${orderId} – will retry on next request`);
           }
-          await sendOrderConfirmationEmail({
-          orderId: orderId,
-          customer: input.customer,
-          items: input.items.map(i => ({ ...i, dosage: i.dosage || null, variant: i.variant || null })),
-          subtotal: input.subtotal,
-          discount: input.discount,
-          discountCode: input.discountCode,
-          shipping: input.shipping,
-          total: input.total,
-          paymentMethod: input.paymentMethod,
-          });
         }
       } catch (err) {
         console.warn("[Orders] Failed to send confirmation email:", err);
