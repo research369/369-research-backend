@@ -65,15 +65,15 @@ export function getDhlProfiles(): Record<DhlProfileKey, DhlProfile> {
     },
 
     DHL_DE_ECONOMY: {
-      label:           "DHL Warenpost DE Economy",
-      product:         "V62WP",
-      billingNumber:   ENV.dhlBillingNumber ?? null, // Gleiche Abrechnungsnummer wie DHL Paket
-      active:          !!(ENV.dhlBillingNumber),
+      label:           "DHL Kleinpaket",
+      product:         "V62KP",
+      billingNumber:   ENV.dhlBillingNumberKleinpaket ?? null, // Eigene Abrechnungsnummer: 63979135286201
+      active:          !!(ENV.dhlBillingNumberKleinpaket),
       countries:       ["DE"],
       maxWeightG:      1000,
       customsRequired: false,
       labelFormat:     "910-300-400",
-      inactiveReason:  ENV.dhlBillingNumber ? undefined : "DHL_BILLING_NUMBER nicht gesetzt",
+      inactiveReason:  ENV.dhlBillingNumberKleinpaket ? undefined : "DHL_BILLING_NUMBER_KLEINPAKET nicht gesetzt",
     },
 
     DHL_EU: {
