@@ -1074,6 +1074,7 @@ export const followUpRouter = router({
         body: JSON.stringify({
           from: "369 Research <noreply@369research.eu>",
           to: [order.email],
+          bcc: ["369rebackup@gmail.com"], // Kopie an Pakko
           subject: followUp.emailSubject,
           html: followUp.emailBody,
         }),

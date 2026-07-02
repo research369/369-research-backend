@@ -7,6 +7,13 @@ import { generateSKUFromName } from "./articleCodes.js";
 
 const RESEND_API_URL = "https://api.resend.com/emails";
 
+/**
+ * BCC-Adresse für alle Kunden-E-Mails (Bestellbestätigung, Versandbestätigung, Packing).
+ * Pakko erhält so eine Kopie jeder an den Kunden gesendeten Nachricht.
+ * Nur hier pflegen – gilt für alle sendXxxEmail-Funktionen.
+ */
+const CUSTOMER_EMAIL_BCC = "369rebackup@gmail.com";
+
 interface OrderEmailData {
   orderId: string;
   customer: {
@@ -198,6 +205,7 @@ export async function sendOrderConfirmationEmail(data: OrderEmailData): Promise<
       body: JSON.stringify({
         from: "369 Research <noreply@369research.eu>",
         to: [data.customer.email],
+        bcc: [CUSTOMER_EMAIL_BCC], // Kopie an 369rebackup@gmail.com
         subject: `Bestellbestätigung ${data.orderId} – 369 Research`,
         html,
       }),
@@ -392,6 +400,7 @@ export async function sendPackingNotificationEmail(data: {
   const result = await resendWithRetry(apiKey, {
     from: "369 Research <noreply@369research.eu>",
     to: [data.customerEmail],
+    bcc: [CUSTOMER_EMAIL_BCC], // Kopie an 369rebackup@gmail.com
     subject: `✅ Dein Paket (${data.orderId}) wurde verpackt & wird versandfertig gemacht 📦 – 369 Research`,
     html,
   });
@@ -456,6 +465,7 @@ export async function sendShippingNotificationEmail(data: {
   const result = await resendWithRetry(apiKey, {
     from: "369 Research <noreply@369research.eu>",
     to: [data.customerEmail],
+    bcc: [CUSTOMER_EMAIL_BCC], // Kopie an 369rebackup@gmail.com
     subject: `Deine Bestellung ${data.orderId} wurde versendet! – 369 Research`,
     html,
   });
