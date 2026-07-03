@@ -16,6 +16,7 @@ import { purchaseOrderRouter } from "./purchaseOrderRouter.js";
 import { followUpRouter } from "./followUpRouter.js";
 import { productAdminRouter } from "./productAdminRouter.js";
 import { bundleRouter } from "./bundleRouter.js";
+import { substitutionRouter } from "./substitutionRouter.js";
 
 export const appRouter = router({
   order: orderRouter,
@@ -32,6 +33,7 @@ export const appRouter = router({
   followUp: followUpRouter,
   productAdmin: productAdminRouter,
   bundle: bundleRouter,
+  substitution: substitutionRouter,
 });
 
 export type AppRouter = typeof appRouter;

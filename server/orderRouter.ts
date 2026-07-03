@@ -11,6 +11,7 @@ import { getDb } from "./db.js";
 import { orders, orderItems, articles, stockHistory, customers, customerCommunications } from "../drizzle/schema.js";
 import { getIncomingPayments, matchPaymentToOrder, intelligentMatch, type MatchResult } from "./bunqService.js";
 import { sendOrderConfirmationEmail, sendShippingNotificationEmail, sendAdminOrderNotification, sendPackingNotificationEmail } from "./emailService.js";
+import { isSubstitutionEnabled, resolveSubstitution, extractDosageMg, isSubstitutionEligible } from "./substitutionService.js";
 import { partners, partnerTransactions } from "../drizzle/schema.js";
 import { sql } from "drizzle-orm";
 
@@ -225,9 +226,12 @@ export const orderRouter = router({
         return { success: true, orderId: orderId };
       }
 
-      // ── Stock check: verify all peptide items are in stock before creating order ──
+            // ── Stock check: verify all peptide items are in stock before creating order ──
       const allArticlesForCheck = await db.select().from(articles).where(eq(articles.isActive, 1));
       const outOfStockItems: string[] = [];
+
+      // Smart Substitution: prüfen ob Feature aktiv ist
+      const substitutionActive = await isSubstitutionEnabled();
 
       // Helper: find articles matching a shop item by shopProductId + dosage
       const findMatchingArticles = (item: { name: string; dosage?: string; shopProductId?: string }, allArts: typeof allArticlesForCheck) => {
@@ -245,13 +249,45 @@ export const orderRouter = router({
         });
       };
 
-      for (const item of input.items) {
+      // Map: item-Index → SubstitutionResult (für späteren Bestandsabzug)
+      const substitutionMap = new Map<number, import('./substitutionService.js').SubstitutionResult>();
+
+      for (let itemIdx = 0; itemIdx < input.items.length; itemIdx++) {
+        const item = input.items[itemIdx];
         if (item.type !== 'peptide') continue;
         const matchingArticles = findMatchingArticles(item, allArticlesForCheck);
         if (matchingArticles.length > 0) {
           const totalStock = matchingArticles.reduce((sum, a) => sum + (a.stock ?? 0), 0);
           if (totalStock < item.quantity) {
-            outOfStockItems.push(`${item.name}${item.dosage ? ` (${item.dosage})` : ''} (Bestand: ${totalStock})`);
+            // Variante nicht auf Lager – Smart Substitution versuchen?
+            if (substitutionActive && item.shopProductId && isSubstitutionEligible(matchingArticles[0]?.category)) {
+              const dosageMg = extractDosageMg(item.dosage || item.name);
+              if (dosageMg !== null) {
+                const sub = resolveSubstitution(
+                  item.shopProductId,
+                  dosageMg,
+                  item.quantity,
+                  allArticlesForCheck.map(a => ({
+                    id: a.id,
+                    name: a.name,
+                    sku: a.sku,
+                    stock: a.stock,
+                    shopProductId: a.shopProductId,
+                    category: a.category,
+                  }))
+                );
+                if (sub.possible) {
+                  substitutionMap.set(itemIdx, sub);
+                  console.log(`[Orders] Smart Substitution: ${sub.internalNote} (order ${orderId})`);
+                } else {
+                  outOfStockItems.push(`${item.name}${item.dosage ? ` (${item.dosage})` : ''} (Bestand: ${totalStock}, keine Substitution möglich)`);
+                }
+              } else {
+                outOfStockItems.push(`${item.name}${item.dosage ? ` (${item.dosage})` : ''} (Bestand: ${totalStock})`);
+              }
+            } else {
+              outOfStockItems.push(`${item.name}${item.dosage ? ` (${item.dosage})` : ''} (Bestand: ${totalStock})`);
+            }
           }
         }
       }
@@ -261,30 +297,65 @@ export const orderRouter = router({
       }
 
       // ── Stock deduction: reduce stock for all ordered peptide items ──
-      for (const item of input.items) {
+      // Bei Substitution: Bestand der Ersatz-Varianten abziehen, nicht der bestellten Variante
+      for (let itemIdx = 0; itemIdx < input.items.length; itemIdx++) {
+        const item = input.items[itemIdx];
         if (item.type !== 'peptide') continue;
-        const matchingArticles = findMatchingArticles(item, allArticlesForCheck);
-        let remainingToDeduct = item.quantity;
-        for (const article of matchingArticles) {
-          if (remainingToDeduct <= 0) break;
-          const deduct = Math.min(remainingToDeduct, article.stock ?? 0);
-          if (deduct > 0) {
-            const newStock = (article.stock ?? 0) - deduct;
+
+        const sub = substitutionMap.get(itemIdx);
+        if (sub && sub.possible) {
+          // Substitution: Bestand der Ersatz-Varianten abziehen
+          for (const comp of sub.components) {
+            const article = allArticlesForCheck.find(a => a.id === comp.articleId);
+            if (!article) continue;
+            const newStock = (article.stock ?? 0) - comp.quantity;
             await db.update(articles).set({ stock: newStock, updatedAt: new Date() }).where(eq(articles.id, article.id));
             await db.insert(stockHistory).values({
               articleId: article.id,
-              quantityChange: -deduct,
+              quantityChange: -comp.quantity,
               changeType: 'verkauf',
               quantityBefore: article.stock ?? 0,
               quantityAfter: newStock,
-              reason: `Bestandsabzug für Bestellung ${orderId}`,
+              reason: `Smart Substitution für Bestellung ${orderId}: ${sub.internalNote}`,
               orderId: orderId,
               userName: 'system',
             });
-            remainingToDeduct -= deduct;
-            console.log(`[Orders] Stock deducted: ${article.name} ${article.stock} → ${newStock} (order ${orderId})`);
+            console.log(`[Orders] Smart Substitution deducted: ${article.name} ${article.stock} → ${newStock} (order ${orderId})`);
+          }
+        } else {
+          // Normal: Bestand der bestellten Variante abziehen
+          const matchingArticles = findMatchingArticles(item, allArticlesForCheck);
+          let remainingToDeduct = item.quantity;
+          for (const article of matchingArticles) {
+            if (remainingToDeduct <= 0) break;
+            const deduct = Math.min(remainingToDeduct, article.stock ?? 0);
+            if (deduct > 0) {
+              const newStock = (article.stock ?? 0) - deduct;
+              await db.update(articles).set({ stock: newStock, updatedAt: new Date() }).where(eq(articles.id, article.id));
+              await db.insert(stockHistory).values({
+                articleId: article.id,
+                quantityChange: -deduct,
+                changeType: 'verkauf',
+                quantityBefore: article.stock ?? 0,
+                quantityAfter: newStock,
+                reason: `Bestandsabzug für Bestellung ${orderId}`,
+                orderId: orderId,
+                userName: 'system',
+              });
+              remainingToDeduct -= deduct;
+              console.log(`[Orders] Stock deducted: ${article.name} ${article.stock} → ${newStock} (order ${orderId})`);
+            }
           }
         }
+      }
+
+      // ── Substitutions-Notiz in Bestellnotiz speichern (intern, für WaWi) ──
+      const substitutionNotes = Array.from(substitutionMap.values())
+        .filter(s => s.possible)
+        .map(s => s.internalNote);
+      if (substitutionNotes.length > 0) {
+        // Wird später in internalNote der Bestellung gespeichert
+        (input as any)._substitutionNotes = substitutionNotes.join(' | ');
       }
 
       // Insert order
@@ -317,7 +388,11 @@ export const orderRouter = router({
         partnerDiscount: partnerDiscountAmount.toFixed(2),
         partnerCommission: partnerCommissionAmount.toFixed(2),
         creditUsed: creditUsed.toFixed(2),
-        internalNote: input.internalNote || null,
+        // Substitutions-Notiz intern speichern (nur für WaWi sichtbar)
+        internalNote: [
+          input.internalNote,
+          (input as any)._substitutionNotes,
+        ].filter(Boolean).join(' | ') || null,
       });
 
       // Insert order items

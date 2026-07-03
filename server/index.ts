@@ -909,6 +909,30 @@ async function start() {
     console.warn('[Server] Sprint 3 Migration fehlgeschlagen (non-fatal):', err);
   }
 
+  // Auto-migrate: Smart Substitution – substitution_config Tabelle (additiv, idempotent)
+  try {
+    const poolSub = await getPool();
+    if (poolSub) {
+      await poolSub.query(`
+        CREATE TABLE IF NOT EXISTS substitution_config (
+          id          INTEGER PRIMARY KEY DEFAULT 1,
+          enabled     BOOLEAN NOT NULL DEFAULT FALSE,
+          updated_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+          CONSTRAINT substitution_config_single_row CHECK (id = 1)
+        )
+      `);
+      // Standardzeile anlegen falls nicht vorhanden (Feature ist standardmäßig AUS)
+      await poolSub.query(`
+        INSERT INTO substitution_config (id, enabled, updated_at)
+        VALUES (1, FALSE, NOW())
+        ON CONFLICT (id) DO NOTHING
+      `);
+      console.log('[Server] substitution_config table ready (Smart Substitution: default OFF)');
+    }
+  } catch (err) {
+    console.warn('[Server] substitution_config migration fehlgeschlagen (non-fatal):', err);
+  }
+
   app.listen(port, "0.0.0.0", () => {
     console.log(`[Server] 369 Research Backend running on port ${port}`);
   });
