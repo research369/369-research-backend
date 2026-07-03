@@ -764,4 +764,57 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
 
       return Object.fromEntries(availability);
     }),
+
+  /**
+   * shopSubstitutionMap (PUBLIC)
+   * Gibt zurück welche Varianten durch Smart Substitution kaufbar sind,
+   * obwohl ihr eigener Bestand 0 ist.
+   * Format: { "tb-500|10 mg": true, "3g-triple-g|30 mg": true, ... }
+   * Gibt leeres Objekt zurück wenn Smart Substitution deaktiviert ist.
+   * Wird vom Shop-Frontend (StockContext) genutzt um ausverkaufte Varianten
+   * trotzdem kaufbar zu machen.
+   */
+  shopSubstitutionMap: publicProcedure.query(async () => {
+    const { isSubstitutionEnabled, resolveSubstitution, extractDosageMg, isSubstitutionEligible } = await import('./substitutionService.js');
+    const enabled = await isSubstitutionEnabled();
+    if (!enabled) return {} as Record<string, boolean>;
+
+    const db = await getDb();
+    if (!db) return {} as Record<string, boolean>;
+
+    const allArticles = await db.select().from(articles).where(eq(articles.isActive, 1));
+    const result: Record<string, boolean> = {};
+
+    for (const article of allArticles) {
+      if ((article.stock ?? 0) > 0) continue;
+      if (!article.shopProductId) continue;
+      if (!isSubstitutionEligible(article.category)) continue;
+
+      const dosageMg = extractDosageMg(article.name);
+      if (dosageMg === null) continue;
+
+      const sub = resolveSubstitution(
+        article.shopProductId,
+        dosageMg,
+        1,
+        allArticles.map(a => ({
+          id: a.id,
+          name: a.name,
+          sku: a.sku,
+          stock: a.stock,
+          shopProductId: a.shopProductId,
+          category: a.category,
+        }))
+      );
+
+      if (sub.possible) {
+        const parenMatch = article.name.match(/\(([^)]+)\)\s*$/);
+        const noParenMatch = article.name.match(/\b(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu))\s*$/i);
+        const dosageStr = parenMatch ? parenMatch[1].trim() : noParenMatch ? noParenMatch[1].trim() : `${dosageMg} mg`;
+        result[`${article.shopProductId}|${dosageStr}`] = true;
+      }
+    }
+
+    return result;
+  }),
 });
