@@ -228,7 +228,7 @@ dhlExpressRouter.post(
       name1:         `${order.firstName} ${order.lastName}`.trim(),
       addressStreet: order.street,
       addressHouse:  order.houseNumber,
-      postalCode:    order.zip,
+      postalCode:    (order.zip ?? "").trim(), // trim() verhindert DHL-Fehler bei PLZ mit Leerzeichen
       city:          order.city,
       // DE: normalisiert auf "DE"; EU: Rohwert – normalizeCountryToAlpha3 läuft in createDhlShipmentEU
       country:       profileKey === "DHL_DE_STANDARD" ? normalizeCountry(order.country) : (order.country ?? ""),
