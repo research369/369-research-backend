@@ -26,6 +26,9 @@ const createOrderSchema = z.object({
     quantity: z.number(),
     type: z.string(),
     shopProductId: z.string().optional(), // product id from shop (e.g. '3g-triple-g')
+    isNasalSpray: z.boolean().optional(), // Nasenspray-Option (+12€ Aufpreis)
+    isPlugPlay: z.boolean().optional(),   // Plug&Play Patrone (+15€ Aufpreis)
+    isFreeGift: z.boolean().optional(),   // Gratis-Position (kein Bestandsabzug)
   })),
   customer: z.object({
     firstName: z.string(),
@@ -409,7 +412,12 @@ export const orderRouter = router({
       }
 
       // ── Nasenspray: automatisch BAC Wasser 10ml (0€) hinzufügen und Bestand abziehen ──
-      const nasalSprayCount = input.items.filter(i => i.name.toLowerCase().includes('[nasenspray]')).length;
+      // Erkennung über isNasalSpray-Flag (primär) oder Name-Fallback (Legacy)
+      const nasalSprayCount = input.items.filter(i =>
+        i.isNasalSpray === true ||
+        i.name.toLowerCase().includes('[nasenspray]') ||
+        i.name.toLowerCase().includes('nasenspray')
+      ).length;
       if (nasalSprayCount > 0) {
         const [bacWasser10ml] = await db.select().from(articles)
           .where(eq(articles.shopProductId, 'bac-wasser'))
