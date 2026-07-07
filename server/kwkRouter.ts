@@ -601,8 +601,14 @@ export const kwkRouter = router({
         `KWK-Modul ${input.enabled ? "aktiviert" : "deaktiviert"}`
       );
 
-      console.log(`[KWK] Feature flag set to: ${input.enabled} by ${adminUser}`);
-
+            console.log(`[KWK] Feature flag set to: ${input.enabled} by ${adminUser}`);
       return { success: true, enabled: input.enabled };
+    }),
+
+  // ── ADMIN: Feature Flag Status lesen ──────────────────────────────────────────────────────────────────────────────────────
+  getFeatureStatus: adminProcedure
+    .query(async () => {
+      const enabled = await isKwkEnabled();
+      return { enabled };
     }),
 });
