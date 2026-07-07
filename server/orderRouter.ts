@@ -7,7 +7,7 @@
 import { z } from "zod";
 import { eq, desc, inArray, and } from "drizzle-orm";
 import { router, publicProcedure, adminProcedure } from "./trpc.js";
-import { getDb } from "./db.js";
+import { getDb, getPool } from "./db.js";
 import { orders, orderItems, articles, stockHistory, customers, customerCommunications } from "../drizzle/schema.js";
 import { getIncomingPayments, matchPaymentToOrder, intelligentMatch, type MatchResult } from "./bunqService.js";
 import { sendOrderConfirmationEmail, sendShippingNotificationEmail, sendAdminOrderNotification, sendPackingNotificationEmail } from "./emailService.js";
