@@ -12,6 +12,8 @@ import { orders, orderItems, articles, stockHistory, customers, customerCommunic
 import { getIncomingPayments, matchPaymentToOrder, intelligentMatch, type MatchResult } from "./bunqService.js";
 import { sendOrderConfirmationEmail, sendShippingNotificationEmail, sendAdminOrderNotification, sendPackingNotificationEmail } from "./emailService.js";
 import { isSubstitutionEnabled, resolveSubstitution, extractDosageMg, isSubstitutionEligible } from "./substitutionService.js";
+// KWK-Modul: statischer Import (sicherer als dynamischer Import)
+import { isKwkEnabled, bookPendingCredit, detectFraudFlags, hashAddress, calculateKwkCommission, redeemCredit as kwkRedeemCredit } from "./kwkService.js";
 import { partners, partnerTransactions } from "../drizzle/schema.js";
 import { sql } from "drizzle-orm";
 
@@ -464,7 +466,6 @@ export const orderRouter = router({
       // Nur ausführen wenn Feature aktiv und KWK-Code vorhanden
       if (input.kwkCode) {
         try {
-          const { isKwkEnabled, bookPendingCredit, detectFraudFlags, hashAddress, calculateKwkCommission } = await import('./kwkService.js');
           const kwkActive = await isKwkEnabled();
           if (kwkActive) {
             const pool2 = await getPool();
@@ -526,8 +527,7 @@ export const orderRouter = router({
                 // KWK-Guthaben einlösen wenn vorhanden
                 if (input.kwkCreditUsed && input.kwkCreditUsed > 0 && input.kwkCreditKwkId) {
                   try {
-                    const { redeemCredit } = await import('./kwkService.js');
-                    await redeemCredit(input.kwkCreditKwkId, orderId, input.kwkCreditUsed);
+                    await kwkRedeemCredit(input.kwkCreditKwkId, orderId, input.kwkCreditUsed);
                   } catch (redeemErr) {
                     console.warn('[KWK] Credit redemption failed (non-fatal):', redeemErr);
                   }
