@@ -17,6 +17,8 @@ import { followUpRouter } from "./followUpRouter.js";
 import { productAdminRouter } from "./productAdminRouter.js";
 import { bundleRouter } from "./bundleRouter.js";
 import { substitutionRouter } from "./substitutionRouter.js";
+// KWK-Modul (Kunden-werben-Kunden) – isoliert, additiv
+import { kwkRouter } from "./kwkRouter.js";
 
 export const appRouter = router({
   order: orderRouter,
@@ -34,6 +36,7 @@ export const appRouter = router({
   productAdmin: productAdminRouter,
   bundle: bundleRouter,
   substitution: substitutionRouter,
+  kwk: kwkRouter, // KWK-Modul: Kunden-werben-Kunden
 });
 
 export type AppRouter = typeof appRouter;

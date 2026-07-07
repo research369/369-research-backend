@@ -933,6 +933,121 @@ async function start() {
     console.warn('[Server] substitution_config migration fehlgeschlagen (non-fatal):', err);
   }
 
+  // ── KWK-Modul: Auto-Migration (additiv, idempotent) ──────────────────────────────────────────────────────────────────────────────────────
+  // Neue Tabellen: kwk_accounts, kwk_ledger, kwk_referrals, kwk_audit_log
+  // Keine bestehenden Tabellen werden verändert.
+  try {
+    const kwkPool = await getPool();
+    if (!kwkPool) throw new Error("DB not available");
+    // Enums erstellen (IF NOT EXISTS via DO $$ ... $$)
+    await kwkPool.query(`
+      DO $$ BEGIN
+        CREATE TYPE kwk_status AS ENUM ('aktiv', 'gesperrt', 'review', 'deaktiviert');
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+    `);
+    await kwkPool.query(`
+      DO $$ BEGIN
+        CREATE TYPE kwk_ledger_type AS ENUM ('pending_credit', 'credit_released', 'redeemed', 'cancelled', 'refund', 'manual_correction');
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+    `);
+    await kwkPool.query(`
+      DO $$ BEGIN
+        CREATE TYPE kwk_ledger_status AS ENUM ('pending', 'confirmed', 'cancelled');
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+    `);
+    await kwkPool.query(`
+      DO $$ BEGIN
+        CREATE TYPE kwk_referral_status AS ENUM ('pending', 'confirmed', 'cancelled', 'review');
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+    `);
+    // kwk_accounts
+    await kwkPool.query(`
+      CREATE TABLE IF NOT EXISTS kwk_accounts (
+        id SERIAL PRIMARY KEY,
+        kwk_number VARCHAR(20) NOT NULL UNIQUE,
+        referral_code VARCHAR(50) NOT NULL UNIQUE,
+        name VARCHAR(255) NOT NULL,
+        email VARCHAR(255) NOT NULL UNIQUE,
+        phone VARCHAR(50) NOT NULL,
+        password_hash TEXT NOT NULL,
+        status kwk_status NOT NULL DEFAULT 'aktiv',
+        credit_available NUMERIC(10,2) NOT NULL DEFAULT 0.00,
+        credit_pending NUMERIC(10,2) NOT NULL DEFAULT 0.00,
+        credit_redeemed NUMERIC(10,2) NOT NULL DEFAULT 0.00,
+        company VARCHAR(255),
+        whatsapp VARCHAR(50),
+        notes TEXT,
+        login_attempts INTEGER NOT NULL DEFAULT 0,
+        login_locked_until TIMESTAMP,
+        last_login TIMESTAMP,
+        reset_token VARCHAR(128),
+        reset_token_expires_at TIMESTAMP,
+        deleted_at TIMESTAMP,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+    // kwk_ledger
+    await kwkPool.query(`
+      CREATE TABLE IF NOT EXISTS kwk_ledger (
+        id SERIAL PRIMARY KEY,
+        kwk_id INTEGER NOT NULL REFERENCES kwk_accounts(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+        order_id VARCHAR(50),
+        amount NUMERIC(10,2) NOT NULL,
+        type kwk_ledger_type NOT NULL,
+        status kwk_ledger_status NOT NULL DEFAULT 'pending',
+        note TEXT,
+        created_by VARCHAR(100) NOT NULL DEFAULT 'system',
+        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+    // kwk_referrals
+    await kwkPool.query(`
+      CREATE TABLE IF NOT EXISTS kwk_referrals (
+        id SERIAL PRIMARY KEY,
+        kwk_id INTEGER NOT NULL REFERENCES kwk_accounts(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+        order_id VARCHAR(50) NOT NULL UNIQUE,
+        customer_email VARCHAR(255),
+        customer_phone VARCHAR(50),
+        customer_address_hash VARCHAR(64),
+        discount_applied NUMERIC(10,2) NOT NULL DEFAULT 0.00,
+        commission_base NUMERIC(10,2) NOT NULL DEFAULT 0.00,
+        commission_amount NUMERIC(10,2) NOT NULL DEFAULT 0.00,
+        fraud_flags TEXT,
+        status kwk_referral_status NOT NULL DEFAULT 'pending',
+        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+    // kwk_audit_log
+    await kwkPool.query(`
+      CREATE TABLE IF NOT EXISTS kwk_audit_log (
+        id SERIAL PRIMARY KEY,
+        kwk_id INTEGER,
+        admin_user VARCHAR(100) NOT NULL,
+        action VARCHAR(100) NOT NULL,
+        old_value TEXT,
+        new_value TEXT,
+        note TEXT,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+    // Indizes
+    await kwkPool.query(`CREATE INDEX IF NOT EXISTS kwk_ledger_kwk_id_idx ON kwk_ledger(kwk_id)`);
+    await kwkPool.query(`CREATE INDEX IF NOT EXISTS kwk_ledger_order_id_idx ON kwk_ledger(order_id)`);
+    await kwkPool.query(`CREATE INDEX IF NOT EXISTS kwk_ledger_type_status_idx ON kwk_ledger(type, status)`);
+    await kwkPool.query(`CREATE INDEX IF NOT EXISTS kwk_referrals_kwk_id_idx ON kwk_referrals(kwk_id)`);
+    await kwkPool.query(`CREATE INDEX IF NOT EXISTS kwk_referrals_status_idx ON kwk_referrals(status)`);
+    await kwkPool.query(`CREATE INDEX IF NOT EXISTS kwk_audit_log_kwk_id_idx ON kwk_audit_log(kwk_id)`);
+    // Feature Flag in shop_settings (additiv, idempotent)
+    await kwkPool.query(`
+      INSERT INTO shop_settings (key, value) VALUES ('kwk_enabled', 'false')
+      ON CONFLICT (key) DO NOTHING
+    `);
+    console.log('[Server] KWK-Modul: Tabellen + Indizes + Feature Flag bereit (FEATURE_KWK_ENABLED=false)');
+  } catch (err) {
+    console.warn('[Server] KWK-Migration fehlgeschlagen (non-fatal):', err);
+  }
+
   app.listen(port, "0.0.0.0", () => {
     console.log(`[Server] 369 Research Backend running on port ${port}`);
   });
