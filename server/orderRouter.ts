@@ -61,6 +61,11 @@ const createOrderSchema = z.object({
   partnerNumber: z.string().nullable().optional(),
   partnerDiscount: z.number().optional(),
   creditUsed: z.number().optional(),
+  // KWK-Felder (additiv, optional – bestehende Logik unberührt)
+  kwkCode: z.string().nullable().optional(),       // KWK-Nummer des Empfehlungsgebers
+  kwkDiscount: z.number().optional(),              // 6% Rabatt auf Produkte
+  kwkCreditUsed: z.number().optional(),            // Eingelöstes KWK-Guthaben
+  kwkCreditKwkId: z.number().optional(),           // KWK-Account-ID für Guthaben-Einlösung
 });
 
 const updateStatusSchema = z.object({
@@ -452,6 +457,87 @@ export const orderRouter = router({
           console.log(`[Orders] BAC Wasser 10ml Bestand abgezogen: ${bacWasser10ml.stock} → ${newStock} (${nasalSprayCount}x Nasenspray, order ${orderId})`);
         } else {
           console.warn(`[Orders] BAC Wasser 10ml nicht gefunden oder kein Bestand für Nasenspray-Bestellung ${orderId}`);
+        }
+      }
+
+      // ── KWK-Modul: Referral + Pending-Guthaben (additiv, nach bestehender Logik) ──
+      // Nur ausführen wenn Feature aktiv und KWK-Code vorhanden
+      if (input.kwkCode) {
+        try {
+          const { isKwkEnabled, bookPendingCredit, detectFraudFlags, hashAddress, calculateKwkCommission } = await import('./kwkService.js');
+          const kwkActive = await isKwkEnabled();
+          if (kwkActive) {
+            const pool2 = await getPool();
+            if (pool2) {
+              // KWK-Account finden
+              const kwkResult = await pool2.query(
+                "SELECT id, status FROM kwk_accounts WHERE referral_code = $1 AND deleted_at IS NULL LIMIT 1",
+                [input.kwkCode.toUpperCase()]
+              );
+              if (kwkResult.rows.length > 0 && kwkResult.rows[0].status === 'aktiv') {
+                const kwkId = kwkResult.rows[0].id;
+                // Missbrauchsflags prüfen
+                const addressHash = hashAddress(
+                  input.customer.street,
+                  input.customer.zip,
+                  input.customer.city
+                );
+                const fraudFlags = await detectFraudFlags(
+                  kwkId,
+                  input.customer.email,
+                  input.customer.phone,
+                  addressHash
+                );
+                const hasFraud = fraudFlags.sameEmail || fraudFlags.samePhone || fraudFlags.sameAddress;
+                // Referral-Datensatz erstellen (dauerhaft, revisionssicher)
+                // UNIQUE auf order_id – Idempotenz durch DB-Constraint
+                try {
+                  const commissionBase = Math.max(0, (input.subtotal || 0) - (input.discount || 0) - (input.kwkDiscount || 0));
+                  const commissionAmount = calculateKwkCommission(commissionBase);
+                  await pool2.query(
+                    `INSERT INTO kwk_referrals
+                       (kwk_id, order_id, customer_email, customer_phone, customer_address_hash,
+                        discount_applied, commission_base, commission_amount, fraud_flags, status)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                     ON CONFLICT (order_id) DO NOTHING`,
+                    [
+                      kwkId, orderId,
+                      input.customer.email.toLowerCase(),
+                      input.customer.phone,
+                      addressHash,
+                      (input.kwkDiscount || 0).toFixed(2),
+                      commissionBase.toFixed(2),
+                      commissionAmount.toFixed(2),
+                      JSON.stringify(fraudFlags),
+                      hasFraud ? 'review' : 'pending',
+                    ]
+                  );
+                  // Pending-Guthaben buchen (nur wenn kein Fraud)
+                  if (!hasFraud && commissionAmount > 0) {
+                    await bookPendingCredit(kwkId, orderId, commissionAmount);
+                  }
+                  console.log(`[KWK] Referral created: order ${orderId} → KWK-${kwkId}, commission: ${commissionAmount.toFixed(2)}€, fraud: ${hasFraud}`);
+                } catch (refErr: any) {
+                  // Idempotenz: ON CONFLICT DO NOTHING – kein Fehler bei Duplikat
+                  if (!refErr?.message?.includes('duplicate')) {
+                    console.warn('[KWK] Referral insert failed (non-fatal):', refErr);
+                  }
+                }
+                // KWK-Guthaben einlösen wenn vorhanden
+                if (input.kwkCreditUsed && input.kwkCreditUsed > 0 && input.kwkCreditKwkId) {
+                  try {
+                    const { redeemCredit } = await import('./kwkService.js');
+                    await redeemCredit(input.kwkCreditKwkId, orderId, input.kwkCreditUsed);
+                  } catch (redeemErr) {
+                    console.warn('[KWK] Credit redemption failed (non-fatal):', redeemErr);
+                  }
+                }
+              }
+            }
+          }
+        } catch (kwkErr) {
+          // KWK-Fehler sind niemals fatal – Bestellung läuft immer durch
+          console.warn('[KWK] KWK processing failed (non-fatal):', kwkErr);
         }
       }
 
