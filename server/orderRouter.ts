@@ -415,6 +415,13 @@ export const orderRouter = router({
           type: item.type,
           price: item.price.toFixed(2),
           quantity: item.quantity,
+          // Nasenspray- und Plug&Play-Flag speichern (für WaWi-Anzeige)
+          isNasalSpray: item.isNasalSpray === true ||
+            item.name.toLowerCase().includes('[nasenspray]') ||
+            item.name.toLowerCase().includes('nasenspray'),
+          isPlugPlay: item.isPlugPlay === true ||
+            item.name.toLowerCase().includes('[plug&play') ||
+            item.name.toLowerCase().includes('plug&play patrone'),
         });
       }
 

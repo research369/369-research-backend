@@ -1,4 +1,4 @@
-import { integer, pgTable, text, timestamp, varchar, decimal, pgEnum, serial, jsonb, index } from "drizzle-orm/pg-core";
+import { integer, pgTable, text, timestamp, varchar, decimal, pgEnum, serial, jsonb, index, boolean } from "drizzle-orm/pg-core";
 
 /**
  * Enums
@@ -331,6 +331,10 @@ export const orderItems = pgTable("order_items", {
 
   // Link to article for stock management
   articleId: integer("article_id"),
+
+  // Nasenspray- und Plug&Play-Flags (additiv, für WaWi-Anzeige)
+  isNasalSpray: boolean("is_nasal_spray").notNull().default(false),
+  isPlugPlay: boolean("is_plug_play").notNull().default(false),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
