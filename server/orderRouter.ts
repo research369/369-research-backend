@@ -835,10 +835,30 @@ export const orderRouter = router({
         if (input.trackingCarrier) updateData.trackingCarrier = input.trackingCarrier;
       }
       if (input.status === "zugestellt") updateData.deliveredAt = now;
+      if (input.status === "abgeholt") updateData.deliveredAt = now; // Abholung = final wie zugestellt
       if (input.status === "storniert") updateData.cancelledAt = now;
       if (input.internalNote !== undefined) updateData.internalNote = input.internalNote;
 
       await db.update(orders).set(updateData).where(eq(orders.orderId, input.orderId));
+
+      // KWK-Guthaben freigeben wenn Bestellung final ist (versendet, zugestellt oder abgeholt)
+      if (["versendet", "zugestellt", "abgeholt"].includes(input.status)) {
+        try {
+          const { releaseCredit } = await import('./kwkService.js');
+          await releaseCredit(input.orderId);
+        } catch (kwkErr) {
+          console.warn('[KWK] releaseCredit failed (non-fatal):', kwkErr);
+        }
+      }
+      // KWK-Guthaben entfernen bei Storno
+      if (input.status === "storniert") {
+        try {
+          const { cancelCredit } = await import('./kwkService.js');
+          await cancelCredit(input.orderId);
+        } catch (kwkErr) {
+          console.warn('[KWK] cancelCredit failed (non-fatal):', kwkErr);
+        }
+      }
 
       // Send shipping notification email when status changes to "versendet"
       let emailResult: { sent: boolean; error?: string } = { sent: false };
