@@ -72,7 +72,7 @@ const createOrderSchema = z.object({
 
 const updateStatusSchema = z.object({
   orderId: z.string(),
-  status: z.enum(["offen", "bezahlt", "gepackt", "versendet", "zugestellt", "storniert"]),
+  status: z.enum(["offen", "bezahlt", "gepackt", "versendet", "zugestellt", "abgeholt", "storniert"]),
   trackingNumber: z.string().optional(),
   trackingCarrier: z.string().optional(),
   internalNote: z.string().optional(),
@@ -742,7 +742,7 @@ export const orderRouter = router({
   // ADMIN: List all orders with items
   list: adminProcedure
     .input(z.object({
-      status: z.enum(["alle", "offen", "bezahlt", "gepackt", "versendet", "zugestellt", "storniert"]).optional(),
+      status: z.enum(["alle", "offen", "bezahlt", "gepackt", "versendet", "zugestellt", "abgeholt", "storniert"]).optional(),
       search: z.string().optional(),
     }).optional())
     .query(async ({ input }) => {
