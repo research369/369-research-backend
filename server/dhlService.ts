@@ -179,9 +179,7 @@ export function normalizeCountryToAlpha3(raw: string): string {
     D\u00c4NEMARK: "DNK", DENMARK: "DNK",
     ISLAND: "ISL", ICELAND: "ISL",
     LIECHTENSTEIN: "LIE",
-    // Englische Ländernamen die im Checkout auftauchen
-    CYPRUS: "CYP",
-    GREECE: "GRC",
+    // Weitere Varianten
     CZECH_REPUBLIC: "CZE", "CZECH REPUBLIC": "CZE",
   };
 
