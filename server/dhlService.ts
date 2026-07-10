@@ -181,6 +181,22 @@ export function normalizeCountryToAlpha3(raw: string): string {
     LIECHTENSTEIN: "LIE",
     // Weitere Varianten
     CZECH_REPUBLIC: "CZE", "CZECH REPUBLIC": "CZE",
+    // Nicht-EU Länder und Balkan
+    ALBANIEN: "ALB", ALBANIA: "ALB",
+    ANDORRA: "AND",
+    "BOSNIEN-HERZEGOWINA": "BIH", BOSNIEN: "BIH", BOSNIA: "BIH",
+    GEORGIEN: "GEO", GEORGIA: "GEO",
+    KOSOVO: "XKX",
+    MOLDAU: "MDA", MOLDOVA: "MDA",
+    MONACO: "MCO",
+    MONTENEGRO: "MNE",
+    NORDMAZEDONIEN: "MKD", MAZEDONIEN: "MKD", MACEDONIA: "MKD",
+    "SAN MARINO": "SMR",
+    SERBIEN: "SRB", SERBIA: "SRB",
+    T\u00dcRKEI: "TUR", TURKEY: "TUR", T\u00dcRKIYE: "TUR",
+    UKRAINE: "UKR",
+    "VEREINIGTES K\u00d6NIGREICH": "GBR", "UNITED KINGDOM": "GBR", GROSSBRITANNIEN: "GBR",
+    WEI\u00dfRUSSLAND: "BLR", BELARUS: "BLR",
   };
 
   if (/^[A-Z]{3}$/.test(s)) return s;
