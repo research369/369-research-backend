@@ -172,6 +172,17 @@ export function normalizeCountryToAlpha3(raw: string): string {
     ESTLAND: "EST", ESTONIA: "EST",
     LETTLAND: "LVA", LATVIA: "LVA",
     LITAUEN: "LTU", LITHUANIA: "LTU",
+    ZYPERN: "CYP", CYPRUS: "CYP",
+    MALTA: "MLT",
+    RUM\u00c4NIEN: "ROU", ROMANIA: "ROU",
+    BULGARIEN: "BGR", BULGARIA: "BGR",
+    D\u00c4NEMARK: "DNK", DENMARK: "DNK",
+    ISLAND: "ISL", ICELAND: "ISL",
+    LIECHTENSTEIN: "LIE",
+    // Englische Ländernamen die im Checkout auftauchen
+    CYPRUS: "CYP",
+    GREECE: "GRC",
+    CZECH_REPUBLIC: "CZE", "CZECH REPUBLIC": "CZE",
   };
 
   if (/^[A-Z]{3}$/.test(s)) return s;
