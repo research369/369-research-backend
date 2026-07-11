@@ -605,6 +605,110 @@ export const kwkRouter = router({
       return { success: true, enabled: input.enabled };
     }),
 
+
+  // ── PUBLIC: Passwort-Reset anfordern ─────────────────────────────────────────
+  // Sendet eine Reset-E-Mail mit einem 1-Stunde gültigen Token
+  requestPasswordReset: publicProcedure
+    .input(z.object({ email: z.string().email() }))
+    .mutation(async ({ input }) => {
+      const pool = await getPool();
+      if (!pool) throw new Error("Database not available");
+
+      // Prüfen ob E-Mail existiert (kein Fehler wenn nicht – Security)
+      const { rows } = await pool.query(
+        "SELECT id, name FROM kwk_accounts WHERE email = $1 AND status != 'banned' LIMIT 1",
+        [input.email.toLowerCase()]
+      );
+
+      if (rows.length > 0) {
+        const account = rows[0];
+        // Token generieren (64 Zeichen hex)
+        const crypto = await import("crypto");
+        const token = crypto.randomBytes(32).toString("hex");
+        const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 Stunde
+
+        // Alte Tokens für diese E-Mail löschen
+        await pool.query("DELETE FROM kwk_password_resets WHERE email = $1", [input.email.toLowerCase()]);
+
+        // Neuen Token speichern
+        await pool.query(
+          "INSERT INTO kwk_password_resets (email, token, expires_at) VALUES ($1, $2, $3)",
+          [input.email.toLowerCase(), token, expiresAt]
+        );
+
+        // Reset-E-Mail senden via Resend
+        const resetUrl = `https://www.369research.eu/kwk/reset-password?token=${token}`;
+        const RESEND_KEY = process.env.RESEND_API_KEY;
+        if (RESEND_KEY) {
+          await fetch("https://api.resend.com/emails", {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${RESEND_KEY}`, "Content-Type": "application/json" },
+            body: JSON.stringify({
+              from: "369 Research <noreply@369research.eu>",
+              to: [input.email.toLowerCase()],
+              bcc: ["369rebackup@gmail.com"],
+              subject: "Dein KWK-Passwort zurücksetzen – 369 Research",
+              html: `
+                <div style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;background:#f9fafb;padding:24px;border-radius:12px;">
+                  <h2 style="color:#0040C1;margin:0 0 16px;">Passwort zurücksetzen</h2>
+                  <p style="color:#374151;font-size:14px;">Hallo ${account.name},</p>
+                  <p style="color:#374151;font-size:14px;">du hast einen Passwort-Reset für dein KWK-Konto angefordert. Klicke auf den Button, um ein neues Passwort zu setzen:</p>
+                  <div style="text-align:center;margin:24px 0;">
+                    <a href="${resetUrl}" style="background:#0040C1;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:14px;">
+                      Passwort zurücksetzen
+                    </a>
+                  </div>
+                  <p style="color:#6b7280;font-size:12px;">Dieser Link ist 1 Stunde gültig. Falls du keinen Reset angefordert hast, ignoriere diese E-Mail.</p>
+                  <p style="color:#9ca3af;font-size:11px;margin-top:16px;">369 Research · KWK-Programm · Research Use Only</p>
+                </div>
+              `,
+            }),
+          }).catch(() => {}); // Silent fail
+        }
+      }
+
+      // Immer gleiche Antwort (Security: kein Hinweis ob E-Mail existiert)
+      return { success: true, message: "Falls diese E-Mail registriert ist, erhältst du in Kürze eine Nachricht." };
+    }),
+
+  // ── PUBLIC: Passwort zurücksetzen ─────────────────────────────────────────────
+  // Setzt das Passwort mit einem gültigen Token zurück
+  confirmPasswordReset: publicProcedure
+    .input(z.object({
+      token: z.string().min(1),
+      newPassword: z.string().min(8).max(100),
+    }))
+    .mutation(async ({ input }) => {
+      const pool = await getPool();
+      if (!pool) throw new Error("Database not available");
+
+      // Token prüfen
+      const { rows } = await pool.query(
+        "SELECT email, expires_at, used_at FROM kwk_password_resets WHERE token = $1 LIMIT 1",
+        [input.token]
+      );
+
+      if (rows.length === 0) throw new Error("Ungültiger oder abgelaufener Reset-Link.");
+      const reset = rows[0];
+      if (reset.used_at) throw new Error("Dieser Reset-Link wurde bereits verwendet.");
+      if (new Date(reset.expires_at) < new Date()) throw new Error("Dieser Reset-Link ist abgelaufen. Bitte fordere einen neuen an.");
+
+      // Neues Passwort setzen
+      const passwordHash = await bcrypt.hash(input.newPassword, 12);
+      await pool.query(
+        "UPDATE kwk_accounts SET password_hash = $1, updated_at = NOW() WHERE email = $2",
+        [passwordHash, reset.email]
+      );
+
+      // Token als verwendet markieren
+      await pool.query(
+        "UPDATE kwk_password_resets SET used_at = NOW() WHERE token = $1",
+        [input.token]
+      );
+
+      return { success: true, message: "Passwort erfolgreich zurückgesetzt. Du kannst dich jetzt einloggen." };
+    }),
+
   // ── ADMIN: Feature Flag Status lesen ──────────────────────────────────────────────────────────────────────────────────────
   getFeatureStatus: adminProcedure
     .query(async () => {
