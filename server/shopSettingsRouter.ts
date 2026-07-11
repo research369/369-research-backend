@@ -69,6 +69,92 @@ export const shopSettingsRouter = router({
       return all;
     }),
 
+  // ─── PUBLIC: Get 2-for-3 promo status ─────────────────────────
+  // Returns current state of the 2-buy-3-get promotion
+  getPromo2for3: publicProcedure
+    .query(async () => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      const rows = await db.select().from(shopSettings)
+        .where(eq(shopSettings.key, "promo_2for3_enabled"));
+      const expiresRow = await db.select().from(shopSettings)
+        .where(eq(shopSettings.key, "promo_2for3_expires_at"));
+      const modeRow = await db.select().from(shopSettings)
+        .where(eq(shopSettings.key, "promo_2for3_mode"));
+      const productsRow = await db.select().from(shopSettings)
+        .where(eq(shopSettings.key, "promo_2for3_products"));
+
+      const rawEnabled = rows[0]?.value === "true";
+      const expiresAt = expiresRow[0]?.value || null;
+      const mode = (modeRow[0]?.value as "all" | "include" | "exclude") || "all";
+      const products: string[] = JSON.parse(productsRow[0]?.value || "[]");
+
+      // Auto-expire: if expiresAt is set and in the past, treat as disabled
+      let enabled = rawEnabled;
+      if (enabled && expiresAt) {
+        const expires = new Date(expiresAt);
+        if (!isNaN(expires.getTime()) && expires < new Date()) {
+          enabled = false;
+          // Auto-disable in DB
+          await db.update(shopSettings).set({ value: "false", updatedAt: new Date() })
+            .where(eq(shopSettings.key, "promo_2for3_enabled"));
+        }
+      }
+
+      const remainingSeconds = enabled && expiresAt
+        ? Math.max(0, Math.floor((new Date(expiresAt).getTime() - Date.now()) / 1000))
+        : null;
+
+      return { enabled, expiresAt, remainingSeconds, mode, products };
+    }),
+
+  // ─── ADMIN: Set 2-for-3 promo ────────────────────────────────────
+  // Activate/deactivate the promotion with optional duration and product filter
+  setPromo2for3: adminProcedure
+    .input(z.object({
+      enabled: z.boolean(),
+      durationHours: z.number().optional(),    // if set: expiresAt = now + durationHours
+      expiresAt: z.string().optional(),        // ISO string, alternative to durationHours
+      mode: z.enum(["all", "include", "exclude"]).optional(),
+      products: z.array(z.string()).optional(), // product IDs for include/exclude
+    }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      const upsert = async (key: string, value: string) => {
+        const existing = await db.select().from(shopSettings).where(eq(shopSettings.key, key)).limit(1);
+        if (existing.length > 0) {
+          await db.update(shopSettings).set({ value, updatedAt: new Date() }).where(eq(shopSettings.key, key));
+        } else {
+          await db.insert(shopSettings).values({ key, value });
+        }
+      };
+
+      await upsert("promo_2for3_enabled", input.enabled ? "true" : "false");
+
+      if (input.enabled) {
+        // Calculate expiresAt
+        let expiresAt = "";
+        if (input.expiresAt) {
+          expiresAt = input.expiresAt;
+        } else if (input.durationHours && input.durationHours > 0) {
+          const exp = new Date(Date.now() + input.durationHours * 3600 * 1000);
+          expiresAt = exp.toISOString();
+        }
+        await upsert("promo_2for3_expires_at", expiresAt);
+      } else {
+        await upsert("promo_2for3_expires_at", "");
+      }
+
+      if (input.mode !== undefined) await upsert("promo_2for3_mode", input.mode);
+      if (input.products !== undefined) await upsert("promo_2for3_products", JSON.stringify(input.products));
+
+      console.log(`[ShopSettings] 2for3 Promo ${input.enabled ? "ACTIVATED" : "DEACTIVATED"}`);
+      return { success: true };
+    }),
+
   // ─── ADMIN: Set any setting ───────────────────────────────────
   set: adminProcedure
     .input(z.object({ key: z.string(), value: z.string() }))
