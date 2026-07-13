@@ -726,22 +726,10 @@ export const orderRouter = router({
         console.warn("[Orders] Failed to send confirmation email:", err);
       }
 
-      // Send admin notification email (always, fire-and-forget)
-      try {
-        await sendAdminOrderNotification({
-          orderId: orderId,
-          customer: input.customer,
-          items: input.items.map(i => ({ ...i, dosage: i.dosage || null, variant: i.variant || null })),
-          subtotal: input.subtotal,
-          discount: input.discount,
-          discountCode: input.discountCode,
-          shipping: input.shipping,
-          total: input.total,
-          paymentMethod: input.paymentMethod,
-        });
-      } catch (err) {
-        console.warn("[Orders] Failed to send admin notification email:", err);
-      }
+      // Admin-Benachrichtigung deaktiviert:
+      // Pakko erhält bereits eine BCC-Kopie der Bestellbestätigung (mit IBAN/Zahlungsinfos).
+      // Eine zusätzliche interne Mail wäre redundant und führt zu 4 Mails pro Bestellung.
+      // sendAdminOrderNotification wurde hier entfernt.
 
       return { success: true, orderId: orderId };
     }),

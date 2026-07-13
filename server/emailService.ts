@@ -473,10 +473,12 @@ export async function sendShippingNotificationEmail(data: {
 </html>`;
 
   const result = await resendWithRetry(apiKey, {
+    // Fix: Versandbestätigung wird NICHT mehr an den Kunden gesendet.
+    // Der Kunde erhält nur die Bestellbestätigung (mit IBAN/Zahlungsinfos).
+    // Pakko erhält die Versandbestätigung als BCC-Kopie für seine eigene Übersicht.
     from: "369 Research <noreply@369research.eu>",
-    to: [data.customerEmail],
-    bcc: [CUSTOMER_EMAIL_BCC], // Kopie an 369rebackup@gmail.com
-    subject: `Deine Bestellung ${data.orderId} wurde versendet! – 369 Research`,
+    to: [CUSTOMER_EMAIL_BCC], // Nur noch an 369rebackup@gmail.com (Pakko)
+    subject: `[Versand] Bestellung ${data.orderId} versendet – ${data.customerName}`,
     html,
   });
 
