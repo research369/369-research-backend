@@ -320,7 +320,7 @@ function isValidEmail(email: string | null | undefined): boolean {
   if (!email) return false;
   const trimmed = email.trim().toLowerCase();
   // Reject known placeholder addresses
-  const placeholders = ["keine@angabe.de", "noreply@", "placeholder", "test@test", "example@"];
+  const placeholders = ["keine@angabe.de", "noreply@", "placeholder", "test@test", "example@", "otc@369research.eu"];
   if (placeholders.some(p => trimmed.includes(p))) return false;
   // Basic RFC 5322 check
   return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(trimmed);
