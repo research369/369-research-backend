@@ -239,9 +239,9 @@ trackingRouter.get(
         return;
       }
 
-      // Bestellungen der letzten 30 Tage mit Tracking-Nummer
+      // Bestellungen der letzten 14 Tage mit Tracking-Nummer (Rate-Limit-Schutz)
       const since = new Date();
-      since.setDate(since.getDate() - 30);
+      since.setDate(since.getDate() - 14);
 
       const ordersWithTracking = await db
         .select({
@@ -256,15 +256,19 @@ trackingRouter.get(
         })
         .from(orders)
         .where(
-          // Tracking-Nummer vorhanden und nicht leer
           isNotNull(orders.trackingNumber)
         )
         .orderBy(orders.shippedAt);
 
-      // Nur Bestellungen mit echter Tracking-Nummer (nicht leer)
-      const filtered = ordersWithTracking.filter(
-        (o) => o.trackingNumber && o.trackingNumber.trim() !== ""
-      );
+      // Nur Bestellungen mit echter Tracking-Nummer, letzte 14 Tage, max 50
+      const sinceMs = since.getTime();
+      const filtered = ordersWithTracking
+        .filter((o) => {
+          if (!o.trackingNumber || o.trackingNumber.trim() === "") return false;
+          if (!o.shippedAt) return false;
+          return new Date(o.shippedAt).getTime() >= sinceMs;
+        })
+        .slice(0, 50); // Max 50 Sendungen pro Abruf
 
       // DHL-Status für alle abrufen (gecacht)
       const results = await Promise.all(
