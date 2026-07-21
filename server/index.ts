@@ -13,6 +13,7 @@ import { getPool } from "./db.js";
 import type { Context } from "./trpc.js";
 import { sendcloudExpressRouter } from "./sendcloudExpressRouter.js";
 import { dhlExpressRouter } from "./dhlExpressRouter.js";
+import { trackingRouter } from "./trackingRouter.js";
 
 const app = express();
 
@@ -120,6 +121,9 @@ app.use(sendcloudExpressRouter);
 
 // ─── DHL Express Router (additiv, Phase 1: DE national, Sandbox) ─────────────
 app.use(dhlExpressRouter);
+
+// ─── DHL Tracking Router (additiv, Sendungsverfolgung für WaWi) ─────────────
+app.use(trackingRouter);
 
 
 // Start server
