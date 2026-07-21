@@ -77,10 +77,13 @@ interface DhlShipmentResult {
   error?: string;
 }
 
-// ─── In-Memory-Cache (5 Minuten TTL) ─────────────────────────────────────────
+// ─── In-Memory-Cache ─────────────────────────────────────────────────────────
+// Zugestellte Sendungen: permanent gecacht (kein erneuter API-Call nötig)
+// Aktive Sendungen: 5 Minuten TTL
 
 const cache = new Map<string, { data: DhlShipmentResult; expiresAt: number }>();
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 Minuten
+const CACHE_TTL_ACTIVE_MS = 5 * 60 * 1000;   // 5 Minuten für aktive Sendungen
+const CACHE_TTL_DELIVERED_MS = 24 * 60 * 60 * 1000; // 24 Stunden für zugestellte
 
 function getCached(key: string): DhlShipmentResult | null {
   const entry = cache.get(key);
@@ -93,7 +96,9 @@ function getCached(key: string): DhlShipmentResult | null {
 }
 
 function setCache(key: string, data: DhlShipmentResult): void {
-  cache.set(key, { data, expiresAt: Date.now() + CACHE_TTL_MS });
+  // Zugestellte Sendungen 24h cachen, aktive 5 Minuten
+  const ttl = data.statusCode === "delivered" ? CACHE_TTL_DELIVERED_MS : CACHE_TTL_ACTIVE_MS;
+  cache.set(key, { data, expiresAt: Date.now() + ttl });
 }
 
 // ─── DHL Tracking API Call ────────────────────────────────────────────────────
