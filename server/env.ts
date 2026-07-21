@@ -34,6 +34,8 @@ export const ENV = {
 
   // DHL Geschäftskunden API
   dhlApiKey:           process.env.DHL_API_KEY || "",
+  // DHL Shipment Tracking API (separater Key für Sendungsverfolgung)
+  dhlTrackingApiKey:   process.env.DHL_TRACKING_API_KEY || "",
   dhlBusinessUsername: process.env.DHL_BUSINESS_USERNAME || "",
   dhlBusinessPassword: process.env.DHL_BUSINESS_PASSWORD || "",
   dhlEkp:              process.env.DHL_EKP || "",

@@ -102,17 +102,18 @@ async function fetchDhlTracking(trackingNumber: string): Promise<DhlShipmentResu
   const cached = getCached(trackingNumber);
   if (cached) return cached;
 
-  const apiKey = ENV.dhlApiKey;
+  // Tracking-Key hat Vorrang, Fallback auf allgemeinen DHL-Key
+  const apiKey = ENV.dhlTrackingApiKey || ENV.dhlApiKey;
   if (!apiKey) {
     return {
       trackingNumber,
       statusCode: "unknown",
       statusText: "Unbekannt",
-      description: "DHL API Key nicht konfiguriert",
+      description: "DHL Tracking API Key nicht konfiguriert",
       timestamp: null,
       location: null,
       events: [],
-      error: "DHL_API_KEY nicht gesetzt",
+      error: "DHL_TRACKING_API_KEY nicht gesetzt",
     };
   }
 
