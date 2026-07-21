@@ -214,7 +214,8 @@ async function requireWawiAdmin(req: Request, res: Response, next: () => void): 
     res.status(401).json({ success: false, error: "Nicht angemeldet" });
     return;
   }
-  if (user.role !== "admin") {
+  // Admin oder product_manager dürfen Tracking-Daten abrufen
+  if (user.role !== "admin" && user.role !== "product_manager") {
     res.status(403).json({ success: false, error: "Keine Berechtigung" });
     return;
   }
