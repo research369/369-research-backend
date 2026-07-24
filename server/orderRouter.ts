@@ -571,7 +571,7 @@ export const orderRouter = router({
           // Normalize phone for comparison
           const normalizePhone = (p: string) => p.replace(/[\s\-\.\(\)]/g, '');
           const normPhone = normalizePhone(customerPhone);
-          const PLACEHOLDER_EMAILS_MATCH = new Set(['keine@angabe.de', 'noemail@noemail.de', 'no@email.de', 'otc@369research.eu']);
+          const PLACEHOLDER_EMAILS_MATCH = new Set(['keine@angabe.de', 'noemail@noemail.de', 'no@email.de', 'otc@369research.eu', '']);
           const emailUsableForMatch = customerEmail && !PLACEHOLDER_EMAILS_MATCH.has(customerEmail.toLowerCase());
           // Phone matching: only use if the number is UNIQUE (exactly one customer has it)
           // This prevents false positives when multiple customers share the same phone number
