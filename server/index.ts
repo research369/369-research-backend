@@ -14,6 +14,7 @@ import type { Context } from "./trpc.js";
 import { sendcloudExpressRouter } from "./sendcloudExpressRouter.js";
 import { dhlExpressRouter } from "./dhlExpressRouter.js";
 import { trackingRouter } from "./trackingRouter.js";
+import { checkoutErrorRouter } from "./checkoutErrorRouter.js";
 
 const app = express();
 
@@ -124,6 +125,9 @@ app.use(dhlExpressRouter);
 
 // ─── DHL Tracking Router (additiv, Sendungsverfolgung für WaWi) ─────────────
 app.use(trackingRouter);
+
+// ─── Checkout-Fehler Backup (additiv, sichert verlorene Bestellungen) ───────
+app.use(checkoutErrorRouter);
 
 
 // Start server
