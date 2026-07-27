@@ -792,11 +792,6 @@ export const orderRouter = router({
       // sendAdminOrderNotification wurde hier entfernt.
 
       return { success: true, orderId: orderId };
-    }).catch(async (err: any) => {
-      // Unerwarteter Fehler – Backup speichern
-      // Hinweis: saveFailedOrder ist hier nicht im Scope, daher direkter Resend-Call
-      console.error('[Orders] Unexpected error in createOrder:', err?.message);
-      throw err; // Re-throw damit tRPC den Fehler korrekt behandelt
     }),
 
   // ADMIN: List all orders with items
