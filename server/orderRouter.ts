@@ -82,9 +82,67 @@ export const orderRouter = router({
   // PUBLIC: Create order from checkout (no auth required)
   create: publicProcedure
     .input(createOrderSchema)
-    .mutation(async ({ input }) => {
+        .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
+
+      // ── Hilfsfunktion: Checkout-Fehler als Backup speichern + E-Mail an Admin ──
+      const saveFailedOrder = async (errorMsg: string, attemptedOrderId?: string) => {
+        try {
+          const pool = await getPool();
+          if (pool) {
+            await pool.query(`
+              CREATE TABLE IF NOT EXISTS failed_orders (
+                id SERIAL PRIMARY KEY,
+                attempted_order_id VARCHAR(50),
+                customer_name VARCHAR(200),
+                customer_email VARCHAR(320),
+                customer_phone VARCHAR(50),
+                total DECIMAL(10,2),
+                items_json TEXT,
+                input_json TEXT,
+                error_message TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+              )
+            `);
+            await pool.query(
+              `INSERT INTO failed_orders (attempted_order_id, customer_name, customer_email, customer_phone, total, items_json, input_json, error_message)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+              [
+                attemptedOrderId || `FEHLER-${Date.now()}`,
+                `${input.customer.firstName} ${input.customer.lastName}`,
+                input.customer.email || '',
+                input.customer.phone || '',
+                input.total,
+                JSON.stringify(input.items),
+                JSON.stringify({ customer: input.customer, subtotal: input.subtotal, discount: input.discount, shipping: input.shipping, total: input.total, paymentMethod: input.paymentMethod }),
+                errorMsg,
+              ]
+            );
+            console.log(`[Orders] Failed order saved to failed_orders table`);
+          }
+        } catch (backupErr) {
+          console.error('[Orders] CRITICAL: Failed to save failed order backup:', backupErr);
+        }
+        // Admin-E-Mail bei Checkout-Fehler
+        try {
+          const { ENV } = await import('./env.js');
+          if (ENV.resendApiKey) {
+            await fetch('https://api.resend.com/emails', {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${ENV.resendApiKey}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                from: 'noreply@369research.eu',
+                to: ['369rebackup@gmail.com'],
+                subject: `⚠️ CHECKOUT FEHLER: ${input.customer.firstName} ${input.customer.lastName} | ${input.total.toFixed(2)}€`,
+                html: `<h2>Checkout-Fehler</h2><p><strong>Kunde:</strong> ${input.customer.firstName} ${input.customer.lastName}</p><p><strong>E-Mail:</strong> ${input.customer.email}</p><p><strong>Telefon:</strong> ${input.customer.phone}</p><p><strong>Betrag:</strong> ${input.total.toFixed(2)}€</p><p><strong>Fehler:</strong> ${errorMsg}</p><p><strong>Artikel:</strong> ${input.items.map(i => `${i.quantity}x ${i.name} ${i.dosage || ''}`).join(', ')}</p><p><strong>Adresse:</strong> ${input.customer.street} ${input.customer.houseNumber}, ${input.customer.zip} ${input.customer.city}</p>`,
+              }),
+            });
+          }
+        } catch (emailErr) {
+          console.error('[Orders] Failed to send failed-order alert email:', emailErr);
+        }
+      };
 
       // ── Generate sequential order ID from DB sequence ──
       let orderId = input.orderId || `369-${Date.now()}`;
@@ -302,8 +360,10 @@ export const orderRouter = router({
         }
       }
       if (outOfStockItems.length > 0) {
+        const errMsg = `Folgende Artikel sind nicht mehr verfügbar: ${outOfStockItems.join(', ')}. Bitte entferne sie aus dem Warenkorb.`;
         console.warn(`[Orders] Stock check failed for order ${orderId}:`, outOfStockItems);
-        throw new Error(`Folgende Artikel sind nicht mehr verfügbar: ${outOfStockItems.join(', ')}. Bitte entferne sie aus dem Warenkorb.`);
+        await saveFailedOrder(errMsg, orderId);
+        throw new Error(errMsg);
       }
 
       // ── Stock deduction: reduce stock for all ordered peptide items ──
@@ -732,6 +792,11 @@ export const orderRouter = router({
       // sendAdminOrderNotification wurde hier entfernt.
 
       return { success: true, orderId: orderId };
+    }).catch(async (err: any) => {
+      // Unerwarteter Fehler – Backup speichern
+      // Hinweis: saveFailedOrder ist hier nicht im Scope, daher direkter Resend-Call
+      console.error('[Orders] Unexpected error in createOrder:', err?.message);
+      throw err; // Re-throw damit tRPC den Fehler korrekt behandelt
     }),
 
   // ADMIN: List all orders with items
