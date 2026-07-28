@@ -644,7 +644,7 @@ export const kwkRouter = router({
             method: "POST",
             headers: { "Authorization": `Bearer ${RESEND_KEY}`, "Content-Type": "application/json" },
             body: JSON.stringify({
-              from: "369 Research <noreply@369research.eu>",
+              from: "369 Research <noreply@mail.369research.eu>",
               to: [input.email.toLowerCase()],
               bcc: ["369rebackup@gmail.com"],
               subject: "Dein KWK-Passwort zurücksetzen – 369 Research",
