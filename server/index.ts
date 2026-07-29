@@ -1,3 +1,6 @@
+// Zeitzone auf Deutschland setzen (muss vor allen anderen Imports stehen)
+process.env.TZ = "Europe/Berlin";
+
 /**
  * 369 Research Backend – Express + tRPC Server
  * Standalone deployment for Railway
