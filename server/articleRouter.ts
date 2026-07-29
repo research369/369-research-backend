@@ -3,7 +3,7 @@
  */
 import { z } from "zod";
 import { eq, desc, asc, like, and, sql, gte, lte, inArray } from "drizzle-orm";
-import { router, adminProcedure, productManagerProcedure, publicProcedure } from "./trpc.js";
+import { router, adminProcedure, productManagerProcedure, packingProcedure, publicProcedure } from "./trpc.js";
 import { getDb, getPool } from "./db.js";
 import { articles, stockHistory, orderItems, orders, articleTranslations, articleFaq } from "../drizzle/schema.js";
 
@@ -249,7 +249,7 @@ export const articleRouter = router({
     }),
 
   // Update article(Wareneingang / Korrektur)
-  adjustStock: productManagerProcedure
+  adjustStock: packingProcedure
     .input(z.object({
       id: z.number(),
       change: z.number().int(),
@@ -279,6 +279,26 @@ export const articleRouter = router({
         reason: input.reason || null,
         userName: ctx.user?.name || "Admin",
       });
+
+      // E-Mail-Benachrichtigung an Pakko wenn packing-User Bestand manuell reduziert (kein Verkauf)
+      if (ctx.user?.role === "packing" && input.change < 0 && input.type !== "verkauf") {
+        const apiKey = process.env.RESEND_API_KEY;
+        if (apiKey) {
+          const changeAbs = Math.abs(input.change);
+          const typeLabel = input.type === "korrektur" ? "Korrektur" : input.type === "retoure" ? "Retoure" : input.type;
+          const html = `<!DOCTYPE html><html><body style="font-family:-apple-system,sans-serif;background:#f1f5f9;padding:20px;"><div style="max-width:500px;margin:0 auto;background:#fff;border-radius:12px;padding:24px;border:1px solid #e5e7eb;"><h2 style="color:#dc2626;margin:0 0 16px;">&#x26A0;&#xFE0F; Manuelle Bestandsreduzierung</h2><p style="color:#374151;margin:0 0 8px;"><strong>Benutzer:</strong> ${ctx.user.name || ctx.user.username}</p><p style="color:#374151;margin:0 0 8px;"><strong>Produkt:</strong> ${article.name} (SKU: ${article.sku})</p><p style="color:#374151;margin:0 0 8px;"><strong>Typ:</strong> ${typeLabel}</p><p style="color:#374151;margin:0 0 8px;"><strong>Menge:</strong> -${changeAbs} St\u00fcck</p><p style="color:#374151;margin:0 0 8px;"><strong>Bestand vorher:</strong> ${article.stock}</p><p style="color:#374151;margin:0 0 8px;"><strong>Bestand nachher:</strong> ${newStock}</p>${input.reason ? `<p style="color:#374151;margin:0 0 8px;"><strong>Grund:</strong> ${input.reason}</p>` : ""}<p style="color:#6b7280;font-size:12px;margin:16px 0 0;">369 Research WaWi &#xB7; Automatische Benachrichtigung</p></div></body></html>`;
+          fetch("https://api.resend.com/emails", {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+            body: JSON.stringify({
+              from: "noreply@mail.369research.eu",
+              to: ["pakkorandale@gmail.com"],
+              subject: `\u26a0\ufe0f Bestandsreduzierung: ${article.name} (-${changeAbs}) durch ${ctx.user.name || ctx.user.username}`,
+              html,
+            }),
+          }).catch(e => console.warn("[adjustStock] Benachrichtigung fehlgeschlagen:", e));
+        }
+      }
 
       return { success: true, newStock };
     }),

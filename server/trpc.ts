@@ -55,3 +55,18 @@ const isProductManager = middleware(({ ctx, next }) => {
 });
 
 export const productManagerProcedure = t.procedure.use(isProductManager);
+
+// Packing: role = "admin" OR role = "packing"
+// Zugriff auf: Bestellungen, Labels, Kunden, Artikel (lesen+Bestand), Rechnungen, Eingang
+// KEIN Zugriff auf: Artikel anlegen, Partner anlegen, Benutzer anlegen
+const isPacking = middleware(({ ctx, next }) => {
+  if (!ctx.user) {
+    throw new TRPCError({ code: "UNAUTHORIZED", message: "Bitte anmelden" });
+  }
+  if (ctx.user.role !== "admin" && ctx.user.role !== "packing") {
+    throw new TRPCError({ code: "FORBIDDEN", message: "Keine Berechtigung" });
+  }
+  return next({ ctx: { ...ctx, user: ctx.user } });
+});
+
+export const packingProcedure = t.procedure.use(isPacking);
