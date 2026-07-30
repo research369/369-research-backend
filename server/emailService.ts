@@ -213,7 +213,7 @@ export async function sendOrderConfirmationEmail(data: OrderEmailData): Promise<
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        from: "369 Research <noreply@mail.369research.eu>",
+        from: "369 Research <noreply@369research.eu>",
         to: [data.customer.email],
         bcc: [CUSTOMER_EMAIL_BCC], // Kopie an 369rebackup@gmail.com
         subject: `Bestellbestätigung ${data.orderId} – 369 Research`,
@@ -294,7 +294,7 @@ export async function sendAdminOrderNotification(data: OrderEmailData): Promise<
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        from: "369 Research Shop <noreply@mail.369research.eu>",
+        from: "369 Research Shop <noreply@369research.eu>",
         to: ["369peptides@gmail.com"],
         subject: `🛒 Neue Bestellung ${data.orderId} – ${data.total.toFixed(2)} € (${data.customer.firstName} ${data.customer.lastName})`,
         html,
@@ -409,7 +409,7 @@ export async function sendPackingNotificationEmail(data: {
 </html>`;
 
   const result = await resendWithRetry(apiKey, {
-    from: "369 Research <noreply@mail.369research.eu>",
+    from: "369 Research <noreply@369research.eu>",
     to: [data.customerEmail],
     bcc: [CUSTOMER_EMAIL_BCC], // Kopie an 369rebackup@gmail.com
     subject: `✅ Dein Paket (${data.orderId}) wurde verpackt & wird versandfertig gemacht 📦 – 369 Research`,
@@ -448,9 +448,12 @@ export async function sendShippingNotificationEmail(data: {
   }
 
   const trackingInfo = data.trackingNumber
-    ? `<p style="font-size:16px;margin:12px 0;"><strong>Tracking-Nummer:</strong> ${data.trackingNumber}</p>
-       ${data.trackingCarrier === "DHL" ? `<p style="margin:8px 0;"><a href="https://www.dhl.de/de/privatkunden/pakete-empfangen/verfolgen.html?piececode=${data.trackingNumber}" style="background:#fbbf24;color:#111827;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block;">Sendung verfolgen</a></p>` : ""}`
+    ? `<p style="font-size:15px;margin:16px 0 8px;"><strong>Deine Sendungsverfolgung:</strong></p>
+       <p style="font-size:14px;margin:4px 0;">Sendungsnummer: <strong>${data.trackingNumber}</strong></p>
+       ${data.trackingCarrier === "DHL" ? `<p style="margin:12px 0;"><a href="https://www.dhl.de/de/privatkunden/pakete-empfangen/verfolgen.html?piececode=${data.trackingNumber}" style="background:#0040C1;color:#ffffff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block;">Sendung verfolgen →</a></p>` : ""}`
     : "";
+
+  const firstName = data.customerName.split(' ')[0];
 
   const html = `
 <!DOCTYPE html>
@@ -463,10 +466,10 @@ export async function sendShippingNotificationEmail(data: {
       <p style="color:#94a3b8;margin:8px 0 0;font-size:14px;">Versandbenachrichtigung</p>
     </div>
     <div style="background:#ffffff;padding:24px;border:1px solid #e5e7eb;border-radius:0 0 12px 12px;">
-      <h2 style="font-size:18px;color:#111827;margin:0 0 12px;">Deine Bestellung ${data.orderId} wurde versendet! 📦</h2>
-      <p style="font-size:14px;color:#374151;line-height:1.6;">Hallo ${data.customerName},<br><br>deine Bestellung ist auf dem Weg zu dir!</p>
+      <p style="font-size:15px;color:#374151;line-height:1.8;">Hallo ${firstName},</p>
+      <p style="font-size:15px;color:#374151;line-height:1.8;">dein Paket (${data.orderId}) wurde sorgfältig gepackt und bei DHL für den Versand registriert. Es wird heute im Laufe des Tages bei DHL eingeliefert.</p>
       ${trackingInfo}
-      <p style="font-size:13px;color:#6b7280;margin-top:20px;">Bei Fragen: WhatsApp +4915510063537</p>
+      <p style="font-size:13px;color:#6b7280;margin-top:20px;">Bei Fragen erreichst du uns jederzeit per WhatsApp.</p>
     </div>
     <div style="text-align:center;padding:16px;font-size:12px;color:#9ca3af;">369 Research · Forschungsmaterialien</div>
   </div>
@@ -474,12 +477,10 @@ export async function sendShippingNotificationEmail(data: {
 </html>`;
 
   const result = await resendWithRetry(apiKey, {
-    // Fix: Versandbestätigung wird NICHT mehr an den Kunden gesendet.
-    // Der Kunde erhält nur die Bestellbestätigung (mit IBAN/Zahlungsinfos).
-    // Pakko erhält die Versandbestätigung als BCC-Kopie für seine eigene Übersicht.
-    from: "369 Research <noreply@mail.369research.eu>",
-    to: [CUSTOMER_EMAIL_BCC], // Nur noch an 369rebackup@gmail.com (Pakko)
-    subject: `[Versand] Bestellung ${data.orderId} versendet – ${data.customerName}`,
+    from: "369 Research <noreply@369research.eu>",
+    to: [data.customerEmail],
+    bcc: [CUSTOMER_EMAIL_BCC],
+    subject: `Dein Paket ist unterwegs – ${data.orderId}`,
     html,
   });
 
