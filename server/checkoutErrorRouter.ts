@@ -79,7 +79,7 @@ checkoutErrorRouter.post("/api/checkout-error", async (req: Request, res: Respon
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          from: 'noreply@mail.369research.eu',
+          from: 'noreply@coreversand.de',
           to: ['369rebackup@gmail.com'],
           subject: `⚠️ CHECKOUT FEHLER: ${customer.firstName} ${customer.lastName} | ${total}€`,
           html: `
