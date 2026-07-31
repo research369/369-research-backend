@@ -214,6 +214,7 @@ export async function sendOrderConfirmationEmail(data: OrderEmailData): Promise<
       },
       body: JSON.stringify({
         from: "369 Research <noreply@coreversand.de>",
+    reply_to: "support@369research.eu",
         to: [data.customer.email],
         bcc: [CUSTOMER_EMAIL_BCC], // Kopie an 369rebackup@gmail.com
         subject: `Bestellbestätigung ${data.orderId} – 369 Research`,
@@ -295,6 +296,7 @@ export async function sendAdminOrderNotification(data: OrderEmailData): Promise<
       },
       body: JSON.stringify({
         from: "369 Research Shop <noreply@coreversand.de>",
+    reply_to: "support@369research.eu",
         to: ["369peptides@gmail.com"],
         subject: `🛒 Neue Bestellung ${data.orderId} – ${data.total.toFixed(2)} € (${data.customer.firstName} ${data.customer.lastName})`,
         html,
@@ -410,6 +412,7 @@ export async function sendPackingNotificationEmail(data: {
 
   const result = await resendWithRetry(apiKey, {
     from: "369 Research <noreply@coreversand.de>",
+    reply_to: "support@369research.eu",
     to: [data.customerEmail],
     bcc: [CUSTOMER_EMAIL_BCC], // Kopie an 369rebackup@gmail.com
     subject: `✅ Dein Paket (${data.orderId}) wurde verpackt & wird versandfertig gemacht 📦 – 369 Research`,
@@ -478,6 +481,7 @@ export async function sendShippingNotificationEmail(data: {
 
   const result = await resendWithRetry(apiKey, {
     from: "369 Research <noreply@coreversand.de>",
+    reply_to: "support@369research.eu",
     to: [data.customerEmail],
     bcc: [CUSTOMER_EMAIL_BCC],
     subject: `Dein Paket ist unterwegs – ${data.orderId}`,
