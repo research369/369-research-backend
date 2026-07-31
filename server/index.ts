@@ -15,6 +15,7 @@ import { getUserFromRequest, handleLogin, handleLogout, handleMe, seedAdminUser 
 import { getPool } from "./db.js";
 import type { Context } from "./trpc.js";
 import { sendcloudExpressRouter } from "./sendcloudExpressRouter.js";
+import { startBackupScheduler } from "./backupService.js";
 import { dhlExpressRouter } from "./dhlExpressRouter.js";
 import { trackingRouter } from "./trackingRouter.js";
 import { checkoutErrorRouter } from "./checkoutErrorRouter.js";
@@ -44,6 +45,17 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString(), version: "1.2.0-kwk", fix: "paid-status-filter" });
 });
 
+// Manueller Backup-Trigger (gesichert mit WAWI_INTERNAL_KEY)
+app.post("/api/backup/trigger", async (req: any, res: any) => {
+  const key = req.headers["x-internal-key"] || req.query.key;
+  if (!key || key !== ENV.wawiInternalKey) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  res.json({ status: "started", message: "Backup läuft im Hintergrund – E-Mail kommt an 369rebackup@gmail.com" });
+  // Async im Hintergrund ausführen
+  const { runDatabaseBackup } = await import("./backupService.js");
+  runDatabaseBackup().catch(console.error);
+});
 
 
 // ── Rate Limiting ──────────────────────────────────────────────────
@@ -1061,6 +1073,8 @@ async function start() {
 
   app.listen(port, "0.0.0.0", () => {
     console.log(`[Server] 369 Research Backend running on port ${port}`);
+    // Täglicher Datenbank-Backup um 03:00 Uhr UTC
+    startBackupScheduler();
   });
 }
 
