@@ -287,7 +287,12 @@ export async function createDhlShipmentDE(
           ...(input.consignee.email ? { email: input.consignee.email } : {}),
           ...(input.consignee.phone ? { phone: input.consignee.phone } : {}),
         },
-        // details: weight wird weggelassen – DHL ermittelt Gewicht beim Einliefern
+        details: {
+          weight: {
+            uom:   "g",
+            value: input.weightGrams ?? 1000,
+          },
+        },
       },
     ],
   };
@@ -469,7 +474,12 @@ export async function createDhlShipmentEU(
           ...(c.email ? { email: c.email } : {}),
           ...(c.phone ? { phone: c.phone } : {}),
         },
-        // details: weight wird weggelassen – DHL ermittelt Gewicht beim Einliefern
+        details: {
+          weight: {
+            uom:   "g",
+            value: input.weightGrams ?? 1000,
+          },
+        },
       },
     ],
   };
