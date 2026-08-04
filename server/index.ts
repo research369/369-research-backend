@@ -19,6 +19,7 @@ import { startBackupScheduler } from "./backupService.js";
 import { dhlExpressRouter } from "./dhlExpressRouter.js";
 import { trackingRouter } from "./trackingRouter.js";
 import { checkoutErrorRouter } from "./checkoutErrorRouter.js";
+import { packingPhotoRouter } from "./packingPhotoRouter.js";
 
 const app = express();
 
@@ -143,6 +144,9 @@ app.use(trackingRouter);
 
 // ─── Checkout-Fehler Backup (additiv, sichert verlorene Bestellungen) ───────
 app.use(checkoutErrorRouter);
+
+// ─── Packing-Foto Router (additiv, Pflichtfoto beim Packvorgang) ──────────
+app.use(packingPhotoRouter);
 
 
 // Start server
