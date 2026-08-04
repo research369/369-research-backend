@@ -39,7 +39,7 @@ export const dhlExpressRouter = Router();
 
 // ─── Middleware: JWT-Auth für Label-Erstellung und -Abruf ────────────────────
 
-async function requireWawiAdmin(
+export async function requireWawiAdmin(
   req: Request,
   res: Response,
   next: () => void
