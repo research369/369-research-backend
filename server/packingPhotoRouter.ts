@@ -2,33 +2,22 @@
  * packingPhotoRouter.ts – Pflichtfoto beim Packvorgang
  *
  * Endpunkte:
- *   POST /api/orders/:orderId/packing-photo  – Foto hochladen (Base64 oder Multipart)
- *   GET  /api/orders/:orderId/packing-photo  – Foto abrufen
+ *   POST /api/orders/:orderId/packing-photo  – Foto hochladen (Base64)
+ *   GET  /api/orders/:orderId/packing-photo  – Foto abrufen (als Bild)
+ *   DELETE /api/orders/:orderId/packing-photo – Foto löschen
  *
- * Speicherung:
- *   - Foto wird als Base64 in der DB-Spalte packing_photo_data gespeichert (TEXT)
- *   - Zusätzlich wird packing_photo_url auf /api/orders/:orderId/packing-photo gesetzt
- *   - Fotos sind dauerhaft in Railway PostgreSQL gespeichert – nie verlierbar
- *   - Kein externer Storage nötig – DB ist die einzige Source of Truth
- *
- * Sicherheit:
- *   - Alle Endpunkte erfordern WaWi-Admin-Auth (JWT)
- *   - Fotos sind nur für authentifizierte WaWi-Nutzer abrufbar
- *
- * Additiv: Keine bestehenden Router oder Endpunkte werden verändert.
+ * Speicherung: packing_photo_data (TEXT) in Railway PostgreSQL – dauerhaft.
+ * Auth: requireWawiAdmin (JWT) für alle Endpunkte.
+ * Additiv: keine bestehenden Router oder Endpunkte werden verändert.
  */
 
 import { Router, type Request, type Response } from "express";
 import { requireWawiAdmin } from "./dhlExpressRouter.js";
-import { getDb } from "./db.js";
-import { orders } from "./schema.js";
-import { eq } from "drizzle-orm";
+import { getPool } from "./db.js";
 
 export const packingPhotoRouter = Router();
 
 // ─── POST /api/orders/:orderId/packing-photo ─────────────────────────────────
-// Nimmt ein Foto als Base64-String entgegen und speichert es in der DB.
-// Body: { photoData: "data:image/jpeg;base64,..." }
 packingPhotoRouter.post(
   "/api/orders/:orderId/packing-photo",
   requireWawiAdmin,
@@ -36,38 +25,30 @@ packingPhotoRouter.post(
     const orderId = String(req.params.orderId ?? "").trim();
     const { photoData } = req.body as { photoData?: string };
 
-    if (!orderId) {
-      res.status(400).json({ success: false, error: "orderId fehlt" });
-      return;
-    }
+    if (!orderId) { res.status(400).json({ success: false, error: "orderId fehlt" }); return; }
     if (!photoData || !photoData.startsWith("data:image/")) {
-      res.status(400).json({ success: false, error: "photoData fehlt oder ungültiges Format (erwartet: data:image/...;base64,...)" });
+      res.status(400).json({ success: false, error: "photoData fehlt oder ungültiges Format" });
       return;
     }
-    // Max 10 MB
     if (photoData.length > 14_000_000) {
       res.status(413).json({ success: false, error: "Foto zu groß (max. 10 MB)" });
       return;
     }
 
-    const db = await getDb();
-    if (!db) {
-      res.status(503).json({ success: false, error: "Datenbank nicht verfügbar" });
-      return;
-    }
+    const pool = await getPool();
+    if (!pool) { res.status(503).json({ success: false, error: "Datenbank nicht verfügbar" }); return; }
 
     // Prüfen ob Bestellung existiert
-    const [order] = await db.select({ orderId: orders.orderId }).from(orders).where(eq(orders.orderId, orderId)).limit(1);
-    if (!order) {
+    const check = await pool.query("SELECT order_id FROM orders WHERE order_id = $1", [orderId]);
+    if (check.rowCount === 0) {
       res.status(404).json({ success: false, error: `Bestellung ${orderId} nicht gefunden` });
       return;
     }
 
-    // Foto in DB speichern
     const photoUrl = `/api/orders/${orderId}/packing-photo`;
     const photoTimestamp = new Date().toISOString();
 
-    await (db as any).execute(
+    await pool.query(
       `UPDATE orders SET 
         packing_photo_data = $1,
         packing_photo_url = $2,
@@ -77,50 +58,34 @@ packingPhotoRouter.post(
       [photoData, photoUrl, photoTimestamp, orderId]
     );
 
-    console.log(`[packingPhoto] Foto gespeichert für ${orderId} | Größe: ${Math.round(photoData.length / 1024)} KB`);
-
-    res.json({
-      success: true,
-      orderId,
-      photoUrl,
-      photoAt: photoTimestamp,
-    });
+    console.log(`[packingPhoto] Foto gespeichert für ${orderId} | ${Math.round(photoData.length / 1024)} KB`);
+    res.json({ success: true, orderId, photoUrl, photoAt: photoTimestamp });
   }
 );
 
 // ─── GET /api/orders/:orderId/packing-photo ──────────────────────────────────
-// Gibt das gespeicherte Foto zurück (als JSON mit Base64 oder direkt als Bild).
 packingPhotoRouter.get(
   "/api/orders/:orderId/packing-photo",
   requireWawiAdmin,
   async (req: Request, res: Response) => {
     const orderId = String(req.params.orderId ?? "").trim();
+    if (!orderId) { res.status(400).json({ success: false, error: "orderId fehlt" }); return; }
 
-    if (!orderId) {
-      res.status(400).json({ success: false, error: "orderId fehlt" });
-      return;
-    }
+    const pool = await getPool();
+    if (!pool) { res.status(503).json({ success: false, error: "Datenbank nicht verfügbar" }); return; }
 
-    const db = await getDb();
-    if (!db) {
-      res.status(503).json({ success: false, error: "Datenbank nicht verfügbar" });
-      return;
-    }
-
-    const result = await (db as any).execute(
-      `SELECT packing_photo_data, packing_photo_at FROM orders WHERE order_id = $1`,
+    const result = await pool.query(
+      "SELECT packing_photo_data, packing_photo_at FROM orders WHERE order_id = $1",
       [orderId]
     );
 
-    const row = result?.rows?.[0];
+    const row = result.rows[0];
     if (!row || !row.packing_photo_data) {
       res.status(404).json({ success: false, error: "Kein Foto für diese Bestellung vorhanden" });
       return;
     }
 
     const photoData: string = row.packing_photo_data;
-
-    // Als Bild direkt ausliefern
     const mimeMatch = photoData.match(/^data:([^;]+);base64,/);
     if (mimeMatch) {
       const mimeType = mimeMatch[1];
@@ -137,17 +102,15 @@ packingPhotoRouter.get(
 );
 
 // ─── DELETE /api/orders/:orderId/packing-photo ───────────────────────────────
-// Löscht das Foto (nur für Admins, z.B. bei Fehler).
 packingPhotoRouter.delete(
   "/api/orders/:orderId/packing-photo",
   requireWawiAdmin,
   async (req: Request, res: Response) => {
     const orderId = String(req.params.orderId ?? "").trim();
-    const db = await getDb();
-    if (!db) { res.status(503).json({ success: false, error: "DB nicht verfügbar" }); return; }
-
-    await (db as any).execute(
-      `UPDATE orders SET packing_photo_data = NULL, packing_photo_url = NULL, packing_photo_at = NULL WHERE order_id = $1`,
+    const pool = await getPool();
+    if (!pool) { res.status(503).json({ success: false, error: "DB nicht verfügbar" }); return; }
+    await pool.query(
+      "UPDATE orders SET packing_photo_data = NULL, packing_photo_url = NULL, packing_photo_at = NULL WHERE order_id = $1",
       [orderId]
     );
     res.json({ success: true });
