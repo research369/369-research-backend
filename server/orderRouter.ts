@@ -35,7 +35,7 @@ const createOrderSchema = z.object({
   customer: z.object({
     firstName: z.string(),
     lastName: z.string(),
-    email: z.string().email().optional().or(z.literal('')),
+    email: z.string().email(),
     phone: z.string(),
     street: z.string(),
     houseNumber: z.string(),
@@ -132,7 +132,7 @@ export const orderRouter = router({
               method: 'POST',
               headers: { 'Authorization': `Bearer ${ENV.resendApiKey}`, 'Content-Type': 'application/json' },
               body: JSON.stringify({
-                from: 'noreply@coreversand.de',
+                from: 'noreply@mail.369research.eu',
                 to: ['369rebackup@gmail.com'],
                 subject: `⚠️ CHECKOUT FEHLER: ${input.customer.firstName} ${input.customer.lastName} | ${input.total.toFixed(2)}€`,
                 html: `<h2>Checkout-Fehler</h2><p><strong>Kunde:</strong> ${input.customer.firstName} ${input.customer.lastName}</p><p><strong>E-Mail:</strong> ${input.customer.email}</p><p><strong>Telefon:</strong> ${input.customer.phone}</p><p><strong>Betrag:</strong> ${input.total.toFixed(2)}€</p><p><strong>Fehler:</strong> ${errorMsg}</p><p><strong>Artikel:</strong> ${input.items.map(i => `${i.quantity}x ${i.name} ${i.dosage || ''}`).join(', ')}</p><p><strong>Adresse:</strong> ${input.customer.street} ${input.customer.houseNumber}, ${input.customer.zip} ${input.customer.city}</p>`,
@@ -302,14 +302,30 @@ export const orderRouter = router({
       const substitutionActive = await isSubstitutionEnabled();
 
       // Helper: find articles matching a shop item by shopProductId + dosage
+      // Fallback: wenn keine shopProductId, suche nach Name + Dosage (für manuelle WaWi-Bestellungen)
       const findMatchingArticles = (item: { name: string; dosage?: string; shopProductId?: string }, allArts: typeof allArticlesForCheck) => {
         const dosageNorm = (item.dosage || '').toLowerCase().trim();
         const itemShopId = (item.shopProductId || '').toLowerCase().trim();
+        
+        // Primary: shopProductId + dosage match (Online-Checkout)
+        if (itemShopId) {
+          return allArts.filter(a => {
+            if (!a.shopProductId) return false;
+            if (a.shopProductId.toLowerCase() !== itemShopId) return false;
+            if (!dosageNorm) return true; // keine Dosage – alle Varianten
+            const parenMatch = a.name.match(/\(([^)]+)\)\s*$/);
+            const noParenMatch = a.name.match(/\b(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu))\s*$/i);
+            const articleDosage = parenMatch ? parenMatch[1].trim().toLowerCase() : noParenMatch ? noParenMatch[1].trim().toLowerCase() : '';
+            return articleDosage === dosageNorm;
+          });
+        }
+        
+        // Fallback: Name + Dosage match (manuelle WaWi-Bestellungen ohne shopProductId)
+        const itemNameNorm = item.name.replace(/\s*\[.*?\]\s*/g, '').trim().toLowerCase();
         return allArts.filter(a => {
-          if (!a.shopProductId) return false;
-          // Primary match: shopProductId must match exactly (if provided)
-          if (itemShopId && a.shopProductId.toLowerCase() !== itemShopId) return false;
-          // Secondary match: dosage must match
+          const artNameBase = a.name.replace(/\s*\(.*?\)\s*$/, '').trim().toLowerCase();
+          if (!artNameBase.includes(itemNameNorm) && !itemNameNorm.includes(artNameBase)) return false;
+          if (!dosageNorm) return true;
           const parenMatch = a.name.match(/\(([^)]+)\)\s*$/);
           const noParenMatch = a.name.match(/\b(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu))\s*$/i);
           const articleDosage = parenMatch ? parenMatch[1].trim().toLowerCase() : noParenMatch ? noParenMatch[1].trim().toLowerCase() : '';
@@ -328,11 +344,13 @@ export const orderRouter = router({
           const totalStock = matchingArticles.reduce((sum, a) => sum + (a.stock ?? 0), 0);
           if (totalStock < item.quantity) {
             // Variante nicht auf Lager – Smart Substitution versuchen?
-            if (substitutionActive && item.shopProductId && isSubstitutionEligible(matchingArticles[0]?.category)) {
+            // Smart Sub greift auch ohne shopProductId (manuelle Bestellungen) – dann shopProductId aus matchingArticle nehmen
+            const effectiveShopProductId = item.shopProductId || matchingArticles[0]?.shopProductId;
+            if (substitutionActive && effectiveShopProductId && isSubstitutionEligible(matchingArticles[0]?.category)) {
               const dosageMg = extractDosageMg(item.dosage || item.name);
               if (dosageMg !== null) {
                 const sub = resolveSubstitution(
-                  item.shopProductId,
+                  effectiveShopProductId,
                   dosageMg,
                   item.quantity,
                   allArticlesForCheck.map(a => ({
