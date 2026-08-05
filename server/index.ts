@@ -145,6 +145,23 @@ app.use(trackingRouter);
 // ─── Checkout-Fehler Backup (additiv, sichert verlorene Bestellungen) ───────
 app.use(checkoutErrorRouter);
 
+
+// ─── TEST: Versandmail senden (nur für interne Tests) ────────────────────────
+app.post("/api/test-send-email", async (req: any, res: any) => {
+  const { to, subject, html } = req.body || {};
+  if (!to || !html) { res.status(400).json({ error: "to und html erforderlich" }); return; }
+  const { ENV } = await import("./env.js");
+  const apiKey = ENV.resendApiKey;
+  if (!apiKey) { res.status(500).json({ error: "RESEND_API_KEY nicht konfiguriert" }); return; }
+  const resp = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ from: "noreply@coreversand.de", reply_to: "support@369research.eu", to: [to], subject: subject || "Test", html })
+  });
+  const result = await resp.json();
+  res.json({ status: resp.status, result });
+});
+
 // ─── Packing-Foto Router (additiv, Pflichtfoto beim Packvorgang) ──────────
 app.use(packingPhotoRouter);
 
