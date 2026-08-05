@@ -12,15 +12,27 @@
  */
 
 import { Router, type Request, type Response } from "express";
-import { requireWawiAdmin } from "./dhlExpressRouter.js";
 import { getPool } from "./db.js";
+import { getUserFromRequest } from "./auth.js";
+import { ENV } from "./env.js";
+
+// Flexible Auth: JWT Cookie, Bearer Token oder x-wawi-key
+async function requirePackingAuth(req: any, res: any, next: () => void): Promise<void> {
+  // 1. x-wawi-key (interner WaWi-Key)
+  const wawiKey = req.headers["x-wawi-key"];
+  if (wawiKey && wawiKey === ENV.wawiInternalKey) { next(); return; }
+  // 2. JWT Cookie oder Bearer Token
+  const user = await getUserFromRequest(req);
+  if (user) { next(); return; }
+  res.status(401).json({ success: false, error: "Nicht angemeldet" });
+}
 
 export const packingPhotoRouter = Router();
 
 // ─── POST /api/orders/:orderId/packing-photo ─────────────────────────────────
 packingPhotoRouter.post(
   "/api/orders/:orderId/packing-photo",
-  requireWawiAdmin,
+  requirePackingAuth,
   async (req: Request, res: Response) => {
     const orderId = String(req.params.orderId ?? "").trim();
     const { photoData } = req.body as { photoData?: string };
@@ -66,7 +78,7 @@ packingPhotoRouter.post(
 // ─── GET /api/orders/:orderId/packing-photo ──────────────────────────────────
 packingPhotoRouter.get(
   "/api/orders/:orderId/packing-photo",
-  requireWawiAdmin,
+  requirePackingAuth,
   async (req: Request, res: Response) => {
     const orderId = String(req.params.orderId ?? "").trim();
     if (!orderId) { res.status(400).json({ success: false, error: "orderId fehlt" }); return; }
@@ -104,7 +116,7 @@ packingPhotoRouter.get(
 // ─── DELETE /api/orders/:orderId/packing-photo ───────────────────────────────
 packingPhotoRouter.delete(
   "/api/orders/:orderId/packing-photo",
-  requireWawiAdmin,
+  requirePackingAuth,
   async (req: Request, res: Response) => {
     const orderId = String(req.params.orderId ?? "").trim();
     const pool = await getPool();
