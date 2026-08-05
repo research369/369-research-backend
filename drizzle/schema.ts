@@ -3,7 +3,7 @@ import { integer, pgTable, text, timestamp, varchar, decimal, pgEnum, serial, js
 /**
  * Enums
  */
-export const userRoleEnum = pgEnum("user_role", ["user", "admin", "product_manager", "packing"]);
+export const userRoleEnum = pgEnum("user_role", ["user", "admin"]);
 export const stockChangeTypeEnum = pgEnum("stock_change_type", ["wareneingang", "verkauf", "korrektur", "retoure", "bestellung"]);
 export const paymentMethodEnum = pgEnum("payment_method", ["bunq", "creditCard", "wise", "SEPA", "Bar", "Kreditkarte", "PayPal", "Crypto", "Guthaben", "Sonstige"]);
 export const orderStatusEnum = pgEnum("order_status", ["offen", "bezahlt", "gepackt", "versendet", "zugestellt", "storniert"]);
@@ -279,6 +279,10 @@ export const orders = pgTable("orders", {
   // Shipping label: URL = interne Download-Route, Content = Base64-PDF persistent in DB
   shippingLabelUrl: text("shipping_label_url"),
   shippingLabelContent: text("shipping_label_content"),
+
+  // Pack-Foto: Pflichtfoto beim Packvorgang, dauerhaft in DB gespeichert
+  packingPhotoUrl: text("packing_photo_url"),
+  packingPhotoAt: timestamp("packing_photo_at"),
   // Versandgewicht in Gramm (für DHL-Label, optional – Default 500g wenn leer)
   weightGrams: integer("weight_grams"),
 
