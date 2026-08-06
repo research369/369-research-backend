@@ -65,7 +65,7 @@ const createOrderSchema = z.object({
   creditUsed: z.number().optional(),
   // KWK-Felder (additiv, optional – bestehende Logik unberührt)
   kwkCode: z.string().nullable().optional(),       // KWK-Nummer des Empfehlungsgebers
-  kwkDiscount: z.number().optional(),              // 6% Rabatt auf Produkte
+  kwkDiscount: z.number().optional(),              // 10% Rabatt auf Produkte
   kwkCreditUsed: z.number().optional(),            // Eingelöstes KWK-Guthaben
   kwkCreditKwkId: z.number().optional(),           // KWK-Account-ID für Guthaben-Einlösung
 });
