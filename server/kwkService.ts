@@ -338,7 +338,7 @@ export async function partialRefundCredit(
     const originalAmountNum = parseFloat(originalAmount);
 
     // Anteilige Korrektur berechnen
-    const correctionAmount = Math.min(refundAmount * 0.06, originalAmountNum);
+    const correctionAmount = Math.min(refundAmount * 0.10, originalAmountNum);
 
     if (correctionAmount > 0) {
       await client.query(
@@ -543,8 +543,8 @@ export async function resetLoginAttempts(kwkId: number): Promise<void> {
 
 // ── KWK-Discount-Berechnung ───────────────────────────────────────────────
 
-export const KWK_DISCOUNT_PERCENT = 6;   // 6% Rabatt für geworbene Kunden
-export const KWK_COMMISSION_PERCENT = 6; // 6% Guthaben für werbende KWK-Teilnehmer
+export const KWK_DISCOUNT_PERCENT = 10;  // 10% Rabatt für geworbene Kunden
+export const KWK_COMMISSION_PERCENT = 10; // 10% Guthaben für werbende KWK-Teilnehmer
 
 /**
  * Berechnet den KWK-Rabatt auf den Produktwarenwert (ohne Versand).
