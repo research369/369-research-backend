@@ -35,7 +35,7 @@ const createOrderSchema = z.object({
   customer: z.object({
     firstName: z.string(),
     lastName: z.string(),
-    email: z.string().email(),
+    email: z.string().email().optional().nullable().or(z.literal("")).or(z.null()),
     phone: z.string(),
     street: z.string(),
     houseNumber: z.string(),
