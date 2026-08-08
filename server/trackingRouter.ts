@@ -265,7 +265,8 @@ trackingRouter.get(
         )
         .orderBy(orders.shippedAt);
 
-      // Nur Bestellungen mit echter Tracking-Nummer, letzte 14 Tage, max 50
+      // Nur Bestellungen mit echter Tracking-Nummer, letzte 14 Tage, max 100
+      // WICHTIG: Erst filtern, dann neueste zuerst sortieren, dann slice – sonst fallen neuere Sendungen raus
       const sinceMs = since.getTime();
       const filtered = ordersWithTracking
         .filter((o) => {
@@ -273,7 +274,13 @@ trackingRouter.get(
           if (!o.shippedAt) return false;
           return new Date(o.shippedAt).getTime() >= sinceMs;
         })
-        .slice(0, 50); // Max 50 Sendungen pro Abruf
+        .sort((a, b) => {
+          // Neueste zuerst sortieren VOR dem slice
+          const dateA = a.shippedAt ? new Date(a.shippedAt).getTime() : 0;
+          const dateB = b.shippedAt ? new Date(b.shippedAt).getTime() : 0;
+          return dateB - dateA;
+        })
+        .slice(0, 100); // Max 100 Sendungen (neueste zuerst)
 
       // DHL-Status für alle abrufen (gecacht)
       const results = await Promise.all(
