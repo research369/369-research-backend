@@ -754,51 +754,22 @@ export const orderRouter = router({
       const itemList = input.items.map(i => `${i.quantity}x ${_logSku(i.name, i.dosage || i.variant)}`).join(", ");
       console.log(`[Orders] New order: ${orderId} – ${input.total.toFixed(2)} EUR – ${input.customer.firstName} ${input.customer.lastName} – ${itemList}`);
 
-      // Send order confirmation email to customer (idempotent: only once per orderId)
+      // The shared CRM service sends, archives and protects the confirmation with
+      // a Resend idempotency key. Do not add a second order-router log entry here.
       try {
-        // Check if email was already sent for this order
-        // Only check for type='email' entries to avoid false positives from other log types
-        const existingEmailLog = await db.select().from(customerCommunications)
-          .where(
-            and(
-              eq(customerCommunications.orderId, orderId),
-              eq(customerCommunications.type, "email")
-            )
-          )
-          .limit(1);
-        const alreadySent = existingEmailLog.length > 0;
-        if (alreadySent) {
-          console.warn(`[Orders] Confirmation email already sent for order ${orderId} – skipping duplicate`);
-        } else {
-          const emailSent = await sendOrderConfirmationEmail({
-            orderId: orderId,
-            customer: input.customer,
-            items: input.items.map(i => ({ ...i, dosage: i.dosage || null, variant: i.variant || null })),
-            subtotal: input.subtotal,
-            discount: input.discount,
-            discountCode: input.discountCode,
-            shipping: input.shipping,
-            total: input.total,
-            paymentMethod: input.paymentMethod,
-          });
-          // Log AFTER successful send to prevent false-positive idempotency checks
-          if (emailSent) {
-            try {
-              await db.insert(customerCommunications).values({
-                customerId: customerId || null as any,
-                type: "email",
-                status: "sent",
-                subject: `Bestellbestätigung ${orderId}`,
-                body: `Automatische Bestellbestätigung für Bestellung ${orderId} (${input.total.toFixed(2)} EUR)`,
-                recipientEmail: input.customer.email,
-                senderName: "369 Research",
-                orderId: orderId,
-                createdBy: "system",
-              });
-            } catch (_) { /* ignore log errors */ }
-          } else {
-            console.warn(`[Orders] Email send failed for order ${orderId} – will retry on next request`);
-          }
+        const emailSent = await sendOrderConfirmationEmail({
+          orderId: orderId,
+          customer: input.customer,
+          items: input.items.map(i => ({ ...i, dosage: i.dosage || null, variant: i.variant || null })),
+          subtotal: input.subtotal,
+          discount: input.discount,
+          discountCode: input.discountCode,
+          shipping: input.shipping,
+          total: input.total,
+          paymentMethod: input.paymentMethod,
+        });
+        if (!emailSent) {
+          console.warn(`[Orders] Confirmation email was not accepted for ${orderId}; failure is stored in the CRM communication record`);
         }
       } catch (err) {
         console.warn("[Orders] Failed to send confirmation email:", err);
@@ -1380,24 +1351,8 @@ export const orderRouter = router({
         });
         results.push({ channel: "email", success: emailResult.sent, error: emailResult.error });
 
-        // Kommunikation protokollieren
-        if (order.customerId) {
-          try {
-            await db.insert(customerCommunications).values({
-              customerId: order.customerId,
-              type: "email",
-              status: emailResult.sent ? "sent" : "failed",
-              subject: `Paket wird gepackt – Bestellung ${order.orderId}`,
-              body: `Packing-Benachrichtigung per E-Mail an ${order.email}`,
-              recipientEmail: order.email,
-              senderName: "369 Research",
-              orderId: order.orderId,
-              createdBy: "system",
-            });
-          } catch (logErr) {
-            console.warn("[Orders] Could not log packing email communication:", logErr);
-          }
-        }
+        // The shared CRM service already stores the complete message, its sender
+        // identity and the Resend status. Do not create a second summary record here.
       } else if (input.sendEmail && !order.email) {
         results.push({ channel: "email", success: false, error: "Keine E-Mail-Adresse hinterlegt" });
       }

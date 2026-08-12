@@ -13,6 +13,8 @@ export const ENV = {
 
   // Resend (E-Mail)
   resendApiKey: process.env.RESEND_API_KEY || "",
+  // Signatur-Secret für eingehende Resend-Statuswebhooks (nie im Frontend verwenden)
+  resendWebhookSecret: process.env.RESEND_WEBHOOK_SECRET || "",
 
   // Forge LLM API (for KI-Bestellerfassung)
   forgeApiKey: process.env.FORGE_API_KEY || "",

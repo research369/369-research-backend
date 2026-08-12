@@ -176,6 +176,16 @@ export const customerCommunications = pgTable("customer_communications", {
   // For emails
   recipientEmail: varchar("recipient_email", { length: 320 }),
   senderName: varchar("sender_name", { length: 200 }),
+  senderEmail: varchar("sender_email", { length: 320 }),
+  replyTo: varchar("reply_to", { length: 320 }),
+  resendEmailId: varchar("resend_email_id", { length: 100 }),
+  resendMessageId: varchar("resend_message_id", { length: 500 }),
+  deliveryStatus: varchar("delivery_status", { length: 32 }),
+  deliveryStatusAt: timestamp("delivery_status_at"),
+  errorMessage: text("error_message"),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }),
+  direction: varchar("direction", { length: 16 }).default("outbound").notNull(),
+  source: varchar("source", { length: 32 }).default("manual").notNull(),
 
   // Reference
   orderId: varchar("order_id", { length: 32 }),
@@ -187,6 +197,24 @@ export const customerCommunications = pgTable("customer_communications", {
 
 export type CustomerCommunication = typeof customerCommunications.$inferSelect;
 export type InsertCustomerCommunication = typeof customerCommunications.$inferInsert;
+
+/**
+ * Immutable provider event journal for customer communications.
+ * Stores verified Resend webhook events and deduplicates retries by event ID.
+ */
+export const communicationEvents = pgTable("communication_events", {
+  id: serial("id").primaryKey(),
+  communicationId: integer("communication_id").notNull(),
+  provider: varchar("provider", { length: 50 }).notNull().default("resend"),
+  providerEventId: varchar("provider_event_id", { length: 150 }).notNull().unique(),
+  eventType: varchar("event_type", { length: 80 }).notNull(),
+  occurredAt: timestamp("occurred_at").notNull(),
+  payload: text("payload"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export type CommunicationEvent = typeof communicationEvents.$inferSelect;
+export type InsertCommunicationEvent = typeof communicationEvents.$inferInsert;
 
 /**
  * Email Templates – reusable HTML email templates

@@ -39,6 +39,11 @@ app.use(cors({
   allowedHeaders: ["Content-Type", "Authorization"],
 }));
 
+// Resend signs the original raw request body. The webhook must therefore be mounted
+// before the global JSON parser, otherwise its signature could not be verified safely.
+app.use("/api/webhooks/resend", express.raw({ type: "application/json", limit: "1mb" }));
+app.use(resendWebhookRouter);
+
 app.use(express.json({ limit: "50mb" }));
 
 // Health check
@@ -175,6 +180,13 @@ async function start() {
   console.log(`[Server] Database: ${ENV.databaseUrl ? "configured" : "NOT configured"}`);
   console.log(`[Server] Bunq API: ${ENV.bunqApiKey ? "configured" : "NOT configured"}`);
   console.log(`[Server] Resend API: ${ENV.resendApiKey ? "configured" : "NOT configured"}`);
+
+  // Additive CRM migration: communication archive + immutable provider event journal
+  try {
+    await ensureCrmCommunicationSchema();
+  } catch (err) {
+    console.warn("[Server] CRM communication schema migration failed:", err);
+  }
 
   // Seed admin user on first start
   try {

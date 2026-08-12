@@ -4,6 +4,7 @@
  */
 
 import { generateSKUFromName } from "./articleCodes.js";
+import { sendAndArchiveAutomaticOrderEmail } from "./crmCommunicationService.js";
 
 const RESEND_API_URL = "https://api.resend.com/emails";
 
@@ -197,40 +198,21 @@ function buildOrderConfirmationHtml(data: OrderEmailData): string {
 }
 
 export async function sendOrderConfirmationEmail(data: OrderEmailData): Promise<boolean> {
-  const apiKey = process.env.RESEND_API_KEY;
-  if (!apiKey) {
-    console.warn("[Email] RESEND_API_KEY not configured, skipping email");
-    return false;
-  }
-
   const html = buildOrderConfirmationHtml(data);
-
   try {
-    const response = await fetch(RESEND_API_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        from: "369 Research <noreply@coreversand.de>",
-    reply_to: "support@369research.eu",
-        to: [data.customer.email],
-        bcc: [CUSTOMER_EMAIL_BCC], // Kopie an 369rebackup@gmail.com
-        subject: `Bestellbestätigung ${data.orderId} – 369 Research`,
-        html,
-      }),
+    const result = await sendAndArchiveAutomaticOrderEmail({
+      orderId: data.orderId,
+      recipientEmail: data.customer.email,
+      subject: `Bestellbestätigung ${data.orderId} – 369 Research`,
+      htmlBody: html,
+      bcc: [CUSTOMER_EMAIL_BCC],
+      // Checkout-Wiederholungen dürfen keine zweite Bestellbestätigung erzeugen.
+      idempotencyKey: `order-confirmation-${data.orderId}`,
     });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.warn(`[Email] Failed to send (${response.status}):`, errorText);
-      return false;
+    if (!result.sent) {
+      console.warn(`[Email] Order confirmation failed for ${data.orderId}:`, result.error);
     }
-
-    const result = await response.json();
-    console.log(`[Email] Order confirmation sent to ${data.customer.email}, id: ${result.id}`);
-    return true;
+    return result.sent;
   } catch (error) {
     console.warn("[Email] Error sending order confirmation:", error);
     return false;
@@ -410,20 +392,22 @@ export async function sendPackingNotificationEmail(data: {
 </body>
 </html>`;
 
-  const result = await resendWithRetry(apiKey, {
-    from: "369 Research <noreply@coreversand.de>",
-    reply_to: "support@369research.eu",
-    to: [data.customerEmail],
-    bcc: [CUSTOMER_EMAIL_BCC], // Kopie an 369rebackup@gmail.com
-    subject: `✅ Dein Paket (${data.orderId}) wurde verpackt & wird versandfertig gemacht 📦 – 369 Research`,
-    html,
-  });
-
-  if (result.ok) {
-    console.log(`[Email] Packing notification sent to ${data.customerEmail} for order ${data.orderId}`);
-    return { sent: true };
-  } else {
-    const msg = result.error || "Unbekannter Fehler beim E-Mail-Versand";
+  try {
+    const result = await sendAndArchiveAutomaticOrderEmail({
+      orderId: data.orderId,
+      recipientEmail: data.customerEmail,
+      subject: `✅ Dein Paket (${data.orderId}) wurde verpackt & wird versandfertig gemacht 📦 – 369 Research`,
+      htmlBody: html,
+      bcc: [CUSTOMER_EMAIL_BCC],
+      idempotencyKey: `packing-notification-${data.orderId}`,
+    });
+    if (result.sent) {
+      console.log(`[Email] Packing notification sent to ${data.customerEmail} for order ${data.orderId}`);
+      return { sent: true };
+    }
+    return { sent: false, error: result.error || "Unbekannter Fehler beim E-Mail-Versand" };
+  } catch (error: any) {
+    const msg = error?.message || "Unbekannter Fehler beim E-Mail-Versand";
     console.warn(`[Email] Packing notification failed for order ${data.orderId}: ${msg}`);
     return { sent: false, error: msg };
   }
@@ -479,20 +463,22 @@ export async function sendShippingNotificationEmail(data: {
 </body>
 </html>`;
 
-  const result = await resendWithRetry(apiKey, {
-    from: "369 Research <noreply@coreversand.de>",
-    reply_to: "support@369research.eu",
-    to: [data.customerEmail],
-    bcc: [CUSTOMER_EMAIL_BCC],
-    subject: `Dein Paket ist unterwegs – ${data.orderId}`,
-    html,
-  });
-
-  if (result.ok) {
-    console.log(`[Email] Shipping notification sent to ${data.customerEmail} for order ${data.orderId}`);
-    return { sent: true };
-  } else {
-    const msg = result.error || "Unbekannter Fehler beim E-Mail-Versand";
+  try {
+    const result = await sendAndArchiveAutomaticOrderEmail({
+      orderId: data.orderId,
+      recipientEmail: data.customerEmail,
+      subject: `Dein Paket ist unterwegs – ${data.orderId}`,
+      htmlBody: html,
+      bcc: [CUSTOMER_EMAIL_BCC],
+      idempotencyKey: `shipping-notification-${data.orderId}-${data.trackingNumber || "no-tracking"}`,
+    });
+    if (result.sent) {
+      console.log(`[Email] Shipping notification sent to ${data.customerEmail} for order ${data.orderId}`);
+      return { sent: true };
+    }
+    return { sent: false, error: result.error || "Unbekannter Fehler beim E-Mail-Versand" };
+  } catch (error: any) {
+    const msg = error?.message || "Unbekannter Fehler beim E-Mail-Versand";
     console.warn(`[Email] Shipping notification failed for order ${data.orderId}: ${msg}`);
     return { sent: false, error: msg };
   }
