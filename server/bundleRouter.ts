@@ -104,10 +104,13 @@ export const bundleRouter = router({
             const art = articleMap.get(item.articleSku) ?? null;
             // Enrich variants with inStock flag
             const enrichedVariants = art?.variants
-              ? (art.variants as Array<{ label: string; price: number; dosage?: string }>).map(v => {
-                  const variantSku = getVariantSku(item.articleSku, v.label);
-                  const variantStock = globalStockMap.get(variantSku);
-                  // If variant SKU not found, fall back to main article stock
+              ? (art.variants as Array<{ label?: string; name?: string; price: number; dosage?: string }>).map(v => {
+                  // Existing product data contains both label- and name-based variants.
+                  // A malformed variant must never make the complete bundle catalog unavailable.
+                  const variantLabel = v.label || v.dosage || v.name || "";
+                  const variantSku = variantLabel ? getVariantSku(item.articleSku, variantLabel) : null;
+                  const variantStock = variantSku ? globalStockMap.get(variantSku) : undefined;
+                  // If no variant SKU is available, safely fall back to main article stock.
                   const inStock = variantStock !== undefined ? variantStock > 0 : (art.stock ?? 0) > 0;
                   return { ...v, inStock, variantSku };
                 })
