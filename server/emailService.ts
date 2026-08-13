@@ -20,7 +20,7 @@ interface OrderEmailData {
   customer: {
     firstName: string;
     lastName: string;
-    email: string;
+    email?: string | null;
     phone: string;
     street: string;
     houseNumber: string;
@@ -198,11 +198,17 @@ function buildOrderConfirmationHtml(data: OrderEmailData): string {
 }
 
 export async function sendOrderConfirmationEmail(data: OrderEmailData): Promise<boolean> {
+  const recipientEmail = data.customer.email?.trim() || "";
+  if (!isValidEmail(recipientEmail)) {
+    console.warn(`[Email] Bestellbestätigung übersprungen: keine gültige E-Mail für ${data.orderId}`);
+    return false;
+  }
+
   const html = buildOrderConfirmationHtml(data);
   try {
     const result = await sendAndArchiveAutomaticOrderEmail({
       orderId: data.orderId,
-      recipientEmail: data.customer.email,
+      recipientEmail,
       subject: `Bestellbestätigung ${data.orderId} – 369 Research`,
       htmlBody: html,
       bcc: [CUSTOMER_EMAIL_BCC],

@@ -183,20 +183,24 @@ export const orderRouter = router({
 
         // ── EINMALIG CHECK: Only book for first order from this customer email ──
         if (partner.commissionType === "einmalig" && reason !== "Eigenbestellung") {
-          const customerEmail = input.customer.email.toLowerCase().trim();
-          const previousOrders = await db.select().from(orders)
-            .where(and(
-              eq(orders.partnerCode, partner.code),
-              eq(orders.email, customerEmail)
-            ));
-          // If there are previous orders from this customer with this partner, skip commission
-          const previousPaidOrders = previousOrders.filter(o =>
-            o.status === "bezahlt" || o.status === "gepackt" || o.status === "versendet" || o.status === "zugestellt"
-          );
-          if (previousPaidOrders.length > 0) {
-            console.log(`[Orders] EINMALIG: Skipping commission for ${partner.name} – customer ${customerEmail} already has ${previousPaidOrders.length} paid orders`);
-            partnerCommissionAmount = 0;
-            return;
+          const customerEmail = (input.customer.email || "").toLowerCase().trim();
+          // Ohne echte E-Mail gibt es keine verlässliche historische Zuordnung.
+          // Der bestehende Provisionsablauf bleibt für alle Bestellungen mit E-Mail unverändert.
+          if (customerEmail) {
+            const previousOrders = await db.select().from(orders)
+              .where(and(
+                eq(orders.partnerCode, partner.code),
+                eq(orders.email, customerEmail)
+              ));
+            // If there are previous orders from this customer with this partner, skip commission
+            const previousPaidOrders = previousOrders.filter(o =>
+              o.status === "bezahlt" || o.status === "gepackt" || o.status === "versendet" || o.status === "zugestellt"
+            );
+            if (previousPaidOrders.length > 0) {
+              console.log(`[Orders] EINMALIG: Skipping commission for ${partner.name} – customer ${customerEmail} already has ${previousPaidOrders.length} paid orders`);
+              partnerCommissionAmount = 0;
+              return;
+            }
           }
         }
 
@@ -451,7 +455,8 @@ export const orderRouter = router({
         orderId: orderId,
         firstName: input.customer.firstName,
         lastName: input.customer.lastName,
-        email: input.customer.email,
+        // Leerer Wert statt einer künstlichen Platzhalteradresse, wenn keine E-Mail erfasst wurde.
+        email: input.customer.email || "",
         phone: input.customer.phone,
         street: input.customer.street,
         houseNumber: input.customer.houseNumber,
@@ -570,7 +575,7 @@ export const orderRouter = router({
                 );
                 const fraudFlags = await detectFraudFlags(
                   kwkId,
-                  input.customer.email,
+                  input.customer.email || "",
                   input.customer.phone,
                   addressHash
                 );
@@ -588,7 +593,7 @@ export const orderRouter = router({
                      ON CONFLICT (order_id) DO NOTHING`,
                     [
                       kwkId, orderId,
-                      input.customer.email.toLowerCase(),
+                      (input.customer.email || "").toLowerCase(),
                       input.customer.phone,
                       addressHash,
                       (input.kwkDiscount || 0).toFixed(2),
@@ -629,7 +634,7 @@ export const orderRouter = router({
       // ── Auto-create or link customer ──
       let customerId: number | null = null;
       try {
-        const customerEmail = input.customer.email.toLowerCase().trim();
+        const customerEmail = (input.customer.email || "").toLowerCase().trim();
         const customerPhone = input.customer.phone.trim();
         const fullName = `${input.customer.firstName} ${input.customer.lastName}`;
 
