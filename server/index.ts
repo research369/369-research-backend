@@ -22,6 +22,8 @@ import { checkoutErrorRouter } from "./checkoutErrorRouter.js";
 import { packingPhotoRouter } from "./packingPhotoRouter.js";
 import { resendWebhookRouter } from "./resendWebhookRouter.js";
 import { ensureCrmCommunicationSchema } from "./crmCommunicationSchema.js";
+import { ensureCustomerIntegritySchema } from "./customerIntegritySchema.js";
+import { startDuplicateCheckScheduler } from "./customerIntegrityService.js";
 
 const app = express();
 
@@ -188,6 +190,15 @@ async function start() {
     await ensureCrmCommunicationSchema();
   } catch (err) {
     console.warn("[Server] CRM communication schema migration failed:", err);
+  }
+
+  // Additive customer-integrity migration and configurable daily review scheduler.
+  // The scheduler only writes review findings; it never merges or deletes data.
+  try {
+    await ensureCustomerIntegritySchema();
+    startDuplicateCheckScheduler();
+  } catch (err) {
+    console.warn("[Server] Customer integrity schema/scheduler failed:", err);
   }
 
   // Seed admin user on first start

@@ -160,6 +160,43 @@ export type Customer = typeof customers.$inferSelect;
 export type InsertCustomer = typeof customers.$inferInsert;
 
 /**
+ * Duplicate-check runs and findings. These are review records only: no customer,
+ * order, stock, or payment data is ever changed automatically.
+ */
+export const duplicateCheckRuns = pgTable("duplicate_check_runs", {
+  id: serial("id").primaryKey(),
+  trigger: varchar("trigger", { length: 24 }).notNull(), // manual | scheduled
+  status: varchar("status", { length: 24 }).notNull().default("completed"),
+  customerFindings: integer("customer_findings").notNull().default(0),
+  orderFindings: integer("order_findings").notNull().default(0),
+  summary: text("summary"),
+  startedAt: timestamp("started_at").defaultNow().notNull(),
+  completedAt: timestamp("completed_at"),
+  createdBy: varchar("created_by", { length: 100 }),
+});
+
+export const duplicateFindings = pgTable("duplicate_findings", {
+  id: serial("id").primaryKey(),
+  runId: integer("run_id").notNull(),
+  entityType: varchar("entity_type", { length: 16 }).notNull(), // customer | order
+  primaryRecordId: varchar("primary_record_id", { length: 64 }).notNull(),
+  candidateRecordId: varchar("candidate_record_id", { length: 64 }).notNull(),
+  confidence: integer("confidence").notNull(),
+  reasons: text("reasons").notNull(), // JSON string; human-readable rule results
+  status: varchar("status", { length: 24 }).notNull().default("open"), // open | reviewed | merged | ignored
+  resolutionNote: text("resolution_note"),
+  resolvedBy: varchar("resolved_by", { length: 100 }),
+  resolvedAt: timestamp("resolved_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (t) => ({
+  runIdx: index("duplicate_findings_run_idx").on(t.runId),
+  statusIdx: index("duplicate_findings_status_idx").on(t.status),
+}));
+
+export type DuplicateCheckRun = typeof duplicateCheckRuns.$inferSelect;
+export type DuplicateFinding = typeof duplicateFindings.$inferSelect;
+
+/**
  * Customer Communications – tracks all interactions with customers
  */
 export const customerCommunications = pgTable("customer_communications", {
