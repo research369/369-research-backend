@@ -60,6 +60,16 @@ function getPaymentMethodLabel(method: string): string {
   }
 }
 
+function buildShippingResearchResourcesHtml(): string {
+  return `
+    <div style="margin:24px 0 0;padding:18px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;">
+      <p style="margin:0 0 12px;font-size:15px;font-weight:700;color:#1e3a8a;">Informationen für dein Research-Setup</p>
+      <p style="margin:0 0 10px;font-size:14px;color:#374151;line-height:1.6;"><strong>Dosierungen, Mischen &amp; Pen-Einstellungen:</strong><br><a href="https://www.369research.eu/penrechner" style="color:#0040C1;font-weight:600;">www.369research.eu/penrechner</a></p>
+      <p style="margin:0 0 10px;font-size:14px;color:#374151;line-height:1.6;"><strong>Pen-System &amp; Plug&amp;Play:</strong><br>So verwendest du dein Pen-System mit einer Plug&amp;Play-Patrone: <a href="https://www.369research.eu/plug-and-play" style="color:#0040C1;font-weight:600;">Anleitung öffnen</a></p>
+      <p style="margin:0;font-size:14px;color:#374151;line-height:1.6;"><strong>Bleib auf dem Laufenden:</strong><br>Angebote, Research-Protokolle &amp; Insights direkt auf deinem Handy: <a href="https://whatsapp.com/channel/0029VbCjCg73rZZbFb5d8A11" style="color:#0040C1;font-weight:600;">Zum 369 Research WhatsApp-Kanal</a></p>
+    </div>`;
+}
+
 function getBankDetails(method: string): string {
   if (method === "wise") {
     return `
@@ -462,6 +472,7 @@ export async function sendShippingNotificationEmail(data: {
       <p style="font-size:15px;color:#374151;line-height:1.8;">Hallo ${firstName},</p>
       <p style="font-size:15px;color:#374151;line-height:1.8;">dein Paket (${data.orderId}) wurde sorgfältig gepackt und bei DHL für den Versand registriert. Es wird heute im Laufe des Tages bei DHL eingeliefert.</p>
       ${trackingInfo}
+      ${buildShippingResearchResourcesHtml()}
       <p style="font-size:13px;color:#6b7280;margin-top:20px;">Bei Fragen erreichst du uns jederzeit per WhatsApp.</p>
     </div>
     <div style="text-align:center;padding:16px;font-size:12px;color:#9ca3af;">369 Research · Forschungsmaterialien</div>
