@@ -20,6 +20,8 @@ import { dhlExpressRouter } from "./dhlExpressRouter.js";
 import { trackingRouter } from "./trackingRouter.js";
 import { checkoutErrorRouter } from "./checkoutErrorRouter.js";
 import { packingPhotoRouter } from "./packingPhotoRouter.js";
+import { resendWebhookRouter } from "./resendWebhookRouter.js";
+import { ensureCrmCommunicationSchema } from "./crmCommunicationSchema.js";
 
 const app = express();
 
