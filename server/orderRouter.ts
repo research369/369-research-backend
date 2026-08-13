@@ -488,12 +488,29 @@ export const orderRouter = router({
         ].filter(Boolean).join(' | ') || null,
       });
 
-      // Insert order items
+      // Insert order items. If a client omitted the selected dosage, recover it
+      // generically from the persisted product variants and the exact selected unit price.
+      // This changes only the display metadata; price, stock and substitution logic remain untouched.
+      const resolveDisplayDosage = async (item: typeof input.items[number]): Promise<string | null> => {
+        const supplied = item.dosage?.trim();
+        if (supplied) return supplied;
+        if (item.type !== 'peptide' || !item.shopProductId) return null;
+        const [product] = await db.select().from(articles)
+          .where(and(eq(articles.isActive, 1), eq(articles.shopProductId, item.shopProductId)))
+          .limit(1);
+        const variants = Array.isArray(product?.variants)
+          ? product.variants as Array<{ dosage?: unknown; price?: unknown }>
+          : [];
+        const selected = variants.find((variant) => Number(variant.price) === Number(item.price));
+        return typeof selected?.dosage === 'string' && selected.dosage.trim() ? selected.dosage.trim() : null;
+      };
+
       for (const item of input.items) {
+        const displayDosage = await resolveDisplayDosage(item);
         await db.insert(orderItems).values({
           orderId: orderId,
           name: item.name,
-          dosage: item.dosage || null,
+          dosage: displayDosage,
           variant: item.variant || null,
           type: item.type,
           price: item.price.toFixed(2),
