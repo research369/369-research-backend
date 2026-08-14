@@ -271,6 +271,43 @@ export type EmailTemplate = typeof emailTemplates.$inferSelect;
 export type InsertEmailTemplate = typeof emailTemplates.$inferInsert;
 
 /**
+ * Communication Templates – zentrale, zweisprachige Bibliothek für E-Mail und WhatsApp.
+ * Der Inhalt wird in PostgreSQL gepflegt und nicht im Frontend hartcodiert.
+ */
+export const communicationTemplates = pgTable("communication_templates", {
+  id: serial("id").primaryKey(),
+  templateKey: varchar("template_key", { length: 100 }).notNull(),
+  channel: varchar("channel", { length: 20 }).notNull(),
+  language: varchar("language", { length: 5 }).notNull(),
+  title: varchar("title", { length: 200 }).notNull(),
+  subjectTemplate: text("subject_template"),
+  bodyTemplate: text("body_template").notNull(),
+  isActive: integer("is_active").default(1).notNull(),
+  sortOrder: integer("sort_order").default(0).notNull(),
+  version: integer("version").default(1).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type CommunicationTemplate = typeof communicationTemplates.$inferSelect;
+export type InsertCommunicationTemplate = typeof communicationTemplates.$inferInsert;
+
+/**
+ * Communication Template Audit – immutable change ledger for template maintenance.
+ */
+export const communicationTemplateAudit = pgTable("communication_template_audit", {
+  id: serial("id").primaryKey(),
+  templateId: integer("template_id").notNull(),
+  action: varchar("action", { length: 30 }).notNull(),
+  previousValue: jsonb("previous_value"),
+  nextValue: jsonb("next_value"),
+  changedBy: varchar("changed_by", { length: 100 }).notNull().default("admin"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export type CommunicationTemplateAudit = typeof communicationTemplateAudit.$inferSelect;
+
+/**
  * Email Campaigns – bulk email sends
  */
 export const emailCampaigns = pgTable("email_campaigns", {

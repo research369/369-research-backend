@@ -21,6 +21,7 @@ import { substitutionRouter } from "./substitutionRouter.js";
 import { kwkRouter } from "./kwkRouter.js";
 import { crmCommunicationRouter } from "./crmCommunicationRouter.js";
 import { customerIntegrityRouter } from "./customerIntegrityRouter.js";
+import { communicationTemplateRouter } from "./communicationTemplateRouter.js";
 
 export const appRouter = router({
   order: orderRouter,
@@ -41,6 +42,7 @@ export const appRouter = router({
   kwk: kwkRouter, // KWK-Modul: Kunden-werben-Kunden
   crmCommunication: crmCommunicationRouter,
   customerIntegrity: customerIntegrityRouter,
+  communicationTemplate: communicationTemplateRouter,
 });
 
 export type AppRouter = typeof appRouter;

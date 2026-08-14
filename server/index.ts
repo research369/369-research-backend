@@ -24,6 +24,7 @@ import { resendWebhookRouter } from "./resendWebhookRouter.js";
 import { ensureCrmCommunicationSchema } from "./crmCommunicationSchema.js";
 import { ensureCustomerIntegritySchema } from "./customerIntegritySchema.js";
 import { startDuplicateCheckScheduler } from "./customerIntegrityService.js";
+import { ensureCommunicationTemplateSchema } from "./communicationTemplateSchema.js";
 
 const app = express();
 
@@ -199,6 +200,13 @@ async function start() {
     startDuplicateCheckScheduler();
   } catch (err) {
     console.warn("[Server] Customer integrity schema/scheduler failed:", err);
+  }
+
+  // Additive CRM template library: centrally managed DE/EN templates for E-Mail and WhatsApp.
+  try {
+    await ensureCommunicationTemplateSchema();
+  } catch (err) {
+    console.warn("[Server] Communication template schema migration failed:", err);
   }
 
   // Seed admin user on first start
