@@ -21,3 +21,15 @@
 **Behebung:** Der tägliche Gesamtscan wurde entfernt. Neue Hinweise werden ausschließlich nach Anlage eines Kunden oder bei einer Änderung von E-Mail, Telefonnummer oder Lieferadresse erzeugt. Die vorherige offene Warteschlange wird revisionssicher als Altbestand archiviert, nicht gelöscht. Die aktive Oberfläche ist auf zwölf neue Hinweise begrenzt und zeigt beide betroffenen Kunden bzw. Bestellungen mit konkreten Identitätsdaten.
 
 **Prävention:** Es gibt keine automatische Zusammenführung, Löschung, Stornierung oder Bestandsänderung. Die manuelle Vollprüfung verbleibt ausschließlich als geschützter Diagnoseablauf und ist nicht Teil des täglichen WaWi-Workflows.
+
+## 2026-08-14 – Checkout-Fehler Mössmer P 105649 / 557,00 €
+
+**Auswirkung:** Der Checkout für `oliver.wildner@outlook.com` wurde nicht als Bestellung angelegt. Der Kunde erhielt zunächst keine Bestellbestätigung. Der Fehlerdatensatz wurde jedoch vollständig in `failed_orders` gespeichert und per Admin-Alert gemeldet.
+
+**Ursache:** Tesamorelin 10 mg hatte einen Bestand von 0. Die reguläre Bestandsprüfung blockierte den Checkout mit HTTP 500, weil für diese Variante keine Smart-Substitution verfügbar war.
+
+**Behebung:** Nach ausdrücklicher Freigabe wurde die Bestellung als `369-10556` mit dem geschützten Master-Admin-Bestandsoverride angelegt. Der Fehlbestand bei Tesamorelin ist in der internen Bestellnotiz dokumentiert; die Bestellung bleibt offen. Verfügbarer Bestand wurde ausschließlich bei BPC-157 10 mg (-1), TB-500 10 mg (-2) und Ipamorelin 10 mg (-2) gebucht. Für Tesamorelin wurde kein Negativbestand erzeugt.
+
+**Kommunikation:** Die Bestellbestätigung wurde an `oliver.wildner@outlook.com` über Resend angenommen und in `customer_communications` als `sent` mit einer providerseitigen E-Mail-ID archiviert. Absender: `noreply@coreversand.de`; Antwortadresse: `support@369research.eu`.
+
+**Zusatzbefund:** Während der Wiederherstellung war der Railway-Backend-HTTPS-Endpunkt nicht erreichbar (TLS-Verbindungsfehler). Die Wiederherstellung wurde deshalb transaktional gegen die Produktionsdatenbank vorgenommen, mit Duplikatschutz, Bestandsjournal und CRM-Archivierung. Der Notfallablauf war auf diesen einzelnen gespeicherten Checkout-Backupdatensatz begrenzt.
