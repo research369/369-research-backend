@@ -7,6 +7,7 @@ import { eq, asc, sql } from "drizzle-orm";
 import { router, publicProcedure, adminProcedure } from "./trpc.js";
 import { getDb, getPool } from "./db.js";
 import { bundles, bundleItems, articles } from "../drizzle/schema.js";
+import { notifyBundleFailure } from "./bundleAlertService.js";
 
 // ============================================================
 // Bundle Router
@@ -22,6 +23,7 @@ export const bundleRouter = router({
       category: z.string().optional(), // filter by category
     }).optional())
     .query(async ({ input }) => {
+      try {
       const db = await getDb();
       if (!db) return [];
 
@@ -140,6 +142,10 @@ export const bundleRouter = router({
           savings: Math.round((basePrice - discountedPrice) * 100) / 100,
         };
       });
+      } catch (error) {
+        void notifyBundleFailure(error);
+        throw error;
+      }
     }),
 
   /**
