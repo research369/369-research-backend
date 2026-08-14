@@ -69,6 +69,12 @@ const createOrderSchema = z.object({
   kwkDiscount: z.number().optional(),              // 10% Rabatt auf Produkte
   kwkCreditUsed: z.number().optional(),            // Eingelöstes KWK-Guthaben
   kwkCreditKwkId: z.number().optional(),           // KWK-Account-ID für Guthaben-Einlösung
+  // Ausschließlich für einen angemeldeten Master-Admin im manuellen WaWi-Verkauf.
+  // Der Shop erhält hierfür nie einen gültigen Admin-Token.
+  stockOverride: z.object({
+    enabled: z.literal(true),
+    reason: z.string().trim().min(5).max(500),
+  }).optional(),
 });
 
 const updateStatusSchema = z.object({
@@ -83,9 +89,20 @@ export const orderRouter = router({
   // PUBLIC: Create order from checkout (no auth required)
   create: publicProcedure
     .input(createOrderSchema)
-        .mutation(async ({ input }) => {
+        .mutation(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
+
+      // Bestandsoverride ist strikt an einen authentifizierten Admin gebunden.
+      // Eine Shop-Bestellung besitzt keinen WaWi-Admin-Token und kann diese Prüfung nie umgehen.
+      const stockOverrideRequested = input.stockOverride?.enabled === true;
+      const stockOverrideAuthorized = stockOverrideRequested && ctx.user?.role === "admin";
+      if (stockOverrideRequested && !stockOverrideAuthorized) {
+        throw new Error("Bestandsoverride ist ausschließlich für den Master-Admin erlaubt");
+      }
+      if (stockOverrideRequested && !input.stockOverride?.reason?.trim()) {
+        throw new Error("Für eine Bestellung trotz fehlendem Bestand ist eine Begründung erforderlich");
+      }
 
       // ── Hilfsfunktion: Checkout-Fehler als Backup speichern + E-Mail an Admin ──
       const saveFailedOrder = async (errorMsg: string, attemptedOrderId?: string) => {
@@ -383,10 +400,16 @@ export const orderRouter = router({
         }
       }
       if (outOfStockItems.length > 0) {
-        const errMsg = `Folgende Artikel sind nicht mehr verfügbar: ${outOfStockItems.join(', ')}. Bitte entferne sie aus dem Warenkorb.`;
-        console.warn(`[Orders] Stock check failed for order ${orderId}:`, outOfStockItems);
-        await saveFailedOrder(errMsg, orderId);
-        throw new Error(errMsg);
+        if (stockOverrideAuthorized) {
+          const overrideReason = input.stockOverride!.reason.trim();
+          (input as any)._stockOverrideNote = `MASTER-ADMIN BESTANDSOVERRIDE – Fehlbestand bei: ${outOfStockItems.join(", ")}. Begründung: ${overrideReason}. Bestellung bleibt offen bis zur Warenverfügbarkeit.`;
+          console.warn(`[Orders] Master-Admin stock override for order ${orderId}:`, { outOfStockItems, admin: ctx.user?.username, reason: overrideReason });
+        } else {
+          const errMsg = `Folgende Artikel sind nicht mehr verfügbar: ${outOfStockItems.join(', ')}. Bitte entferne sie aus dem Warenkorb.`;
+          console.warn(`[Orders] Stock check failed for order ${orderId}:`, outOfStockItems);
+          await saveFailedOrder(errMsg, orderId);
+          throw new Error(errMsg);
+        }
       }
 
       // ── Stock deduction: reduce stock for all ordered peptide items ──
@@ -485,6 +508,7 @@ export const orderRouter = router({
         // Substitutions-Notiz intern speichern (nur für WaWi sichtbar)
         internalNote: [
           input.internalNote,
+          (input as any)._stockOverrideNote,
           (input as any)._substitutionNotes,
         ].filter(Boolean).join(' | ') || null,
       });
