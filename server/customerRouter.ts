@@ -7,6 +7,7 @@ import { eq, desc, sql, and, gte, lte, like, or } from "drizzle-orm";
 import { router, adminProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
 import { customers, orders, orderItems, customerCommunications, emailTemplates, emailCampaigns, partners } from "../drizzle/schema.js";
+import { queueCustomerDuplicateReview } from "./customerIntegrityService.js";
 
 const RESEND_API_URL = "https://api.resend.com/emails";
 
@@ -269,6 +270,11 @@ export const customerRouter = router({
         .limit(1);
       if (!inserted) throw new Error("Customer was not created");
       console.log(`[customer.create] saved houseNumber=${JSON.stringify(inserted.houseNumber)}`);
+      try {
+        await queueCustomerDuplicateReview(inserted.id, "customer_created", "customer.create");
+      } catch (error) {
+        console.warn("[Customer Integrity] Prüfung nach Kundenanlage fehlgeschlagen (nicht blockierend):", error);
+      }
 
       return { success: true, id: inserted.id, customerNumber: inserted.customerNumber };
     }),
@@ -346,6 +352,16 @@ export const customerRouter = router({
               console.log(`[Customers] Synced ${Object.keys(orderUpdate).join(', ')} from customer #${id} to order ${orderId}`);
             }
           }
+        }
+      }
+
+      const identityChanged = [data.name, data.email, data.phone, data.street, data.houseNumber, data.zip, data.city, data.country]
+        .some((value) => value !== undefined);
+      if (identityChanged) {
+        try {
+          await queueCustomerDuplicateReview(id, "customer_changed", "customer.update");
+        } catch (error) {
+          console.warn("[Customer Integrity] Prüfung nach Kundenänderung fehlgeschlagen (nicht blockierend):", error);
         }
       }
 

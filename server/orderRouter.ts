@@ -16,6 +16,7 @@ import { isSubstitutionEnabled, resolveSubstitution, extractDosageMg, isSubstitu
 import { isKwkEnabled, bookPendingCredit, detectFraudFlags, hashAddress, calculateKwkCommission, redeemCredit as kwkRedeemCredit } from "./kwkService.js";
 import { partners, partnerTransactions } from "../drizzle/schema.js";
 import { sql } from "drizzle-orm";
+import { queueCustomerDuplicateReview } from "./customerIntegrityService.js";
 
 // Zod schemas
 const createOrderSchema = z.object({
@@ -650,6 +651,7 @@ export const orderRouter = router({
 
       // ── Auto-create or link customer ──
       let customerId: number | null = null;
+      let customerIntegrityTrigger: "order_customer_created" | "order_customer_changed" | null = null;
       try {
         const customerEmail = (input.customer.email || "").toLowerCase().trim();
         const customerPhone = input.customer.phone.trim();
@@ -691,6 +693,16 @@ export const orderRouter = router({
         if (existingCustomer) {
           // Update existing customer with latest data
           customerId = existingCustomer.id;
+          const identityChanged = [
+            existingCustomer.name !== fullName,
+            (existingCustomer.phone || "") !== (customerPhone || existingCustomer.phone || ""),
+            (existingCustomer.email || "").toLowerCase() !== (customerEmail || existingCustomer.email || "").toLowerCase(),
+            (existingCustomer.street || "") !== (input.customer.street || ""),
+            (existingCustomer.houseNumber || "") !== (input.customer.houseNumber || ""),
+            (existingCustomer.zip || "") !== ((input.customer.zip ?? "").trim()),
+            (existingCustomer.city || "") !== (input.customer.city || ""),
+            (existingCustomer.country || "") !== (input.customer.country || ""),
+          ].some(Boolean);
           const newTotalOrders = existingCustomer.totalOrders + 1;
           const newTotalSpent = parseFloat(existingCustomer.totalSpent) + input.total;
 
@@ -713,6 +725,7 @@ export const orderRouter = router({
             updatedAt: new Date(),
           }).where(eq(customers.id, existingCustomer.id));
 
+          customerIntegrityTrigger = identityChanged ? "order_customer_changed" : null;
           console.log(`[Customers] Linked order ${orderId} to existing customer #${existingCustomer.customerNumber} (${fullName})`);
         } else {
           // Generate next customer number (starting at 1210)
@@ -757,12 +770,20 @@ export const orderRouter = router({
           }).returning();
 
           customerId = newCustomer.id;
+          customerIntegrityTrigger = "order_customer_created";
           console.log(`[Customers] Created new customer #${nextNum} (${fullName}) for order ${orderId}`);
         }
 
         // Link order to customer
         if (customerId) {
           await db.update(orders).set({ customerId }).where(eq(orders.orderId, orderId));
+          if (customerIntegrityTrigger) {
+            try {
+              await queueCustomerDuplicateReview(customerId, customerIntegrityTrigger, "order.create");
+            } catch (error) {
+              console.warn("[Customer Integrity] Prüfung nach Bestell-Kundenabgleich fehlgeschlagen (nicht blockierend):", error);
+            }
+          }
         }
 
         // NOTE: Communication log is written AFTER successful email send (see below)

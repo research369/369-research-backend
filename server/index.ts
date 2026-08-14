@@ -23,7 +23,7 @@ import { packingPhotoRouter } from "./packingPhotoRouter.js";
 import { resendWebhookRouter } from "./resendWebhookRouter.js";
 import { ensureCrmCommunicationSchema } from "./crmCommunicationSchema.js";
 import { ensureCustomerIntegritySchema } from "./customerIntegritySchema.js";
-import { startDuplicateCheckScheduler } from "./customerIntegrityService.js";
+import { archiveLegacyDuplicateQueue } from "./customerIntegrityService.js";
 import { ensureCommunicationTemplateSchema } from "./communicationTemplateSchema.js";
 
 const app = express();
@@ -193,13 +193,14 @@ async function start() {
     console.warn("[Server] CRM communication schema migration failed:", err);
   }
 
-  // Additive customer-integrity migration and configurable daily review scheduler.
-  // The scheduler only writes review findings; it never merges or deletes data.
+  // Additive customer-integrity migration. Reviews are now event-driven only:
+  // newly created or identity-relevant changed records are checked, never the full base each day.
   try {
     await ensureCustomerIntegritySchema();
-    startDuplicateCheckScheduler();
+    const archived = await archiveLegacyDuplicateQueue();
+    if (archived > 0) console.log(`[Customer Integrity] ${archived} Altprüffälle aus der aktiven Warteschlange ausgelagert`);
   } catch (err) {
-    console.warn("[Server] Customer integrity schema/scheduler failed:", err);
+    console.warn("[Server] Customer integrity schema/event queue setup failed:", err);
   }
 
   // Additive CRM template library: centrally managed DE/EN templates for E-Mail and WhatsApp.
