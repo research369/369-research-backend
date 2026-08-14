@@ -1,8 +1,8 @@
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { router, adminProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
-import { customers, duplicateCheckRuns, duplicateFindings, orders, shopSettings } from "../drizzle/schema.js";
+import { customers, duplicateCheckRuns, duplicateFindings, orderItems, orders, shopSettings } from "../drizzle/schema.js";
 import { runDuplicateCheck } from "./customerIntegrityService.js";
 
 const PAID = new Set(["bezahlt", "gepackt", "versendet", "zugestellt"]);
@@ -45,12 +45,40 @@ export const customerIntegrityRouter = router({
     if (!customer) return null;
     const linked = (await db.select().from(orders).orderBy(desc(orders.orderDate))).filter((order) => order.customerId === customer.id);
     const countable = linked.filter((order) => PAID.has(order.status));
+    // Nur die in der UI gezeigten jüngsten Bestellungen mit Positionen anreichern.
+    // Umsatz und Anzahl bleiben trotzdem über die gesamte Historie korrekt berechnet.
+    const historyOrders = linked.slice(0, 10);
+    const historyOrderIds = historyOrders.map((order) => order.orderId);
+    const historyItems = historyOrderIds.length > 0
+      ? await db.select().from(orderItems).where(inArray(orderItems.orderId, historyOrderIds))
+      : [];
+    const itemsByOrderId = new Map<string, typeof historyItems>();
+    for (const item of historyItems) {
+      const existing = itemsByOrderId.get(item.orderId) || [];
+      existing.push(item);
+      itemsByOrderId.set(item.orderId, existing);
+    }
     return {
       customerId: customer.id,
       totalOrders: countable.length,
       totalSpent: countable.reduce((sum, order) => sum + Number(order.total || 0), 0),
       lastOrderAt: linked[0]?.orderDate || null,
-      orders: linked.map((order) => ({ orderId: order.orderId, orderDate: order.orderDate, status: order.status, total: Number(order.total || 0) })),
+      orders: historyOrders.map((order) => ({
+        orderId: order.orderId,
+        orderDate: order.orderDate,
+        status: order.status,
+        total: Number(order.total || 0),
+        items: (itemsByOrderId.get(order.orderId) || []).map((item) => ({
+          name: item.name,
+          dosage: item.dosage,
+          variant: item.variant,
+          quantity: item.quantity,
+          price: Number(item.price || 0),
+          isNasalSpray: item.isNasalSpray,
+          isNasalDiySet: item.isNasalDiySet,
+          isPlugPlay: item.isPlugPlay,
+        })),
+      })),
     };
   }),
 

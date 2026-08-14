@@ -25,6 +25,7 @@ import { ensureCrmCommunicationSchema } from "./crmCommunicationSchema.js";
 import { ensureCustomerIntegritySchema } from "./customerIntegritySchema.js";
 import { archiveLegacyDuplicateQueue } from "./customerIntegrityService.js";
 import { ensureCommunicationTemplateSchema } from "./communicationTemplateSchema.js";
+import { ensureNasalDiySetSchema } from "./nasalDiySetSchema.js";
 
 const app = express();
 
@@ -208,6 +209,13 @@ async function start() {
     await ensureCommunicationTemplateSchema();
   } catch (err) {
     console.warn("[Server] Communication template schema migration failed:", err);
+  }
+
+  // DIY-Nasenspray-Set: persistente Bestellkennzeichnung und zentrale Set-Konfiguration.
+  try {
+    await ensureNasalDiySetSchema();
+  } catch (err) {
+    console.warn("[Server] DIY-Nasenspray-Set schema migration failed:", err);
   }
 
   // Seed admin user on first start

@@ -440,6 +440,8 @@ export const orderItems = pgTable("order_items", {
 
   // Nasenspray- und Plug&Play-Flags (additiv, für WaWi-Anzeige)
   isNasalSpray: boolean("is_nasal_spray").notNull().default(false),
+  // Optionales DIY-Set: Vial plus Komponenten, aber kein fertig gemischtes Nasenspray.
+  isNasalDiySet: boolean("is_nasal_diy_set").notNull().default(false),
   isPlugPlay: boolean("is_plug_play").notNull().default(false),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
