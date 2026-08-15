@@ -33,3 +33,11 @@
 **Kommunikation:** Die Bestellbestätigung wurde an `oliver.wildner@outlook.com` über Resend angenommen und in `customer_communications` als `sent` mit einer providerseitigen E-Mail-ID archiviert. Absender: `noreply@coreversand.de`; Antwortadresse: `support@369research.eu`.
 
 **Zusatzbefund:** Während der Wiederherstellung war der Railway-Backend-HTTPS-Endpunkt nicht erreichbar (TLS-Verbindungsfehler). Die Wiederherstellung wurde deshalb transaktional gegen die Produktionsdatenbank vorgenommen, mit Duplikatschutz, Bestandsjournal und CRM-Archivierung. Der Notfallablauf war auf diesen einzelnen gespeicherten Checkout-Backupdatensatz begrenzt.
+
+## 2026-08-15 – Aktive Bestellungen in der WaWi nicht direkt sichtbar
+
+**Auswirkung:** In der Bestellansicht erschien standardmäßig nur der Tab „Neu“. Bestellungen mit Status `bezahlt`, `gepackt` oder `zu_versenden` waren dadurch nicht in der ersten Ansicht sichtbar. Der Leerzustand „Keine neuen Bestellungen“ konnte fälschlich den Eindruck erzeugen, es gebe keine aktiven Bestellungen, obwohl diese im Bestand vorhanden waren.
+
+**Ursache:** Der Standardtab filterte ausschließlich auf `offen`; eine sichtbare aktive Gesamtübersicht fehlte. Zudem wurde ein Fehler beim Datenabruf nur als flüchtige Meldung gezeigt und konnte wie ein echter Leerbestand wirken.
+
+**Behebung:** Die WaWi startet nun mit einer sichtbaren Gesamtübersicht „Aktiv“, die alle nicht abgeschlossenen Bestellungen zeigt. Der bestehende Workflow bleibt über die Tabs Neu, Packen, Labels und Fertig erhalten. Ein fehlerhafter Datenabruf wird als klarer Hinweis mit Aktualisierungsbutton dargestellt; es wird kein irreführender Leerzustand angezeigt.
