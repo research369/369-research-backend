@@ -239,7 +239,11 @@ export const articleRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
-      let allArticles = await db.select().from(articles).orderBy(desc(articles.updatedAt));
+      // Für die sichtbare Artikelliste werden nur aktive Artikel ausgegeben.
+      // Archivierte Einzelvarianten bleiben jedoch als vertrauenswürdige Quelle
+      // für Preis und SKU der aktiven, konsolidierten Variantenfamilie erhalten.
+      const allArticlesForVariants = await db.select().from(articles).orderBy(desc(articles.updatedAt));
+      let allArticles = [...allArticlesForVariants];
 
       // Filter active only
       if (input?.onlyActive !== false) {
@@ -281,7 +285,7 @@ export const articleRouter = router({
         ...a,
         // Für die manuelle Bestellung immer die vollständige Variante liefern.
         // Die Rohdaten können Preis/SKU in einzelnen Lagerartikeln führen.
-        variants: getManualArticleVariants(a, allArticles),
+        variants: getManualArticleVariants(a, allArticlesForVariants),
         purchasePrice: a.purchasePrice ? parseFloat(a.purchasePrice) : 0,
         sellingPrice: a.sellingPrice ? parseFloat(a.sellingPrice) : 0,
         taxRate: a.taxRate ? parseFloat(a.taxRate) : 19,
