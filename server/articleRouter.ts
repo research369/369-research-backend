@@ -27,6 +27,87 @@ type VariantSource = {
   hidden?: unknown;
 };
 
+type ManualArticleVariant = {
+  label: string;
+  price: number | null;
+  sku: string | null;
+  stock: number | null;
+  isActive: boolean;
+  /** Preis wurde aus dem zugehörigen Variantenartikel bzw. Hauptartikel ergänzt. */
+  priceFallbackUsed?: boolean;
+};
+
+function normalizeDosage(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  return value.trim().replace(/(\d)\s*(mg|iu|ml|mcg)\b/gi, "$1 $2").toLowerCase();
+}
+
+function extractArticleDosage(name: string): string | null {
+  const parenthetical = name.match(/\(([^)]+)\)\s*$/);
+  const trailing = name.match(/\b(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg))\s*$/i);
+  return normalizeDosage(parenthetical?.[1] ?? trailing?.[1]);
+}
+
+/**
+ * Der WaWi-Verkaufsdialog benötigt eine vollständige, auswählbare mg-Liste.
+ * Variantenpreise können entweder im JSON des Hauptartikels oder in einer
+ * einzelnen Lagerzeile derselben shopProductId liegen. Diese Funktion verbindet
+ * beide Quellen ohne Daten in der Datenbank zu überschreiben.
+ */
+function getManualArticleVariants(
+  article: { id: number; name: string; sku: string; sellingPrice: string | null; stock: number; shopProductId: string | null; variants: unknown },
+  allArticles: Array<{ id: number; name: string; sku: string; sellingPrice: string | null; stock: number; shopProductId: string | null }>,
+): ManualArticleVariant[] {
+  const configured = Array.isArray(article.variants) ? article.variants : [];
+  const sameProductArticles = article.shopProductId
+    ? allArticles.filter((candidate) => candidate.shopProductId === article.shopProductId)
+    : [];
+  // Ergänzt ältere Einzel-Lagerzeilen. Damit bekommt auch ein Produkt ohne
+  // eigenes variants-JSON dieselbe vollständige mg-Auswahl wie der Hauptartikel.
+  const variantSources: unknown[] = [
+    ...configured,
+    ...sameProductArticles.flatMap((candidate) => {
+      const dosage = extractArticleDosage(candidate.name);
+      return dosage ? [{ dosage, price: candidate.sellingPrice, stock: candidate.stock }] : [];
+    }),
+  ];
+  const seen = new Set<string>();
+
+  return variantSources.flatMap((raw): ManualArticleVariant[] => {
+    if (!raw || typeof raw !== "object") return [];
+    const variant = raw as VariantSource;
+    const labelSource = variant.dosage ?? variant.label ?? variant.name;
+    const dosageKey = normalizeDosage(labelSource);
+    if (!dosageKey || seen.has(dosageKey)) return [];
+    seen.add(dosageKey);
+
+    const matchingArticle = article.shopProductId
+      ? allArticles.find((candidate) => candidate.shopProductId === article.shopProductId
+        && extractArticleDosage(candidate.name) === dosageKey)
+      : undefined;
+    const configuredPrice = Number(variant.price);
+    const candidatePrice = Number(matchingArticle?.sellingPrice);
+    const basePrice = Number(article.sellingPrice);
+    const hasConfiguredPrice = Number.isFinite(configuredPrice) && configuredPrice > 0;
+    const hasCandidatePrice = Number.isFinite(candidatePrice) && candidatePrice > 0;
+    // Bei mehreren mg-Optionen darf der Hauptartikelpreis nie als stiller
+    // Ersatz dienen: sonst würde die Dosierung indirekt über einen falschen
+    // Preis bestimmt. Fehlende Preise bleiben deshalb sichtbar fehlend.
+    const allowBasePriceFallback = configured.length <= 1 && variantSources.length <= 1;
+    const hasBasePrice = allowBasePriceFallback && Number.isFinite(basePrice) && basePrice > 0;
+    const rawStock = Number(variant.stock);
+
+    return [{
+      label: typeof labelSource === "string" ? labelSource.trim().replace(/(\d)\s*(mg|iu|ml|mcg)\b/gi, "$1 $2") : dosageKey,
+      price: hasConfiguredPrice ? configuredPrice : hasCandidatePrice ? candidatePrice : hasBasePrice ? basePrice : null,
+      sku: matchingArticle?.sku ?? null,
+      stock: Number.isFinite(rawStock) ? rawStock : matchingArticle?.stock ?? article.stock,
+      isActive: variant.isActive !== false && variant.isActive !== 0,
+      ...(!hasConfiguredPrice ? { priceFallbackUsed: true } : {}),
+    }];
+  });
+}
+
 /**
  * Variant data may live either in individual inventory rows (legacy) or in the
  * canonical article's variants JSON (consolidated products). The public shop
@@ -198,6 +279,9 @@ export const articleRouter = router({
 
       return allArticles.map(a => ({
         ...a,
+        // Für die manuelle Bestellung immer die vollständige Variante liefern.
+        // Die Rohdaten können Preis/SKU in einzelnen Lagerartikeln führen.
+        variants: getManualArticleVariants(a, allArticles),
         purchasePrice: a.purchasePrice ? parseFloat(a.purchasePrice) : 0,
         sellingPrice: a.sellingPrice ? parseFloat(a.sellingPrice) : 0,
         taxRate: a.taxRate ? parseFloat(a.taxRate) : 19,

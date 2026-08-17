@@ -53,3 +53,14 @@
 **Prävention:** Konsolidierte Produktvarianten und alte Einzelartikel werden vor der öffentlichen Ausgabe pro Dosierungswert dedupliziert. Der aktive, verfügbare Datensatz hat Vorrang. Damit kann eine künftige Konsolidierung keine mg-Auswahl mehr allein wegen eines suffixfreien Produktnamens entfernen.
 
 **Verifikation:** Vor dem Fix lieferte `article.shopProducts` für `3g-triple-g` ein leeres Variantenarray, obwohl die Produktdaten Varianten enthielten. Der Fix wird nach dem Produktionsrollout direkt über Shop-API und Produktansicht verifiziert.
+
+
+## 2026-08-17 – Manuelle WaWi-Bestellung: Dosierung bei Variantenartikeln nicht eindeutig
+
+**Auswirkung:** In der manuellen Bestellanlage wurden konsolidierte Artikel teilweise mit dem Hauptartikelpreis bzw. ohne sichtbare mg-Auswahl eingefügt. Insbesondere Tirzepatide und 3G-TRIPLE G konnten dadurch als Plug&Play-Position ohne konkrete Dosierung erscheinen. Mitarbeitende hätten die Dosierung aus dem Preis ableiten müssen, was unzulässig ist.
+
+**Ursache:** Die WaWi-Suche erhielt unterschiedliche Variantenformate aus den bestehenden Artikelzeilen und dem `variants`-JSON. Fehlende Preis-/SKU-Daten einzelner Varianten wurden nicht zentral aufgelöst; die Benutzeroberfläche setzte Varianten nicht verpflichtend voraus.
+
+**Korrektur:** `article.list` normalisiert nun alle Varianten eines `shop_product_id` über JSON-Konfiguration und zugehörige Lagerzeilen. Der manuelle Bestelldialog zeigt jede aktive mg-Option vor dem Preis, verlangt eine Auswahl und überträgt Dosierung, SKU und Preis gemeinsam. Varianten ohne eindeutig gepflegten Preis bleiben sichtbar als **„Preis noch nicht hinterlegt“**, können aber nicht versehentlich zu einem falschen Preis abgeschlossen werden.
+
+**Prävention:** Jede WaWi-Position mit mehr als einer Variante ist ohne gewählte mg-Dosierung nicht abschließbar. Der Hauptartikelpreis wird bei mehreren Varianten nicht mehr als stiller Ersatzpreis verwendet.
