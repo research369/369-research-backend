@@ -18,6 +18,7 @@ import { partners, partnerTransactions } from "../drizzle/schema.js";
 import { sql } from "drizzle-orm";
 import { queueCustomerDuplicateReview } from "./customerIntegrityService.js";
 import { NASAL_DIY_SET_COMPONENTS, isNasalDiySetEligible } from "./nasalDiySetConfig.js";
+import { persistAddressValidation, validateGermanAddress } from "./addressValidationService.js";
 
 // Zod schemas
 const createOrderSchema = z.object({
@@ -78,6 +79,10 @@ const createOrderSchema = z.object({
     enabled: z.literal(true),
     reason: z.string().trim().min(5).max(500),
   }).optional(),
+  // Eine Warnung wird nicht versteckt: Kunden und WaWi müssen sie bewusst bestätigen.
+  addressValidationOverride: z.object({
+    confirmed: z.literal(true),
+  }).optional(),
 });
 
 const updateStatusSchema = z.object({
@@ -105,6 +110,15 @@ export const orderRouter = router({
       }
       if (stockOverrideRequested && !input.stockOverride?.reason?.trim()) {
         throw new Error("Für eine Bestellung trotz fehlendem Bestand ist eine Begründung erforderlich");
+      }
+
+      // Deutsche Adressplausibilität wird serverseitig erneut geprüft. Das Frontend
+      // zeigt denselben Befund vorher an; diese Prüfung verhindert ein Umgehen per Request.
+      const addressValidation = await validateGermanAddress(input.customer);
+      const addressWarningNeedsConfirmation = addressValidation.applicable
+        && (addressValidation.status === "warning" || addressValidation.status === "unavailable");
+      if (addressWarningNeedsConfirmation && input.addressValidationOverride?.confirmed !== true) {
+        throw new Error(`ADRESSPRUEFUNG_BESTAETIGUNG_ERFORDERLICH: ${addressValidation.warnings.map((warning) => warning.message).join(" ")}`);
       }
 
       // ── Hilfsfunktion: Checkout-Fehler als Backup speichern + E-Mail an Admin ──
@@ -178,6 +192,19 @@ export const orderRouter = router({
         }
       } catch (err) {
         console.warn('[Orders] Failed to generate sequential order ID, using fallback:', err);
+      }
+
+      // Ein bewusst übergangener Hinweis wird sofort mit der finalen Bestellnummer
+      // festgeschrieben. Der Nachweis enthält keine änderbare UI-Aktion.
+      if (addressWarningNeedsConfirmation) {
+        await persistAddressValidation({
+          input: input.customer,
+          result: addressValidation,
+          context: ctx.user?.role === "admin" ? "manual_order" : "checkout",
+          orderId,
+          overrideConfirmed: true,
+          confirmedBy: ctx.user?.name || ctx.user?.username || (ctx.user?.role === "admin" ? "Master-Admin" : "Kunde"),
+        });
       }
 
       // ── Partner logic: validate code, calculate discount & commission ──
@@ -870,6 +897,17 @@ export const orderRouter = router({
         // Do NOT log here to avoid false-positive idempotency check
       } catch (err) {
         console.warn("[Customers] Failed to auto-create/link customer:", err);
+      }
+
+      // Nach Kundenverknüpfung wird der bereits gesicherte Nachweis zusätzlich der
+      // Kundenakte zugeordnet, ohne seinen Inhalt oder seine Bestätigung zu verändern.
+      if (customerId && addressWarningNeedsConfirmation) {
+        try {
+          const pool = await getPool();
+          await pool?.query("UPDATE address_validation_records SET customer_id = $1 WHERE order_id = $2 AND customer_id IS NULL", [customerId, orderId]);
+        } catch (error) {
+          console.error(`[AddressValidation] Kundenverknüpfung für Nachweis ${orderId} konnte nicht ergänzt werden:`, error);
+        }
       }
 
       // Log new order

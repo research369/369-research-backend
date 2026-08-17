@@ -160,6 +160,34 @@ export type Customer = typeof customers.$inferSelect;
 export type InsertCustomer = typeof customers.$inferInsert;
 
 /**
+ * Immutable address-validation records. A visual evidence document is only generated
+ * when a warning is consciously overridden; no UI delete path exists.
+ */
+export const addressValidationRecords = pgTable("address_validation_records", {
+  id: serial("id").primaryKey(),
+  customerId: integer("customer_id"),
+  orderId: varchar("order_id", { length: 32 }),
+  context: varchar("context", { length: 32 }).notNull(),
+  countryCode: varchar("country_code", { length: 8 }).notNull(),
+  submittedAddressJson: text("submitted_address_json").notNull(),
+  providerKey: varchar("provider_key", { length: 80 }),
+  providerCheckedAt: timestamp("provider_checked_at"),
+  validationStatus: varchar("validation_status", { length: 32 }).notNull(),
+  warningsJson: text("warnings_json").notNull().default("[]"),
+  detailsJson: text("details_json").notNull().default("{}"),
+  overrideConfirmed: integer("override_confirmed").notNull().default(0),
+  overrideConfirmedAt: timestamp("override_confirmed_at"),
+  overrideConfirmedBy: varchar("override_confirmed_by", { length: 100 }),
+  evidenceSvg: text("evidence_svg"),
+  evidenceSha256: varchar("evidence_sha256", { length: 128 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (t) => ({
+  customerCreatedIdx: index("address_validation_records_customer_idx").on(t.customerId, t.createdAt),
+  orderCreatedIdx: index("address_validation_records_order_idx").on(t.orderId, t.createdAt),
+}));
+export type AddressValidationRecord = typeof addressValidationRecords.$inferSelect;
+
+/**
  * Duplicate-check runs and findings. These are review records only: no customer,
  * order, stock, or payment data is ever changed automatically.
  */

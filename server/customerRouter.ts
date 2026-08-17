@@ -8,6 +8,7 @@ import { router, adminProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
 import { customers, orders, orderItems, customerCommunications, emailTemplates, emailCampaigns, partners } from "../drizzle/schema.js";
 import { queueCustomerDuplicateReview } from "./customerIntegrityService.js";
+import { persistAddressValidation, validateGermanAddress } from "./addressValidationService.js";
 
 const RESEND_API_URL = "https://api.resend.com/emails";
 
@@ -27,6 +28,8 @@ const customerSchema = z.object({
   source: z.string().optional(),
   notes: z.string().optional(),
   dhlPostNumber: z.string().optional(), // DHL-Postnummer für Packstation-Lieferungen
+  // Nur nach sichtbarer Warnung möglich; wird serverseitig erneut geprüft.
+  addressValidationOverride: z.object({ confirmed: z.literal(true) }).optional(),
 });
 
 export const customerRouter = router({
@@ -234,6 +237,15 @@ export const customerRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
+      const addressHasInput = [input.street, input.houseNumber, input.zip, input.city, input.country].some((value) => !!value?.trim());
+      const addressValidation = addressHasInput ? await validateGermanAddress({
+        street: input.street || "", houseNumber: input.houseNumber || "", zip: input.zip || "", city: input.city || "", country: input.country || "",
+      }) : null;
+      const addressWarningNeedsConfirmation = !!addressValidation?.applicable && (addressValidation.status === "warning" || addressValidation.status === "unavailable");
+      if (addressWarningNeedsConfirmation && input.addressValidationOverride?.confirmed !== true) {
+        throw new Error(`ADRESSPRUEFUNG_BESTAETIGUNG_ERFORDERLICH: ${addressValidation!.warnings.map((warning) => warning.message).join(" ")}`);
+      }
+
       // Generate next customer number
       const maxResult = await db.execute(sql`SELECT COALESCE(MAX(CAST(customer_number AS INTEGER)), 1209) as max_num FROM customers WHERE customer_number ~ '^[0-9]+$'`);
       const rows = maxResult as any;
@@ -270,6 +282,16 @@ export const customerRouter = router({
         .limit(1);
       if (!inserted) throw new Error("Customer was not created");
       console.log(`[customer.create] saved houseNumber=${JSON.stringify(inserted.houseNumber)}`);
+      if (addressWarningNeedsConfirmation && addressValidation) {
+        await persistAddressValidation({
+          input: { street: input.street || "", houseNumber: input.houseNumber || "", zip: input.zip || "", city: input.city || "", country: input.country || "" },
+          result: addressValidation,
+          context: "customer_create",
+          customerId: inserted.id,
+          overrideConfirmed: true,
+          confirmedBy: "Master-Admin",
+        });
+      }
       try {
         await queueCustomerDuplicateReview(inserted.id, "customer_created", "customer.create");
       } catch (error) {
@@ -279,14 +301,29 @@ export const customerRouter = router({
       return { success: true, id: inserted.id, customerNumber: inserted.customerNumber };
     }),
 
-  // Update customer
+    // Update customer
   update: adminProcedure
     .input(z.object({ id: z.number() }).merge(customerSchema.partial()))
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
-
       const { id, ...data } = input;
+      const [existingCustomer] = await db.select().from(customers).where(eq(customers.id, id)).limit(1);
+      if (!existingCustomer) throw new Error("Kunde nicht gefunden");
+      const addressFieldsChanged = ["street", "houseNumber", "zip", "city", "country"].some((field) => (data as any)[field] !== undefined);
+      const effectiveAddress = {
+        street: data.street ?? existingCustomer.street ?? "",
+        houseNumber: data.houseNumber ?? existingCustomer.houseNumber ?? "",
+        zip: data.zip ?? existingCustomer.zip ?? "",
+        city: data.city ?? existingCustomer.city ?? "",
+        country: data.country ?? existingCustomer.country ?? "",
+      };
+      const addressHasInput = Object.values(effectiveAddress).some((value) => !!String(value).trim());
+      const addressValidation = addressFieldsChanged && addressHasInput ? await validateGermanAddress(effectiveAddress) : null;
+      const addressWarningNeedsConfirmation = !!addressValidation?.applicable && (addressValidation.status === "warning" || addressValidation.status === "unavailable");
+      if (addressWarningNeedsConfirmation && data.addressValidationOverride?.confirmed !== true) {
+        throw new Error(`ADRESSPRUEFUNG_BESTAETIGUNG_ERFORDERLICH: ${addressValidation!.warnings.map((warning) => warning.message).join(" ")}`);
+      }
       const updateData: Record<string, any> = { updatedAt: new Date() };
 
       if (data.name !== undefined) updateData.name = data.name;
@@ -355,6 +392,16 @@ export const customerRouter = router({
         }
       }
 
+      if (addressWarningNeedsConfirmation && addressValidation) {
+        await persistAddressValidation({
+          input: effectiveAddress,
+          result: addressValidation,
+          context: "customer_update",
+          customerId: id,
+          overrideConfirmed: true,
+          confirmedBy: "Master-Admin",
+        });
+      }
       const identityChanged = [data.name, data.email, data.phone, data.street, data.houseNumber, data.zip, data.city, data.country]
         .some((value) => value !== undefined);
       if (identityChanged) {

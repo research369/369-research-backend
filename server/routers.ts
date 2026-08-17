@@ -22,6 +22,7 @@ import { kwkRouter } from "./kwkRouter.js";
 import { crmCommunicationRouter } from "./crmCommunicationRouter.js";
 import { customerIntegrityRouter } from "./customerIntegrityRouter.js";
 import { communicationTemplateRouter } from "./communicationTemplateRouter.js";
+import { addressValidationRouter } from "./addressValidationRouter.js";
 
 export const appRouter = router({
   order: orderRouter,
@@ -43,6 +44,7 @@ export const appRouter = router({
   crmCommunication: crmCommunicationRouter,
   customerIntegrity: customerIntegrityRouter,
   communicationTemplate: communicationTemplateRouter,
+  addressValidation: addressValidationRouter,
 });
 
 export type AppRouter = typeof appRouter;

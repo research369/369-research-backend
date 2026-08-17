@@ -26,6 +26,7 @@ import { ensureCustomerIntegritySchema } from "./customerIntegritySchema.js";
 import { archiveLegacyDuplicateQueue } from "./customerIntegrityService.js";
 import { ensureCommunicationTemplateSchema } from "./communicationTemplateSchema.js";
 import { ensureNasalDiySetSchema } from "./nasalDiySetSchema.js";
+import { ensureAddressValidationSchema } from "./addressValidationSchema.js";
 
 const app = express();
 
@@ -216,6 +217,13 @@ async function start() {
     await ensureNasalDiySetSchema();
   } catch (err) {
     console.warn("[Server] DIY-Nasenspray-Set schema migration failed:", err);
+  }
+
+  // Deutsche Adressprüfung: konfigurierbarer Quellendienst und revisionssichere Nachweise.
+  try {
+    await ensureAddressValidationSchema();
+  } catch (err) {
+    console.warn("[Server] Address-validation schema migration failed:", err);
   }
 
   // Seed admin user on first start
