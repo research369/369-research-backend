@@ -67,7 +67,7 @@ function getManualArticleVariants(
   const variantSources: unknown[] = [
     ...configured,
     ...sameProductArticles.flatMap((candidate) => {
-      const dosage = extractArticleDosage(candidate.name);
+      const dosage = extractArticleDosage(candidate.name) ?? extractArticleDosage(candidate.sku);
       return dosage ? [{ dosage, price: candidate.sellingPrice, stock: candidate.stock }] : [];
     }),
   ];
@@ -83,7 +83,7 @@ function getManualArticleVariants(
 
     const matchingArticle = article.shopProductId
       ? allArticles.find((candidate) => candidate.shopProductId === article.shopProductId
-        && extractArticleDosage(candidate.name) === dosageKey)
+        && (extractArticleDosage(candidate.name) ?? extractArticleDosage(candidate.sku)) === dosageKey)
       : undefined;
     const configuredPrice = Number(variant.price);
     const candidatePrice = Number(matchingArticle?.sellingPrice);
