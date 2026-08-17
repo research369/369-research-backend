@@ -22,6 +22,7 @@ type VariantSource = {
   label?: unknown;
   name?: unknown;
   price?: unknown;
+  sku?: unknown;
   stock?: unknown;
   isActive?: unknown;
   hidden?: unknown;
@@ -96,11 +97,12 @@ function getManualArticleVariants(
     const allowBasePriceFallback = configured.length <= 1 && variantSources.length <= 1;
     const hasBasePrice = allowBasePriceFallback && Number.isFinite(basePrice) && basePrice > 0;
     const rawStock = Number(variant.stock);
+    const configuredSku = typeof variant.sku === "string" && variant.sku.trim() ? variant.sku.trim() : null;
 
     return [{
       label: typeof labelSource === "string" ? labelSource.trim().replace(/(\d)\s*(mg|iu|ml|mcg)\b/gi, "$1 $2") : dosageKey,
       price: hasConfiguredPrice ? configuredPrice : hasCandidatePrice ? candidatePrice : hasBasePrice ? basePrice : null,
-      sku: matchingArticle?.sku ?? null,
+      sku: configuredSku ?? matchingArticle?.sku ?? null,
       stock: Number.isFinite(rawStock) ? rawStock : matchingArticle?.stock ?? article.stock,
       isActive: variant.isActive !== false && variant.isActive !== 0,
       ...(!hasConfiguredPrice ? { priceFallbackUsed: true } : {}),
