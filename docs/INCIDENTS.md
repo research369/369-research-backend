@@ -41,3 +41,15 @@
 **Ursache:** Der Standardtab filterte ausschließlich auf `offen`; eine sichtbare aktive Gesamtübersicht fehlte. Zudem wurde ein Fehler beim Datenabruf nur als flüchtige Meldung gezeigt und konnte wie ein echter Leerbestand wirken.
 
 **Behebung:** Die WaWi startet nun mit einer sichtbaren Gesamtübersicht „Aktiv“, die alle nicht abgeschlossenen Bestellungen zeigt. Der bestehende Workflow bleibt über die Tabs Neu, Packen, Labels und Fertig erhalten. Ein fehlerhafter Datenabruf wird als klarer Hinweis mit Aktualisierungsbutton dargestellt; es wird kein irreführender Leerzustand angezeigt.
+
+## 2026-08-17 – mg-Varianten bei konsolidiertem Shopprodukt nicht sichtbar
+
+**Auswirkung:** Beim Shopprodukt `3G-TRIPLE G / R3ta` erschienen weder die mg-Auswahl noch die zugehörigen Variantenpreise. Kunden sahen ausschließlich den Grundpreis des Vials, obwohl die Varianten 5 mg, 10 mg, 15 mg, 20 mg und 30 mg im zentralen Produktdatensatz vollständig gespeichert waren.
+
+**Ursache:** Nach der Konsolidierung der früheren Einzelartikel liegt die Variantenstruktur im Feld `articles.variants` des aktiven Hauptartikels. Die öffentlichen Shop-Endpunkte leiteten Varianten bisher ausschließlich aus einem mg-Suffix des Artikelnamens ab. Der kanonische Produktname enthält bewusst kein mg-Suffix; dadurch lieferte die API ein leeres Variantenarray aus.
+
+**Behebung:** Die öffentlichen Produkt- und Verfügbarkeitsendpunkte lesen Varianten jetzt generisch aus dem persistierten Variantenfeld und unterstützen weiterhin den bisherigen Einzelartikel-Fallback. Varianten mit abweichenden Altformaten (`dosage`, `label` oder `name`) werden normalisiert. Sichtbarkeit, Variantenpreis und variantenspezifischer Bestand werden dabei mitgeliefert.
+
+**Prävention:** Konsolidierte Produktvarianten und alte Einzelartikel werden vor der öffentlichen Ausgabe pro Dosierungswert dedupliziert. Der aktive, verfügbare Datensatz hat Vorrang. Damit kann eine künftige Konsolidierung keine mg-Auswahl mehr allein wegen eines suffixfreien Produktnamens entfernen.
+
+**Verifikation:** Vor dem Fix lieferte `article.shopProducts` für `3g-triple-g` ein leeres Variantenarray, obwohl die Produktdaten Varianten enthielten. Der Fix wird nach dem Produktionsrollout direkt über Shop-API und Produktansicht verifiziert.

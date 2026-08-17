@@ -7,6 +7,77 @@ import { router, adminProcedure, productManagerProcedure, packingProcedure, publ
 import { getDb, getPool } from "./db.js";
 import { articles, stockHistory, orderItems, orders, articleTranslations, articleFaq } from "../drizzle/schema.js";
 
+type PublicShopVariant = {
+  dosage: string;
+  label: string;
+  price: number;
+  stock: number;
+  inStock: boolean;
+  articleId: number;
+  hidden?: boolean;
+};
+
+type VariantSource = {
+  dosage?: unknown;
+  label?: unknown;
+  name?: unknown;
+  price?: unknown;
+  stock?: unknown;
+  isActive?: unknown;
+  hidden?: unknown;
+};
+
+/**
+ * Variant data may live either in individual inventory rows (legacy) or in the
+ * canonical article's variants JSON (consolidated products). The public shop
+ * must support both forms so mg selections never disappear after consolidation.
+ */
+function getPublicShopVariants(article: {
+  id: number;
+  name: string;
+  stock: number;
+  sellingPrice: string | null;
+  variants: unknown;
+}): PublicShopVariant[] {
+  const configured = Array.isArray(article.variants) ? article.variants : [];
+  const fromConfigured = configured.flatMap((raw): PublicShopVariant[] => {
+    if (!raw || typeof raw !== "object") return [];
+    const variant = raw as VariantSource;
+    const dosageSource = variant.dosage ?? variant.label ?? variant.name;
+    if (typeof dosageSource !== "string" || !dosageSource.trim()) return [];
+    const dosage = dosageSource.trim();
+    const label = typeof variant.label === "string" && variant.label.trim() ? variant.label.trim() : dosage;
+    const rawPrice = Number(variant.price);
+    const price = Number.isFinite(rawPrice) ? rawPrice : Number(article.sellingPrice ?? 0);
+    const rawStock = Number(variant.stock);
+    const stock = Number.isFinite(rawStock) ? rawStock : article.stock;
+    const explicitlyHidden = variant.hidden === true || variant.isActive === false || variant.isActive === 0;
+    return [{
+      dosage,
+      label,
+      price,
+      stock,
+      inStock: !explicitlyHidden && stock > 0,
+      articleId: article.id,
+      ...(explicitlyHidden ? { hidden: true } : {}),
+    }];
+  });
+
+  if (fromConfigured.length > 0) return fromConfigured;
+
+  const dosageMatch = article.name.match(/(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu))\s*\)?\s*$/i);
+  const dosage = dosageMatch ? dosageMatch[1].trim() : "";
+  if (!dosage) return [];
+  return [{
+    dosage,
+    label: dosage,
+    price: Number(article.sellingPrice ?? 0),
+    stock: article.stock,
+    inStock: article.stock > 0,
+    articleId: article.id,
+  }];
+}
+
 const articleSchema = z.object({
   sku: z.string().min(1),
   name: z.string().min(1),
@@ -41,21 +112,37 @@ export const articleRouter = router({
     if (!db) return [];
 
     const allArticles = await db.select({
+      id: articles.id,
       shopProductId: articles.shopProductId,
       stock: articles.stock,
       name: articles.name,
+      sellingPrice: articles.sellingPrice,
+      variants: articles.variants,
       isActive: articles.isActive,
     }).from(articles);
 
-    // Return only active articles that have a shopProductId (linked to shop)
+    // Return active linked articles. Consolidated products expose their persisted
+    // variants as individual availability rows so the frontend can evaluate
+    // each mg choice correctly instead of falling back to the base stock.
     return allArticles
       .filter(a => a.shopProductId && a.shopProductId.trim() !== "" && a.isActive !== 0)
-      .map(a => ({
-        shopProductId: a.shopProductId!,
-        inStock: (a.stock ?? 0) > 0,
-        stock: a.stock ?? 0,
-        name: a.name,
-      }));
+      .flatMap(a => {
+        const variants = getPublicShopVariants(a);
+        if (variants.length === 0) {
+          return [{
+            shopProductId: a.shopProductId!,
+            inStock: (a.stock ?? 0) > 0,
+            stock: a.stock ?? 0,
+            name: a.name,
+          }];
+        }
+        return variants.map(variant => ({
+          shopProductId: a.shopProductId!,
+          inStock: variant.inStock,
+          stock: variant.stock,
+          name: `${a.name} (${variant.dosage})`,
+        }));
+      });
   }),
 
   // List all articles with search/sort
@@ -599,17 +686,21 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
         });
       }
       const product = productMap.get(pid)!;
-      // Regex berücksichtigt auch Klammern am Ende: "Tirzepatide (10 mg)" → "10 mg"
-      const dosageMatch = a.name.match(/(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu))\s*\)?\s*$/i);
-      const dosage = dosageMatch ? dosageMatch[1].trim() : '';
-      if (dosage) {
-        product.variants.push({ dosage, label: dosage, price, stock: a.stock, inStock: a.stock > 0, articleId: a.id });
-      }
+      product.variants.push(...getPublicShopVariants(a));
       product.stock += a.stock;
       if (a.stock > 0) product.inStock = true;
     }
     return Array.from(productMap.values()).map(p => {
-      p.variants.sort((a: any, b: any) => a.price - b.price);
+      const byDosage = new Map<string, PublicShopVariant>();
+      for (const variant of p.variants as PublicShopVariant[]) {
+        const key = variant.dosage.toLowerCase();
+        const existing = byDosage.get(key);
+        // Prefer a visible/in-stock record when legacy and consolidated sources coexist.
+        if (!existing || (!variant.hidden && variant.inStock && (!existing.inStock || existing.hidden))) {
+          byDosage.set(key, variant);
+        }
+      }
+      p.variants = Array.from(byDosage.values()).sort((a, b) => a.price - b.price);
       if (p.variants.length > 0) p.price = p.variants[0].price;
       return p;
     });
@@ -626,13 +717,17 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
       const visible = allArticles.filter(a => a.shopVisible === 1 && a.isActive === 1);
       if (visible.length === 0) return null;
       const first = visible[0];
-      const variants = visible.map(a => {
-        // Regex berücksichtigt auch Klammern am Ende: "MOTS-c (10 mg)" → "10 mg"
-        const dosageMatch = a.name.match(/(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu))\s*\)?\s*$/i);
-        const dosage = dosageMatch ? dosageMatch[1].trim() : '';
-        return { dosage, label: dosage, price: a.sellingPrice ? parseFloat(a.sellingPrice) : 0, stock: a.stock, inStock: a.stock > 0, articleId: a.id };
-      }).filter(v => v.dosage);
-      variants.sort((a, b) => a.price - b.price);
+      const byDosage = new Map<string, PublicShopVariant>();
+      for (const article of visible) {
+        for (const variant of getPublicShopVariants(article)) {
+          const key = variant.dosage.toLowerCase();
+          const existing = byDosage.get(key);
+          if (!existing || (!variant.hidden && variant.inStock && (!existing.inStock || existing.hidden))) {
+            byDosage.set(key, variant);
+          }
+        }
+      }
+      const variants = Array.from(byDosage.values()).sort((a, b) => a.price - b.price);
       return {
         id: first.shopProductId,
         shopProductId: first.shopProductId,
