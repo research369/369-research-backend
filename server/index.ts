@@ -27,6 +27,7 @@ import { archiveLegacyDuplicateQueue } from "./customerIntegrityService.js";
 import { ensureCommunicationTemplateSchema } from "./communicationTemplateSchema.js";
 import { ensureNasalDiySetSchema } from "./nasalDiySetSchema.js";
 import { ensureAddressValidationSchema } from "./addressValidationSchema.js";
+import { ensureCustomerDossierSchema } from "./customerDossierSchema.js";
 
 const app = express();
 
@@ -224,6 +225,13 @@ async function start() {
     await ensureAddressValidationSchema();
   } catch (err) {
     console.warn("[Server] Address-validation schema migration failed:", err);
+  }
+
+  // Kundenakte: zentraler Tagkatalog, abgeleiteter Kundenstatus und revisionssichere Problemfälle.
+  try {
+    await ensureCustomerDossierSchema();
+  } catch (err) {
+    console.warn("[Server] Customer dossier schema migration failed:", err);
   }
 
   // Seed admin user on first start

@@ -160,6 +160,45 @@ export type Customer = typeof customers.$inferSelect;
 export type InsertCustomer = typeof customers.$inferInsert;
 
 /**
+ * Customer dossier – configurable tag library plus immutable issue history.
+ * Cases are resolved or archived, never deleted through the WaWi UI.
+ */
+export const customerTagDefinitions = pgTable("customer_tag_definitions", {
+  id: serial("id").primaryKey(),
+  tagKey: varchar("tag_key", { length: 80 }).notNull().unique(),
+  label: varchar("label", { length: 120 }).notNull(),
+  color: varchar("color", { length: 32 }).notNull().default("slate"),
+  description: text("description"),
+  sortOrder: integer("sort_order").notNull().default(999),
+  isActive: integer("is_active").notNull().default(1),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const customerIssueCases = pgTable("customer_issue_cases", {
+  id: serial("id").primaryKey(),
+  customerId: integer("customer_id").notNull(),
+  orderId: varchar("order_id", { length: 32 }),
+  category: varchar("category", { length: 64 }).notNull(),
+  severity: varchar("severity", { length: 16 }).notNull().default("normal"),
+  status: varchar("status", { length: 24 }).notNull().default("open"),
+  title: varchar("title", { length: 240 }).notNull(),
+  details: text("details").notNull(),
+  occurredAt: timestamp("occurred_at").defaultNow().notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  createdBy: varchar("created_by", { length: 100 }).notNull(),
+  resolvedAt: timestamp("resolved_at"),
+  resolvedBy: varchar("resolved_by", { length: 100 }),
+  resolutionNote: text("resolution_note"),
+  contextSnapshotJson: text("context_snapshot_json").notNull().default("{}"),
+}, (t) => ({
+  customerStatusIdx: index("customer_issue_cases_customer_idx").on(t.customerId, t.status, t.occurredAt),
+  orderStatusIdx: index("customer_issue_cases_order_idx").on(t.orderId, t.status, t.occurredAt),
+}));
+export type CustomerTagDefinition = typeof customerTagDefinitions.$inferSelect;
+export type CustomerIssueCase = typeof customerIssueCases.$inferSelect;
+
+/**
  * Immutable address-validation records. A visual evidence document is only generated
  * when a warning is consciously overridden; no UI delete path exists.
  */
