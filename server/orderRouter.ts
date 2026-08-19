@@ -14,11 +14,12 @@ import { sendOrderConfirmationEmail, sendShippingNotificationEmail, sendAdminOrd
 import { isSubstitutionEnabled, resolveSubstitution, extractDosageMg, isSubstitutionEligible } from "./substitutionService.js";
 // KWK-Modul: statischer Import (sicherer als dynamischer Import)
 import { isKwkEnabled, bookPendingCredit, detectFraudFlags, hashAddress, calculateKwkCommission, redeemCredit as kwkRedeemCredit } from "./kwkService.js";
-import { partners, partnerTransactions } from "../drizzle/schema.js";
+import { partners } from "../drizzle/schema.js";
 import { sql } from "drizzle-orm";
 import { queueCustomerDuplicateReview } from "./customerIntegrityService.js";
 import { NASAL_DIY_SET_COMPONENTS, isNasalDiySetEligible } from "./nasalDiySetConfig.js";
 import { persistAddressValidation, validateGermanAddress } from "./addressValidationService.js";
+import { bookPaidPartnerCommission, redeemPartnerCreditForOrder } from "./partnerCreditService.js";
 
 // Zod schemas
 const createOrderSchema = z.object({
@@ -214,69 +215,11 @@ export const orderRouter = router({
       let partnerCommissionAmount = 0;
       let creditUsed = input.creditUsed || 0;
 
-      // Helper: Book commission for a partner (respects commissionType)
-      let resolvedPartner: any = null;
-      const bookPartnerCommission = async (partner: any, reason: string) => {
-        resolvedPartner = partner;
-        // Provision wird IMMER auf den Nettobetrag nach ALLEN Rabatten berechnet
-        // input.subtotal = Produkt-Subtotal VOR Rabatt
-        // input.discount = Gesamtrabatt (Partner-Rabatt + sonstige Rabatte)
-        // Netto = subtotal - discount (was der Kunde für Produkte tatsächlich zahlt, ohne Versand)
-        const nettoAfterAllDiscounts = Math.max(0, input.subtotal - input.discount);
-        const commissionRate = parseFloat(partner.commissionPercent) / 100;
-        partnerCommissionAmount = Math.round(nettoAfterAllDiscounts * commissionRate * 100) / 100;
-        console.log(`[Orders] Commission calc: subtotal=${input.subtotal}, discount=${input.discount}, netto=${nettoAfterAllDiscounts}, rate=${commissionRate}, commission=${partnerCommissionAmount}`);
-
-        if (partnerCommissionAmount <= 0) return;
-
-        // ── EINMALIG CHECK: Only book for first order from this customer email ──
-        if (partner.commissionType === "einmalig" && reason !== "Eigenbestellung") {
-          const customerEmail = (input.customer.email || "").toLowerCase().trim();
-          // Ohne echte E-Mail gibt es keine verlässliche historische Zuordnung.
-          // Der bestehende Provisionsablauf bleibt für alle Bestellungen mit E-Mail unverändert.
-          if (customerEmail) {
-            const previousOrders = await db.select().from(orders)
-              .where(and(
-                eq(orders.partnerCode, partner.code),
-                eq(orders.email, customerEmail)
-              ));
-            // If there are previous orders from this customer with this partner, skip commission
-            const previousPaidOrders = previousOrders.filter(o =>
-              o.status === "bezahlt" || o.status === "gepackt" || o.status === "versendet" || o.status === "zugestellt"
-            );
-            if (previousPaidOrders.length > 0) {
-              console.log(`[Orders] EINMALIG: Skipping commission for ${partner.name} – customer ${customerEmail} already has ${previousPaidOrders.length} paid orders`);
-              partnerCommissionAmount = 0;
-              return;
-            }
-          }
-        }
-
-        const currentBalance = parseFloat(partner.creditBalance);
-        const newBalance = currentBalance + partnerCommissionAmount;
-
-        // For "dauerhaft": book as Guthaben (shop credit)
-        // For "einmalig": also track in balance for accounting (meant for cash payout)
-        await db.update(partners).set({
-          creditBalance: newBalance.toFixed(2),
-          updatedAt: new Date(),
-        }).where(eq(partners.id, partner.id));
-
-        const typeLabel = partner.commissionType === "einmalig" ? "Auszahlung" : "Guthaben";
-        await db.insert(partnerTransactions).values({
-          partnerId: partner.id,
-          type: "provision",
-          amount: partnerCommissionAmount.toFixed(2),
-          balanceAfter: newBalance.toFixed(2),
-          orderId: orderId,
-          customerName: `${input.customer.firstName} ${input.customer.lastName}`,
-          description: `Provision für Bestellung ${orderId} (${input.customer.firstName} ${input.customer.lastName}) [${reason}] – ${typeLabel}`,
-        });
-
-        // Also set the partnerCode on the order for tracking
+      // Partner wird beim Checkout ausschließlich zugeordnet. Eine Gutschrift entsteht
+      // erst nach bestätigtem Zahlungseingang im zentralen Partnerguthaben-Service.
+      const resolvePartnerForOrder = async (partner: { id: number; code: string }, reason: string) => {
         if (!partnerCode) partnerCode = partner.code;
-
-        console.log(`[Orders] Partner commission (${partner.commissionType}): ${partnerCommissionAmount.toFixed(2)} EUR for ${partner.name} (${reason})`);
+        console.log(`[Orders] Partner zugeordnet: ${partner.code} (${reason}); Guthaben wird erst nach Zahlung gebucht.`);
       };
 
       // Case 1: Partner CODE was provided (customer or partner entered the code)
@@ -287,7 +230,7 @@ export const orderRouter = router({
           .limit(1);
 
         if (partner) {
-          await bookPartnerCommission(partner, "Code");
+          await resolvePartnerForOrder(partner, "Code");
         }
       }
 
@@ -300,49 +243,26 @@ export const orderRouter = router({
           .limit(1);
 
         if (partner) {
-          await bookPartnerCommission(partner, "Eigenbestellung");
+          await resolvePartnerForOrder(partner, "Eigenbestellung");
         }
       }
 
-      // ── Partner credit redemption ──
-      if (partnerNumber && creditUsed > 0) {
-        const { and: andOp } = await import("drizzle-orm");
-        const [partner] = await db.select().from(partners)
-          .where(andOp(eq(partners.partnerNumber, partnerNumber), eq(partners.isActive, 1)))
-          .limit(1);
-
-        if (partner) {
-          const currentBalance = parseFloat(partner.creditBalance);
-          const actualCreditUsed = Math.min(creditUsed, currentBalance);
-
-          if (actualCreditUsed > 0) {
-            const newBalance = currentBalance - actualCreditUsed;
-
-            await db.update(partners).set({
-              creditBalance: newBalance.toFixed(2),
-              updatedAt: new Date(),
-            }).where(eq(partners.id, partner.id));
-
-            // Record redemption transaction
-            await db.insert(partnerTransactions).values({
-              partnerId: partner.id,
-              type: "einloesung",
-              amount: (-actualCreditUsed).toFixed(2),
-              balanceAfter: newBalance.toFixed(2),
-                  orderId: orderId,
-              description: `Guthaben eingelöst für Bestellung ${orderId}`,
-            });
-
-            creditUsed = actualCreditUsed;
-            console.log(`[Orders] Partner credit redeemed: ${actualCreditUsed.toFixed(2)} EUR by ${partner.name}`);
-          }
-        }
+      // Ein Guthabeneinsatz muss als eigener Wert vorliegen. Er wird erst nach
+      // erfolgreichem Bestellabschluss im zentralen, idempotenten Ledger gebucht.
+      if (creditUsed > 0 && !partnerNumber) {
+        throw new Error("Guthabeneinlösung erfordert eine gültige Partnernummer");
+      }
+      if (creditUsed < 0 || creditUsed > input.discount || creditUsed > input.subtotal) {
+        throw new Error("Ungültiger Guthabeneinsatz");
       }
 
       // ── Idempotency check: if order already exists, skip re-processing ──
       const existingOrder = await db.select().from(orders).where(eq(orders.orderId, orderId)).limit(1);
       if (existingOrder.length > 0) {
-        console.warn(`[Orders] Duplicate request for order ${orderId} – skipping (order already exists)`);
+        console.warn(`[Orders] Duplicate request for order ${orderId} – completing only idempotent ledger steps`);
+        if (parseFloat(existingOrder[0].creditUsed || "0") > 0) {
+          await redeemPartnerCreditForOrder(orderId);
+        }
         return { success: true, orderId: orderId };
       }
 
@@ -849,8 +769,11 @@ export const orderRouter = router({
           // Determine acquisition source
           const acquiredBy = partnerCode ? "partner" as const : "shop" as const;
           let acquiredByPartnerId: number | null = null;
-          if (partnerCode && resolvedPartner) {
-            acquiredByPartnerId = resolvedPartner.id;
+          if (partnerCode) {
+            const [assignedPartner] = await db.select({ id: partners.id }).from(partners)
+              .where(and(eq(partners.code, partnerCode.toUpperCase()), eq(partners.isActive, 1)))
+              .limit(1);
+            acquiredByPartnerId = assignedPartner?.id ?? null;
           }
 
           const [newCustomer] = await db.insert(customers).values({
@@ -908,6 +831,12 @@ export const orderRouter = router({
         } catch (error) {
           console.error(`[AddressValidation] Kundenverknüpfung für Nachweis ${orderId} konnte nicht ergänzt werden:`, error);
         }
+      }
+
+      // Der Guthabeneinsatz wird erst nach vollständiger Bestellpersistenz gebucht.
+      // Der zentrale Service sperrt den Partnerdatensatz und verhindert Doppelbuchungen.
+      if (creditUsed > 0) {
+        await redeemPartnerCreditForOrder(orderId);
       }
 
       // Log new order
@@ -1045,6 +974,12 @@ export const orderRouter = router({
       if (input.internalNote !== undefined) updateData.internalNote = input.internalNote;
 
       await db.update(orders).set(updateData).where(eq(orders.orderId, input.orderId));
+
+      // Partnerguthaben ist strikt zahlungsgebunden. Wiederholte Klicks sind idempotent.
+      if (input.status === "bezahlt") {
+        const creditResult = await bookPaidPartnerCommission(input.orderId);
+        console.log(`[Partners] Zahlungsgebundene Gutschrift ${input.orderId}: ${creditResult.reason} (${creditResult.amount.toFixed(2)} €)`);
+      }
 
       // KWK-Guthaben freigeben wenn Bestellung final ist (versendet, zugestellt oder abgeholt)
       if (["versendet", "zugestellt", "abgeholt"].includes(input.status)) {
@@ -1211,6 +1146,9 @@ export const orderRouter = router({
           bunqMatchedAt: new Date(),
         }).where(eq(orders.orderId, order.orderId));
 
+        const creditResult = await bookPaidPartnerCommission(order.orderId);
+        console.log(`[Partners] Zahlungsgebundene Gutschrift ${order.orderId}: ${creditResult.reason} (${creditResult.amount.toFixed(2)} €)`);
+
         usedPaymentIds.add(match.matchedPayment.id);
         autoMatchedCount++;
         autoMatched = true;
@@ -1313,6 +1251,11 @@ export const orderRouter = router({
       }
 
       await db.update(orders).set(updateData).where(eq(orders.orderId, input.orderId));
+
+      if (input.markAsPaid && order.status === "offen") {
+        const creditResult = await bookPaidPartnerCommission(input.orderId);
+        console.log(`[Partners] Zahlungsgebundene Gutschrift ${input.orderId}: ${creditResult.reason} (${creditResult.amount.toFixed(2)} €)`);
+      }
 
       console.log(`[Bunq] Manual assignment: Payment ${input.paymentId} (${input.paymentAmount} EUR) -> Order ${input.orderId}`);
 

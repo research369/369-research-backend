@@ -18,6 +18,7 @@ import { router, publicProcedure, adminProcedure, middleware } from "./trpc.js";
 import { getDb } from "./db.js";
 import { partners, partnerTransactions, orders, orderItems, partnerCodeUsage, customers } from "../drizzle/schema.js";
 import { ENV } from "./env.js";
+import { bookPaidPartnerCommission, redeemPartnerCreditForOrder } from "./partnerCreditService.js";
 import type { Request } from "express";
 
 // ─── Partner Auth Helpers ─────────────────────────────────────────
@@ -767,15 +768,9 @@ export const partnerRouter = router({
       };
     }),
 
-  // ─── INTERNAL: Commission booking with commissionType logic ────
-
-  /**
-   * Book commission for a referred order.
-   * - einmalig: Only book if this is the FIRST paid order from this customer email via this partner
-   * - dauerhaft: Always book as shop credit (Guthaben)
-   * 
-   * Called when an order is marked as "bezahlt" (paid).
-   */
+  // ─── INTERNAL: payment-bound commission booking ────────────────
+  // Compatibility endpoint: amount and customer data are deliberately ignored.
+  // The persisted paid order is the only source of truth.
   bookCommission: adminProcedure
     .input(z.object({
       orderId: z.string(),
@@ -785,98 +780,16 @@ export const partnerRouter = router({
       customerEmail: z.string().optional(),
     }))
     .mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database not available");
-
-      const [partner] = await db.select().from(partners)
-        .where(eq(partners.code, input.partnerCode.toUpperCase()))
-        .limit(1);
-
-      if (!partner) return { success: false, message: "Partner nicht gefunden" };
-
-      // Check if commission was already booked for this order
-      const existingTx = await db.select().from(partnerTransactions)
-        .where(and(
-          eq(partnerTransactions.partnerId, partner.id),
-          eq(partnerTransactions.orderId, input.orderId),
-          eq(partnerTransactions.type, "provision")
-        ))
-        .limit(1);
-
-      if (existingTx.length > 0) {
-        return { success: false, message: "Provision für diese Bestellung bereits gebucht" };
-      }
-
-      // ── EINMALIG CHECK ──
-      // If commissionType is "einmalig", only book provision for the FIRST order from this customer
-      if (partner.commissionType === "einmalig" && input.customerEmail) {
-        // Check if there's already a provision transaction for this customer email
-        const { like } = await import("drizzle-orm");
-        const existingProvisions = await db.select().from(partnerTransactions)
-          .where(and(
-            eq(partnerTransactions.partnerId, partner.id),
-            eq(partnerTransactions.type, "provision")
-          ));
-        
-        // Check if any previous provision was for the same customer
-        // We check by looking at orders with this partner code and this email
-        const previousOrders = await db.select().from(orders)
-          .where(and(
-            eq(orders.partnerCode, partner.code),
-            eq(orders.email, input.customerEmail)
-          ));
-        
-        // If there are other PAID orders from this customer (excluding current), skip
-        const otherPaidOrders = previousOrders.filter(o => 
-          o.orderId !== input.orderId && 
-          (o.status === "bezahlt" || o.status === "gepackt" || o.status === "versendet" || o.status === "zugestellt")
-        );
-
-        if (otherPaidOrders.length > 0) {
-          console.log(`[Partners] EINMALIG: Skipping commission for ${partner.name} – customer ${input.customerEmail} already has ${otherPaidOrders.length} previous paid orders`);
-          return { 
-            success: false, 
-            message: `Einmalige Provision: Kunde hat bereits ${otherPaidOrders.length} bezahlte Bestellung(en). Keine weitere Provision.`,
-            skippedReason: "einmalig_already_paid"
-          };
-        }
-      }
-
-      // Provision wird IMMER auf den übergebenen Nettobetrag nach ALLEN Rabatten berechnet
-      const commissionRate = parseFloat(partner.commissionPercent) / 100;
-      const commissionAmount = Math.round(input.productSubtotalAfterDiscount * commissionRate * 100) / 100;
-      console.log(`[Partners] Commission calc: nettoAfterDiscount=${input.productSubtotalAfterDiscount}, rate=${commissionRate}, commission=${commissionAmount}`);
-
-      if (commissionAmount <= 0) return { success: false, message: "Keine Provision" };
-
-      // For "dauerhaft" partners: book as credit (Guthaben)
-      // For "einmalig" partners: also track in balance for accounting, but it's meant for cash payout
-      const currentBalance = parseFloat(partner.creditBalance);
-      const newBalance = currentBalance + commissionAmount;
-
-      // Update partner balance
-      await db.update(partners).set({
-        creditBalance: newBalance.toFixed(2),
-        updatedAt: new Date(),
-      }).where(eq(partners.id, partner.id));
-
-      // Record provision transaction
-      const description = partner.commissionType === "einmalig"
-        ? `Einmalige Provision für Bestellung ${input.orderId} (${input.customerName}) – Auszahlung`
-        : `Provision für Bestellung ${input.orderId} (${input.customerName}) – Guthaben`;
-
-      await db.insert(partnerTransactions).values({
-        partnerId: partner.id,
-        type: "provision",
-        amount: commissionAmount.toFixed(2),
-        balanceAfter: newBalance.toFixed(2),
-        orderId: input.orderId,
-        customerName: input.customerName,
-        description,
-      });
-
-      console.log(`[Partners] Commission booked (${partner.commissionType}): ${commissionAmount.toFixed(2)} EUR for ${partner.name} (Order: ${input.orderId})`);
-      return { success: true, commissionAmount, newBalance, commissionType: partner.commissionType };
+      const result = await bookPaidPartnerCommission(input.orderId);
+      return {
+        success: result.booked,
+        commissionAmount: result.amount,
+        newBalance: result.balance,
+        reason: result.reason,
+        message: result.booked
+          ? "Provision wurde nach bestätigtem Zahlungseingang gebucht"
+          : `Keine neue Provision gebucht: ${result.reason}`,
+      };
     }),
 
   // ─── PARTNER PORTAL: Auth ─────────────────────────────────────
@@ -1178,37 +1091,21 @@ export const partnerRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
-      // Re-fetch partner to get latest balance (prevent race conditions)
-      const [freshPartner] = await db.select().from(partners).where(eq(partners.id, partner.id)).limit(1);
-      if (!freshPartner) throw new Error("Partner nicht gefunden");
-
-      const currentBalance = parseFloat(freshPartner.creditBalance);
-      
-      // Validate amount
-      if (input.amount > currentBalance) {
-        throw new Error(`Nicht genügend Guthaben. Verfügbar: ${currentBalance.toFixed(2)} €`);
+      const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1);
+      if (!order || order.partnerNumber !== partner.partnerNumber) {
+        throw new Error("Bestellung gehört nicht zu diesem Partner");
+      }
+      if (Math.abs(parseFloat(order.creditUsed || "0") - input.amount) > 0.005) {
+        throw new Error("Guthabeneinsatz stimmt nicht mit der gespeicherten Bestellung überein");
       }
 
-      const newBalance = Math.round((currentBalance - input.amount) * 100) / 100;
-
-      // Update balance
-      await db.update(partners).set({
-        creditBalance: newBalance.toFixed(2),
-        updatedAt: new Date(),
-      }).where(eq(partners.id, partner.id));
-
-      // Record einloesung transaction
-      await db.insert(partnerTransactions).values({
-        partnerId: partner.id,
-        type: "einloesung",
-        amount: (-input.amount).toFixed(2),
-        balanceAfter: newBalance.toFixed(2),
-        orderId: input.orderId,
-        description: `Guthaben eingelöst für Bestellung ${input.orderId}`,
-      });
-
-      console.log(`[Partners] Credit redeemed: ${input.amount.toFixed(2)} EUR by ${partner.name} (Order: ${input.orderId})`);
-      return { success: true, amountRedeemed: input.amount, newBalance };
+      const result = await redeemPartnerCreditForOrder(input.orderId);
+      return {
+        success: true,
+        amountRedeemed: result.redeemed,
+        newBalance: result.balance,
+        alreadyBooked: result.alreadyBooked,
+      };
     }),
 
   // Redeem credit from checkout by partner number (requires password for security)
@@ -1239,31 +1136,16 @@ export const partnerRouter = router({
         throw new Error("Falsches Passwort");
       }
 
-      const currentBalance = parseFloat(partner.creditBalance);
-      if (input.amount > currentBalance) {
-        throw new Error(`Nicht gen\u00fcgend Guthaben. Verf\u00fcgbar: ${currentBalance.toFixed(2)} \u20ac`);
+      const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1);
+      if (!order || order.partnerNumber !== partner.partnerNumber) {
+        throw new Error("Bestellung gehört nicht zu diesem Partner");
+      }
+      if (Math.abs(parseFloat(order.creditUsed || "0") - input.amount) > 0.005) {
+        throw new Error("Guthabeneinsatz stimmt nicht mit der gespeicherten Bestellung überein");
       }
 
-      const newBalance = Math.round((currentBalance - input.amount) * 100) / 100;
-
-      // Update balance
-      await db.update(partners).set({
-        creditBalance: newBalance.toFixed(2),
-        updatedAt: new Date(),
-      }).where(eq(partners.id, partner.id));
-
-      // Record transaction
-      await db.insert(partnerTransactions).values({
-        partnerId: partner.id,
-        type: "einloesung",
-        amount: (-input.amount).toFixed(2),
-        balanceAfter: newBalance.toFixed(2),
-        orderId: input.orderId,
-        description: input.description || `Guthaben eingel\u00f6st f\u00fcr Bestellung ${input.orderId}`,
-      });
-
-      console.log(`[Partners] Checkout credit redeemed: ${input.amount.toFixed(2)} EUR by ${partner.name} (Order: ${input.orderId})`);
-      return { success: true, newBalance };
+      const result = await redeemPartnerCreditForOrder(input.orderId);
+      return { success: true, newBalance: result.balance, alreadyBooked: result.alreadyBooked };
     }),
 
   // Change own password (partner-authenticated)
