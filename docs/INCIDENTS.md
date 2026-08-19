@@ -64,3 +64,15 @@
 **Korrektur:** `article.list` normalisiert nun alle Varianten eines `shop_product_id` über JSON-Konfiguration und zugehörige Lagerzeilen. Der manuelle Bestelldialog zeigt jede aktive mg-Option vor dem Preis, verlangt eine Auswahl und überträgt Dosierung, SKU und Preis gemeinsam. Varianten ohne eindeutig gepflegten Preis bleiben sichtbar als **„Preis noch nicht hinterlegt“**, können aber nicht versehentlich zu einem falschen Preis abgeschlossen werden.
 
 **Prävention:** Jede WaWi-Position mit mehr als einer Variante ist ohne gewählte mg-Dosierung nicht abschließbar. Der Hauptartikelpreis wird bei mehreren Varianten nicht mehr als stiller Ersatzpreis verwendet.
+
+## 2026-08-19 – Tirzepatide-Lagerzeilen deaktiviert und Shopbestand widersprüchlich
+
+**Auswirkung:** In der WaWi wurde bei der Suche nach Tirzepatide nur der sichtbare 20-mg-Hauptartikel angezeigt. Die separaten Lagerzeilen für 10 mg, 15 mg, 40 mg und 50 mg waren deaktiviert. Gleichzeitig zeigte der Shop Varianten mehrfach und mit widersprüchlichen 0-Beständen; vorhandene 20 mg, 40 mg und 50 mg wirkten dadurch teilweise nicht verfügbar.
+
+**Ursache:** Frühere Konsolidierungen deaktivierten Varianten-Lagerzeilen, um Doppelungen im Shop zu vermeiden. Die Konsolidierung grenzte jedoch Shop-Sichtbarkeit und WaWi-Lagerführung nicht ausreichend voneinander ab. Nach Reaktivierung der Lagerzeilen gab der öffentliche Verfügbarkeitsendpoint zusätzlich Varianten aus dem Hauptartikel und aus historischen Variantenzeilen aus.
+
+**Behebung:** Die belegten Lagerzeilen wurden reaktiviert, ohne ihre Bestände zu verändern: 20 mg = 48, 40 mg = 8 und 50 mg = 13. Der aktive Hauptartikel behält den zentralen Variantenvertrag; 30 mg wurde als vorhandene Varianten-Lagerzeile mit Bestand 0 ergänzt. Der öffentliche Verfügbarkeitsresolver liefert pro Variantenfamilie nur noch die sichtbare kanonische Hauptquelle aus. Historische Lagerzeilen bleiben für WaWi, Bestandsbuchung und manuelle Bestellung aktiv.
+
+**Prävention:** Konsolidierung bedeutet künftig ausschließlich eine einheitliche Shopdarstellung, niemals das Entfernen der Lagerzeilen. Der Shop verwendet pro `shop_product_id` genau einen Variantenvertrag; die WaWi behält alle aktiven Lager-SKUs. Dadurch können Shopvarianten nicht mehr von Altzeilen überschrieben werden und Lagerartikel verschwinden nicht aus der WaWi.
+
+**Verifikation:** Der Produktionsbestand und die Variantenkonfiguration wurden vor der Korrektur gesichert. Die Shop-API wird nach Deployment auf genau eine Tirzepatide-Zeile pro mg-Variante und die Bestände 48 / 8 / 13 geprüft.

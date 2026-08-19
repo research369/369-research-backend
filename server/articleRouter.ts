@@ -202,30 +202,57 @@ export const articleRouter = router({
       sellingPrice: articles.sellingPrice,
       variants: articles.variants,
       isActive: articles.isActive,
+      shopVisible: articles.shopVisible,
     }).from(articles);
 
-    // Return active linked articles. Consolidated products expose their persisted
-    // variants as individual availability rows so the frontend can evaluate
-    // each mg choice correctly instead of falling back to the base stock.
-    return allArticles
-      .filter(a => a.shopProductId && a.shopProductId.trim() !== "" && a.isActive !== 0)
-      .flatMap(a => {
-        const variants = getPublicShopVariants(a);
+    // Jede Variantenfamilie hat genau eine kanonische öffentliche Quelle.
+    // Bei konsolidierten Produkten ist das der sichtbare Hauptartikel mit
+    // variants-JSON. Aktive historische Lagerzeilen bleiben für die WaWi und
+    // Bestandsführung erhalten, dürfen die Shop-Verfügbarkeit aber nicht mit
+    // abweichenden Alt-JSONs oder Doppelzeilen überlagern.
+    const activeLinked = allArticles.filter(a => a.shopProductId && a.shopProductId.trim() !== "" && a.isActive !== 0);
+    const groups = new Map<string, typeof activeLinked>();
+    for (const article of activeLinked) {
+      const key = article.shopProductId!.trim().toLowerCase();
+      const group = groups.get(key) ?? [];
+      group.push(article);
+      groups.set(key, group);
+    }
+
+    return Array.from(groups.values()).flatMap(group => {
+      const canonical = group.find(article =>
+        article.shopVisible !== 0 && Array.isArray(article.variants) && article.variants.length > 0
+      );
+
+      if (canonical) {
+        return getPublicShopVariants(canonical).map(variant => ({
+          shopProductId: canonical.shopProductId!,
+          inStock: variant.inStock,
+          stock: variant.stock,
+          name: `${canonical.name} (${variant.dosage})`,
+        }));
+      }
+
+      // Nicht konsolidierte Legacy-Produkte behalten die bisherige Ausgabe je
+      // aktiver Lagerzeile. Es wird bewusst kein Datenbestand ausgeblendet.
+      return group.flatMap(article => {
+        const variants = getPublicShopVariants(article);
         if (variants.length === 0) {
           return [{
-            shopProductId: a.shopProductId!,
-            inStock: (a.stock ?? 0) > 0,
-            stock: a.stock ?? 0,
-            name: a.name,
+            shopProductId: article.shopProductId!,
+            inStock: (article.stock ?? 0) > 0,
+            stock: article.stock ?? 0,
+            name: article.name,
           }];
         }
         return variants.map(variant => ({
-          shopProductId: a.shopProductId!,
+          shopProductId: article.shopProductId!,
           inStock: variant.inStock,
           stock: variant.stock,
-          name: `${a.name} (${variant.dosage})`,
+          name: `${article.name} (${variant.dosage})`,
         }));
       });
+    });
   }),
 
   // List all articles with search/sort
