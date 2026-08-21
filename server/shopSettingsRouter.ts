@@ -12,7 +12,64 @@ import { router, publicProcedure, adminProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
 import { shopSettings } from "../drizzle/schema.js";
 
+const WHATSAPP_CHANNEL_CONFIG_KEY = "whatsapp_channel_config";
+
+const whatsappChannelConfigSchema = z.object({
+  enabled: z.boolean(),
+  channelUrl: z.string().url(),
+  titleDe: z.string().min(1).max(160),
+  titleEn: z.string().min(1).max(160),
+  descriptionDe: z.string().min(1).max(500),
+  descriptionEn: z.string().min(1).max(500),
+  buttonLabelDe: z.string().min(1).max(80),
+  buttonLabelEn: z.string().min(1).max(80),
+  ruoNoteDe: z.string().max(160),
+  ruoNoteEn: z.string().max(160),
+  placements: z.array(z.enum(["home", "product", "checkout", "confirmation", "calculator"])).min(1),
+});
+
+type WhatsAppChannelConfig = z.infer<typeof whatsappChannelConfigSchema>;
+
+function parseWhatsAppChannelConfig(value: string | undefined): WhatsAppChannelConfig | null {
+  if (!value) return null;
+  try {
+    return whatsappChannelConfigSchema.parse(JSON.parse(value));
+  } catch {
+    return null;
+  }
+}
+
 export const shopSettingsRouter = router({
+  // ─── PUBLIC: WhatsApp channel conversion configuration ────────
+  getWhatsAppChannelConfig: publicProcedure
+    .query(async () => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+      const [setting] = await db.select().from(shopSettings)
+        .where(eq(shopSettings.key, WHATSAPP_CHANNEL_CONFIG_KEY))
+        .limit(1);
+      return { config: parseWhatsAppChannelConfig(setting?.value) };
+    }),
+
+  // ─── ADMIN: WhatsApp channel conversion configuration ─────────
+  setWhatsAppChannelConfig: adminProcedure
+    .input(whatsappChannelConfigSchema)
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+      const serialized = JSON.stringify(input);
+      const existing = await db.select().from(shopSettings)
+        .where(eq(shopSettings.key, WHATSAPP_CHANNEL_CONFIG_KEY))
+        .limit(1);
+      if (existing.length > 0) {
+        await db.update(shopSettings).set({ value: serialized, updatedAt: new Date() })
+          .where(eq(shopSettings.key, WHATSAPP_CHANNEL_CONFIG_KEY));
+      } else {
+        await db.insert(shopSettings).values({ key: WHATSAPP_CHANNEL_CONFIG_KEY, value: serialized });
+      }
+      return { success: true, config: input };
+    }),
+
   // ─── PUBLIC: Check if shop is open ────────────────────────────
   getShopStatus: publicProcedure
     .query(async () => {
