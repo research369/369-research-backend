@@ -617,6 +617,23 @@ export type PartnerTransaction = typeof partnerTransactions.$inferSelect;
 export type InsertPartnerTransaction = typeof partnerTransactions.$inferInsert;
 
 /**
+ * Order-specific partner credit overrides – optional explicit amount for a single order.
+ * The override is only evaluated after a confirmed payment and remains fully auditable.
+ */
+export const partnerOrderCreditOverrides = pgTable("partner_order_credit_overrides", {
+  id: serial("id").primaryKey(),
+  orderId: varchar("order_id", { length: 32 }).notNull().unique(),
+  amount: decimal("amount", { precision: 10, scale: 2 }).notNull(),
+  reason: text("reason").notNull(),
+  isActive: integer("is_active").notNull().default(1),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type PartnerOrderCreditOverride = typeof partnerOrderCreditOverrides.$inferSelect;
+export type InsertPartnerOrderCreditOverride = typeof partnerOrderCreditOverrides.$inferInsert;
+
+/**
  * Promo Codes – time-limited discount codes managed in WaWi
  * Unlike partner codes, these can be used by any customer (including returning ones)
  * They have optional expiry dates and usage limits

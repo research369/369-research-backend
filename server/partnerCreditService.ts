@@ -50,6 +50,25 @@ export function calculateCommissionAmount(input: {
   return roundMoney(calculateCommissionBase(input) * commissionPercent / 100);
 }
 
+/**
+ * Returns an explicitly approved, order-bound credit amount when present; otherwise
+ * applies the standard partner rule. The caller remains responsible for payment gating.
+ */
+export function resolveCommissionAmount(
+  input: {
+    subtotal: number;
+    totalProductDiscount: number;
+    creditUsed: number;
+    commissionPercent: number;
+  },
+  explicitAmount?: number,
+): number {
+  if (explicitAmount === undefined) return calculateCommissionAmount(input);
+  const amount = parseMoney(explicitAmount);
+  if (amount < 0) throw new Error("Ungültiger expliziter Guthabenbetrag");
+  return amount;
+}
+
 async function beginLockedTransaction(): Promise<{ client: PoolClient; release: () => Promise<void> }> {
   const pool = await getPool();
   if (!pool) throw new Error("Datenbank nicht verfügbar");
@@ -94,6 +113,11 @@ type PartnerForCredit = {
   commission_percent: string;
   commission_type: "einmalig" | "dauerhaft";
   credit_balance: string;
+};
+
+type OrderCreditOverride = {
+  amount: string;
+  reason: string;
 };
 
 async function lockOrder(client: PoolClient, orderId: string): Promise<OrderForCredit> {
@@ -246,12 +270,23 @@ export async function bookPaidPartnerCommission(orderId: string): Promise<{
       }
     }
 
-    const amount = calculateCommissionAmount({
-      subtotal: parseMoney(order.subtotal),
-      totalProductDiscount: parseMoney(order.discount),
-      creditUsed: parseMoney(order.credit_used),
-      commissionPercent: parseMoney(partner.commission_percent),
-    });
+    const overrideResult = await client.query<OrderCreditOverride>(
+      `SELECT amount, reason
+         FROM partner_order_credit_overrides
+        WHERE order_id = $1 AND is_active = 1
+        FOR UPDATE`,
+      [orderId],
+    );
+    const creditOverride = overrideResult.rows[0] || null;
+    const amount = resolveCommissionAmount(
+      {
+        subtotal: parseMoney(order.subtotal),
+        totalProductDiscount: parseMoney(order.discount),
+        creditUsed: parseMoney(order.credit_used),
+        commissionPercent: parseMoney(partner.commission_percent),
+      },
+      creditOverride ? parseMoney(creditOverride.amount) : undefined,
+    );
     if (amount <= 0) {
       await client.query("COMMIT");
       client.release();
@@ -274,7 +309,9 @@ export async function bookPaidPartnerCommission(orderId: string): Promise<{
         newBalance.toFixed(2),
         orderId,
         `${order.first_name} ${order.last_name}`.trim(),
-        `Provision für bezahlte Bestellung ${orderId} (${order.first_name} ${order.last_name}) – ${label}`,
+        creditOverride
+          ? `Manuell freigegebenes Guthaben für bezahlte Bestellung ${orderId} – ${creditOverride.reason}`
+          : `Provision für bezahlte Bestellung ${orderId} (${order.first_name} ${order.last_name}) – ${label}`,
       ],
     );
     await client.query(

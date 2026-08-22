@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { calculateCommissionAmount, calculateCommissionBase } from "../server/partnerCreditService.js";
+import { calculateCommissionAmount, calculateCommissionBase, resolveCommissionAmount } from "../server/partnerCreditService.js";
 
 const order10533Base = calculateCommissionBase({
   subtotal: 140,
@@ -32,5 +32,12 @@ assert.throws(
   /Ungültige Rabatt- oder Guthabenwerte/,
   "Ein Guthabeneinsatz darf den gesamten Produktrabatt nicht übersteigen",
 );
+
+assert.equal(resolveCommissionAmount({
+  subtotal: 926,
+  totalProductDiscount: 44.60,
+  creditUsed: 0,
+  commissionPercent: 10,
+}, 47), 47, "Bestellgebundene, freigegebene Guthabenhöhe überschreibt die Standardformel erst bei Zahlung");
 
 console.log("Partner credit logic regression checks passed");
