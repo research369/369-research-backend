@@ -68,6 +68,7 @@ export const customerIntegrityRouter = router({
         orderDate: order.orderDate,
         status: order.status,
         total: Number(order.total || 0),
+        internalNote: order.internalNote || null,
         items: (itemsByOrderId.get(order.orderId) || []).map((item) => ({
           name: item.name,
           dosage: item.dosage,
