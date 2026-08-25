@@ -210,9 +210,18 @@ export const articleRouter = router({
     // variants-JSON. Aktive historische Lagerzeilen bleiben für die WaWi und
     // Bestandsführung erhalten, dürfen die Shop-Verfügbarkeit aber nicht mit
     // abweichenden Alt-JSONs oder Doppelzeilen überlagern.
-    const activeLinked = allArticles.filter(a => a.shopProductId && a.shopProductId.trim() !== "" && a.isActive !== 0);
-    const groups = new Map<string, typeof activeLinked>();
-    for (const article of activeLinked) {
+    // Öffentliche Verfügbarkeit darf ausschließlich aktive UND shop-sichtbare
+    // Artikel berücksichtigen. Unsichtbare Legacy-Zeilen bleiben vollständig
+    // für WaWi, Bestellhistorie und Lagerhistorie erhalten, werden aber nie
+    // mehr als kaufbare oder ausverkaufte Shop-Produkte ausgeliefert.
+    const visibleLinked = allArticles.filter(a =>
+      a.shopProductId &&
+      a.shopProductId.trim() !== "" &&
+      a.isActive !== 0 &&
+      a.shopVisible !== 0
+    );
+    const groups = new Map<string, typeof visibleLinked>();
+    for (const article of visibleLinked) {
       const key = article.shopProductId!.trim().toLowerCase();
       const group = groups.get(key) ?? [];
       group.push(article);
@@ -233,8 +242,8 @@ export const articleRouter = router({
         }));
       }
 
-      // Nicht konsolidierte Legacy-Produkte behalten die bisherige Ausgabe je
-      // aktiver Lagerzeile. Es wird bewusst kein Datenbestand ausgeblendet.
+      // Nicht konsolidierte sichtbare Produkte behalten die bisherige Ausgabe
+      // je aktiver Lagerzeile. Unsichtbare Legacy-Datensätze sind oben ausgeschlossen.
       return group.flatMap(article => {
         const variants = getPublicShopVariants(article);
         if (variants.length === 0) {
