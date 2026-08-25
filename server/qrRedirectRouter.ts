@@ -75,7 +75,7 @@ qrRedirectRouter.get("/r/:shortCode", async (req, res) => {
     const secure = req.secure || String(req.headers["x-forwarded-proto"]) === "https";
     const common = `Path=/; Max-Age=${QR_ATTRIBUTION_DAYS * 86400}; SameSite=Lax${secure ? "; Secure" : ""}`;
     res.append("Set-Cookie", `qr_attr=${encodeURIComponent(attributionToken)}; Domain=.369research.eu; ${common}`);
-    if (!visitorCookie) res.append("Set-Cookie", `qr_vid=${encodeURIComponent(visitorId)}; Domain=.369research.eu; Path=/; Max-Age=31536000; SameSite=Lax${secure ? "; Secure" : ""}`);
+    if (!visitorCookie) res.append("Set-Cookie", `qr_vid=${encodeURIComponent(visitorId)}; Domain=.369research.eu; ${common}`);
     res.set("Cache-Control", "no-store");
     return res.redirect(302, buildTrackedTarget(campaign.target_url, {
       shortCode: campaign.short_code,
