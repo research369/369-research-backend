@@ -159,7 +159,8 @@ export function resolveSubstitution(
     )
     .map(a => ({
       ...a,
-      dosageMg: extractDosageMg(a.name) ?? 0,
+      // Konsolidierte Legacy-Lagerzeilen können die Dosierung nur in der SKU tragen.
+      dosageMg: extractDosageMg(a.name) ?? extractDosageMg(a.sku) ?? 0,
       stock: a.stock ?? 0,
     }))
     .filter(a => a.dosageMg > 0 && a.dosageMg < orderedDosageMg && a.stock > 0)
