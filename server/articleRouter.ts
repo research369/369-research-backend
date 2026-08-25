@@ -1017,33 +1017,38 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
     const allArticles = await db.select().from(articles).where(eq(articles.isActive, 1));
     const result: Record<string, boolean> = {};
 
+    const inventory = allArticles.map(article => ({
+      id: article.id,
+      name: article.name,
+      sku: article.sku,
+      stock: article.stock,
+      shopProductId: article.shopProductId,
+      category: article.category,
+    }));
+
+    // Zielvarianten kommen aus der kanonischen variants-Konfiguration und aus
+    // Legacy-Lagerzeilen. So bleibt Smart Sub funktionsfähig, auch wenn eine
+    // ausverkaufte Dosierung nur noch im JSON des sichtbaren Hauptartikels lebt.
     for (const article of allArticles) {
-      if ((article.stock ?? 0) > 0) continue;
-      if (!article.shopProductId) continue;
-      if (!isSubstitutionEligible(article.category)) continue;
+      if (!article.shopProductId || !isSubstitutionEligible(article.category)) continue;
 
-      const dosageMg = extractDosageMg(article.name);
-      if (dosageMg === null) continue;
+      for (const variant of getPublicShopVariants(article)) {
+        if (variant.hidden || variant.stock > 0) continue;
+        const dosageMg = extractDosageMg(variant.dosage);
+        if (dosageMg === null) continue;
 
-      const sub = resolveSubstitution(
-        article.shopProductId,
-        dosageMg,
-        1,
-        allArticles.map(a => ({
-          id: a.id,
-          name: a.name,
-          sku: a.sku,
-          stock: a.stock,
-          shopProductId: a.shopProductId,
-          category: a.category,
-        }))
-      );
+        const sub = resolveSubstitution(
+          article.shopProductId,
+          dosageMg,
+          1,
+          inventory,
+        );
 
-      if (sub.possible) {
-        const parenMatch = article.name.match(/\(([^)]+)\)\s*$/);
-        const noParenMatch = article.name.match(/\b(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu))\s*$/i);
-        const dosageStr = parenMatch ? parenMatch[1].trim() : noParenMatch ? noParenMatch[1].trim() : `${dosageMg} mg`;
-        result[`${article.shopProductId}|${dosageStr}`] = true;
+        if (sub.possible) {
+          const productKey = article.shopProductId.toLowerCase().trim();
+          const dosageKey = variant.dosage.toLowerCase().trim().replace(/(\d)\s*mg\b/i, "$1 mg");
+          result[`${productKey}|${dosageKey}`] = true;
+        }
       }
     }
 
