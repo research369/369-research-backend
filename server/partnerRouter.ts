@@ -1198,3 +1198,345 @@ export const partnerRouter = router({
       if (!partner || partner.isActive !== 1) {
         // Don't reveal whether partner exists
         return { success: true, message: "Falls eine E-Mail-Adresse hinterlegt ist, wurde ein Reset-Code gesendet." };
+      }
+
+      if (!partner.email) {
+        return { success: false, message: "Keine E-Mail-Adresse hinterlegt. Bitte kontaktiere den Admin." };
+      }
+
+      // Generate 6-digit code
+      const code = Math.floor(100000 + Math.random() * 900000).toString();
+      const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+
+      // Store code in partner's notes field temporarily (prefixed so we can parse it)
+      // Format: __RESET_CODE__:CODE:EXPIRY_ISO
+      const resetData = `__RESET_CODE__:${code}:${expiresAt.toISOString()}`;
+      
+      // We store the reset code in a dedicated field approach: use SQL directly
+      const { getPool } = await import("./db.js");
+      const pool = await getPool();
+      if (!pool) throw new Error("Database not available");
+      
+      // Store reset code (we use a simple approach: store in a temporary column or use notes)
+      // Using raw SQL to set a reset_code and reset_code_expires field
+      await pool.query(
+        `UPDATE partners SET notes = COALESCE(REGEXP_REPLACE(notes, '__RESET_CODE__:[^|]*\\|?', ''), '') || $1 WHERE id = $2`,
+        [`|${resetData}`, partner.id]
+      );
+
+      // Send email via Resend
+      const apiKey = process.env.RESEND_API_KEY;
+      if (!apiKey) {
+        console.warn("[Partners] RESEND_API_KEY not configured, cannot send reset email");
+        return { success: false, message: "E-Mail-Service nicht verfuegbar. Bitte kontaktiere den Admin." };
+      }
+
+      const emailHtml = `
+<!DOCTYPE html>
+<html lang="de">
+<head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background-color:#0a0a0f;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <div style="max-width:500px;margin:0 auto;padding:40px 20px;">
+    <div style="background:linear-gradient(135deg,#0d1117,#161b22);border:1px solid #1c2433;border-radius:16px;padding:40px;text-align:center;">
+      <div style="margin-bottom:24px;">
+        <h1 style="color:#3b82f6;margin:0;font-size:24px;font-weight:700;letter-spacing:1px;">369 RESEARCH</h1>
+        <p style="color:#64748b;margin:4px 0 0;font-size:12px;letter-spacing:2px;">PARTNER PORTAL</p>
+      </div>
+      <div style="background:#0a0f1a;border:1px solid #1e3a5f;border-radius:12px;padding:24px;margin:24px 0;">
+        <p style="color:#94a3b8;font-size:14px;margin:0 0 16px;">Dein Passwort-Reset-Code:</p>
+        <p style="color:#3b82f6;font-size:36px;font-weight:700;letter-spacing:8px;margin:0;font-family:monospace;">${code}</p>
+        <p style="color:#64748b;font-size:12px;margin:16px 0 0;">Gueltig fuer 15 Minuten</p>
+      </div>
+      <p style="color:#64748b;font-size:13px;margin:0;">Falls du keinen Reset angefordert hast, ignoriere diese E-Mail.</p>
+    </div>
+  </div>
+</body>
+</html>`;
+
+      try {
+        const RESEND_API_URL = "https://api.resend.com/emails";
+        const response = await fetch(RESEND_API_URL, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            from: "369 Research <noreply@mail.369research.eu>",
+            to: [partner.email],
+            subject: "Passwort zuruecksetzen – 369 Research Partner Portal",
+            html: emailHtml,
+          }),
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.warn(`[Partners] Failed to send reset email (${response.status}):`, errorText);
+          return { success: false, message: "E-Mail konnte nicht gesendet werden. Bitte versuche es spaeter." };
+        }
+
+        console.log(`[Partners] Password reset code sent to ${partner.email} for ${partner.partnerNumber}`);
+        return { success: true, message: "Falls eine E-Mail-Adresse hinterlegt ist, wurde ein Reset-Code gesendet." };
+      } catch (error) {
+        console.warn("[Partners] Error sending reset email:", error);
+        return { success: false, message: "E-Mail konnte nicht gesendet werden." };
+      }
+    }),
+
+  /**
+   * Step 2: Partner confirms the reset code and sets a new password.
+   */
+  portalConfirmPasswordReset: publicProcedure
+    .input(z.object({
+      partnerNumber: z.string().min(1),
+      code: z.string().length(6),
+      newPassword: z.string().min(6),
+    }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      const [partner] = await db.select().from(partners)
+        .where(and(
+          eq(partners.partnerNumber, input.partnerNumber),
+          eq(partners.isActive, 1)
+        ))
+        .limit(1);
+
+      if (!partner) {
+        throw new Error("Ungueltiger Reset-Code");
+      }
+
+      // Extract reset code from notes
+      const notes = partner.notes || "";
+      const resetMatch = notes.match(/__RESET_CODE__:(\d{6}):([^|]+)/);
+      
+      if (!resetMatch) {
+        throw new Error("Kein Reset-Code vorhanden. Bitte fordere einen neuen an.");
+      }
+
+      const storedCode = resetMatch[1];
+      const expiresAt = new Date(resetMatch[2]);
+
+      if (storedCode !== input.code) {
+        throw new Error("Ungueltiger Reset-Code");
+      }
+
+      if (new Date() > expiresAt) {
+        throw new Error("Reset-Code abgelaufen. Bitte fordere einen neuen an.");
+      }
+
+      // Code is valid – set new password
+      const hash = await bcrypt.hash(input.newPassword, 12);
+      
+      // Remove reset code from notes and update password
+      const cleanedNotes = notes.replace(/\|?__RESET_CODE__:[^|]*/g, "").replace(/^\|/, "");
+      
+      await db.update(partners).set({
+        passwordHash: hash,
+        notes: cleanedNotes || null,
+        updatedAt: new Date(),
+      }).where(eq(partners.id, partner.id));
+
+      console.log(`[Partners] Password reset confirmed for ${partner.partnerNumber}`);
+      return { success: true, message: "Passwort erfolgreich zurueckgesetzt. Du kannst dich jetzt einloggen." };
+    }),
+
+  // ─── Send Credentials Email (Admin) ─────────────────────────────
+  // Sends an email to the partner with portal link, partner number, and password
+  sendCredentials: adminProcedure
+    .input(z.object({
+      partnerId: z.number(),
+      password: z.string().min(6, "Passwort muss mindestens 6 Zeichen haben"),
+    }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      // Get partner data
+      const [partner] = await db.select().from(partners).where(eq(partners.id, input.partnerId));
+      if (!partner) throw new Error("Partner nicht gefunden");
+      if (!partner.email) throw new Error("Partner hat keine E-Mail-Adresse hinterlegt");
+
+      // Set the password first
+      const hash = await bcrypt.hash(input.password, 12);
+      await db.update(partners).set({
+        passwordHash: hash,
+        updatedAt: new Date(),
+      }).where(eq(partners.id, input.partnerId));
+
+      // Build the credentials email
+      const html = `
+<!DOCTYPE html>
+<html lang="de">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background-color:#0a0e17;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <div style="max-width:600px;margin:0 auto;padding:20px;">
+    
+    <!-- Header -->
+    <div style="background:linear-gradient(135deg,#0f172a,#1e293b);border-radius:12px 12px 0 0;padding:32px;text-align:center;border:1px solid #1e3a5f;border-bottom:none;">
+      <h1 style="color:#3b82f6;margin:0;font-size:28px;font-weight:700;letter-spacing:2px;">369 RESEARCH</h1>
+      <p style="color:#64748b;margin:8px 0 0;font-size:12px;letter-spacing:3px;text-transform:uppercase;">Partner Portal</p>
+    </div>
+
+    <!-- Content -->
+    <div style="background:#111827;padding:32px;border:1px solid #1e3a5f;border-top:none;">
+      <h2 style="font-size:20px;color:#ffffff;margin:0 0 8px;">Willkommen im Partner-Programm!</h2>
+      <p style="font-size:14px;color:#94a3b8;margin:0 0 24px;line-height:1.6;">Hallo ${partner.name},<br><br>hier sind deine Zugangsdaten f\u00fcr das 369 Research Partner Portal:</p>
+
+      <!-- Credentials Box -->
+      <div style="background:#0a0f1a;border:1px solid #1e3a5f;border-radius:12px;padding:24px;margin-bottom:24px;">
+        <table style="width:100%;border-collapse:collapse;">
+          <tr>
+            <td style="padding:12px 0;color:#64748b;font-size:13px;text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid #1c2433;">Portal-Link</td>
+            <td style="padding:12px 0;text-align:right;border-bottom:1px solid #1c2433;"><a href="https://www.369research.eu/partner" style="color:#3b82f6;font-weight:600;text-decoration:none;">369research.eu/partner</a></td>
+          </tr>
+          <tr>
+            <td style="padding:12px 0;color:#64748b;font-size:13px;text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid #1c2433;">Partnernummer</td>
+            <td style="padding:12px 0;text-align:right;color:#3b82f6;font-weight:700;font-family:monospace;font-size:16px;border-bottom:1px solid #1c2433;">${partner.partnerNumber}</td>
+          </tr>
+          <tr>
+            <td style="padding:12px 0;color:#64748b;font-size:13px;text-transform:uppercase;letter-spacing:1px;">Passwort</td>
+            <td style="padding:12px 0;text-align:right;color:#ffffff;font-weight:700;font-family:monospace;font-size:16px;">${input.password}</td>
+          </tr>
+        </table>
+      </div>
+
+      <!-- Partner Info -->
+      <div style="background:#0a0f1a;border:1px solid #1e3a5f;border-radius:12px;padding:24px;margin-bottom:24px;">
+        <h3 style="font-size:14px;color:#64748b;margin:0 0 16px;text-transform:uppercase;letter-spacing:1px;">Deine Partner-Details</h3>
+        <table style="width:100%;border-collapse:collapse;">
+          <tr>
+            <td style="padding:8px 0;color:#94a3b8;font-size:14px;">Dein Rabattcode</td>
+            <td style="padding:8px 0;text-align:right;color:#10b981;font-weight:700;font-family:monospace;font-size:16px;">${partner.code}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;color:#94a3b8;font-size:14px;">Kundenrabatt</td>
+            <td style="padding:8px 0;text-align:right;color:#ffffff;font-weight:600;">${partner.customerDiscountPercent}%</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;color:#94a3b8;font-size:14px;">Deine Provision</td>
+            <td style="padding:8px 0;text-align:right;color:#ffffff;font-weight:600;">${partner.commissionPercent}%</td>
+          </tr>
+        </table>
+      </div>
+
+      <!-- CTA Button -->
+      <div style="text-align:center;margin:24px 0;">
+        <a href="https://www.369research.eu/partner" style="background:linear-gradient(135deg,#2563eb,#1d4ed8);color:#ffffff;padding:14px 32px;border-radius:10px;text-decoration:none;font-weight:600;font-size:16px;display:inline-block;">Zum Partner Portal</a>
+      </div>
+
+      <p style="font-size:13px;color:#475569;margin:24px 0 0;line-height:1.6;text-align:center;">Bitte \u00e4ndere dein Passwort nach dem ersten Login \u00fcber die Einstellungen im Portal.</p>
+    </div>
+
+    <!-- Footer -->
+    <div style="background:#0d1117;border:1px solid #1e3a5f;border-top:none;border-radius:0 0 12px 12px;padding:20px;text-align:center;">
+      <p style="margin:0;font-size:12px;color:#475569;">369 Research \u00b7 Precision. Purity. Performance.</p>
+      <p style="margin:4px 0 0;font-size:12px;color:#475569;">Bei Fragen: WhatsApp +4915510063537</p>
+    </div>
+  </div>
+</body>
+</html>`;
+
+      // Send email via Resend
+      const apiKey = process.env.RESEND_API_KEY;
+      if (!apiKey) throw new Error("E-Mail-Service nicht konfiguriert (RESEND_API_KEY fehlt)");
+
+      const response = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          from: "369 Research <noreply@mail.369research.eu>",
+          to: [partner.email],
+          subject: `Deine Zugangsdaten – 369 Research Partner Portal`,
+          html,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.warn(`[Partners] Failed to send credentials email (${response.status}):`, errorText);
+        throw new Error(`E-Mail konnte nicht gesendet werden: ${response.status}`);
+      }
+
+      const result = await response.json();
+      console.log(`[Partners] Credentials email sent to ${partner.email}, id: ${result.id}`);
+      return { success: true, message: `Zugangsdaten an ${partner.email} gesendet` };
+    }),
+
+  // ─── ADMIN: Recalculate commissions for all partners ────────────────────────
+  recalcCommissions: adminProcedure
+    .mutation(async () => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+      const { inArray } = await import("drizzle-orm");
+      const paidStatuses = ["bezahlt", "gepackt", "versendet", "zugestellt"] as const;
+
+      const allPartners = await db.select().from(partners);
+      let totalFixed = 0;
+      const log: string[] = [];
+
+      for (const partner of allPartners) {
+        const commissionRate = parseFloat(partner.commissionPercent) / 100;
+
+        const partnerOrders = await db.select({
+          orderId: orders.orderId,
+          subtotal: orders.subtotal,
+          discount: orders.discount,
+          partnerCommission: orders.partnerCommission,
+          status: orders.status,
+        }).from(orders)
+          .where(and(
+            eq(orders.partnerCode, partner.code),
+            inArray(orders.status, paidStatuses)
+          ));
+
+        let partnerBalanceCorrection = 0;
+
+        for (const order of partnerOrders) {
+          const sub = parseFloat(order.subtotal || "0");
+          const disc = parseFloat(order.discount || "0");
+          const netto = Math.max(0, sub - disc);
+          const expectedCommission = Math.round(netto * commissionRate * 100) / 100;
+          const actualCommission = parseFloat(order.partnerCommission || "0");
+          const diff = Math.round((expectedCommission - actualCommission) * 100) / 100;
+
+          if (Math.abs(diff) >= 0.01) {
+            await db.update(orders).set({
+              partnerCommission: expectedCommission.toFixed(2),
+            }).where(eq(orders.orderId, order.orderId));
+
+            await db.insert(partnerTransactions).values({
+              partnerId: partner.id,
+              type: "provision",
+              amount: diff.toFixed(2),
+              balanceAfter: "0",
+              orderId: order.orderId,
+              customerName: "Korrektur",
+              description: `Provisions-Korrektur für Bestellung ${order.orderId}: ${actualCommission.toFixed(2)} → ${expectedCommission.toFixed(2)} EUR`,
+            });
+
+            partnerBalanceCorrection += diff;
+            totalFixed++;
+            log.push(`${partner.code} | ${order.orderId}: ${actualCommission.toFixed(2)} → ${expectedCommission.toFixed(2)} (diff: +${diff.toFixed(2)})`);
+          }
+        }
+
+        if (Math.abs(partnerBalanceCorrection) >= 0.01) {
+          const currentBalance = parseFloat(partner.creditBalance || "0");
+          const newBalance = Math.round((currentBalance + partnerBalanceCorrection) * 100) / 100;
+          await db.update(partners).set({
+            creditBalance: newBalance.toFixed(2),
+            updatedAt: new Date(),
+          }).where(eq(partners.id, partner.id));
+          log.push(`${partner.code} | Guthaben: ${currentBalance.toFixed(2)} → ${newBalance.toFixed(2)} EUR`);
+        }
+      }
+
+      console.log(`[Partners] recalcCommissions: fixed ${totalFixed} orders`);
+      return { success: true, fixed: totalFixed, log };
+    }),
+});
