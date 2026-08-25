@@ -1033,7 +1033,10 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
       if (!article.shopProductId || !isSubstitutionEligible(article.category)) continue;
 
       for (const variant of getPublicShopVariants(article)) {
-        if (variant.hidden || variant.stock > 0) continue;
+        // Ein bestandsbedingt ausgeblendetes Ziel darf durch Smart Sub wieder
+        // kaufbar werden, aber ausschließlich wenn der Resolver eine exakte
+        // Kombination aus real vorhandenen kleineren Lagerartikeln findet.
+        if (variant.stock > 0) continue;
         const dosageMg = extractDosageMg(variant.dosage);
         if (dosageMg === null) continue;
 
