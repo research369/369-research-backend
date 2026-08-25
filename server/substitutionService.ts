@@ -169,32 +169,51 @@ export function resolveSubstitution(
     return { possible: false, components: [], internalNote: "" };
   }
 
-  // Greedy-Algorithmus: Fülle totalMgNeeded auf
-  const components: SubstitutionComponent[] = [];
-  let remainingMg = totalMgNeeded;
+  // Exakte Kombination suchen. Der frühere Greedy-Ansatz konnte eine
+  // vorhandene Lösung übersehen (z. B. 30 mg: 20 mg gewählt, 10 mg fehlt,
+  // obwohl 2 × 15 mg verfügbar sind). Größere Varianten werden weiterhin
+  // bevorzugt, aber nur wenn der verbleibende Bedarf exakt aufgeht.
+  const memo = new Set<string>();
+  const findExactPlan = (
+    candidateIndex: number,
+    remainingMg: number,
+  ): Array<{ candidate: typeof candidates[number]; quantity: number }> | null => {
+    if (Math.abs(remainingMg) < 1e-9) return [];
+    if (candidateIndex >= candidates.length || remainingMg < 0) return null;
 
-  for (const candidate of candidates) {
-    if (remainingMg <= 0) break;
-    // Wie viele Einheiten dieser Variante können wir nehmen?
-    const maxFromStock = candidate.stock;
-    const maxFromNeed = Math.floor(remainingMg / candidate.dosageMg);
-    const useQty = Math.min(maxFromStock, maxFromNeed);
-    if (useQty > 0) {
-      components.push({
-        articleId: candidate.id,
-        articleName: candidate.name,
-        sku: candidate.sku,
-        quantity: useQty,
-        dosageMg: candidate.dosageMg,
-      });
-      remainingMg -= useQty * candidate.dosageMg;
+    const memoKey = `${candidateIndex}|${remainingMg.toFixed(6)}`;
+    if (memo.has(memoKey)) return null;
+
+    const candidate = candidates[candidateIndex];
+    const maxQuantity = Math.min(
+      candidate.stock,
+      Math.floor((remainingMg + 1e-9) / candidate.dosageMg),
+    );
+
+    for (let quantity = maxQuantity; quantity >= 0; quantity--) {
+      const nextRemaining = remainingMg - quantity * candidate.dosageMg;
+      const rest = findExactPlan(candidateIndex + 1, nextRemaining);
+      if (rest) {
+        return quantity > 0 ? [{ candidate, quantity }, ...rest] : rest;
+      }
     }
-  }
 
-  // Nur möglich wenn exakt aufgefüllt (kein Rest)
-  if (remainingMg !== 0) {
+    memo.add(memoKey);
+    return null;
+  };
+
+  const plan = findExactPlan(0, totalMgNeeded);
+  if (!plan) {
     return { possible: false, components: [], internalNote: "" };
   }
+
+  const components: SubstitutionComponent[] = plan.map(({ candidate, quantity }) => ({
+    articleId: candidate.id,
+    articleName: candidate.name,
+    sku: candidate.sku,
+    quantity,
+    dosageMg: candidate.dosageMg,
+  }));
 
   // Interne Notiz für WaWi
   const componentStr = components
