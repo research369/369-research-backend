@@ -34,6 +34,9 @@ type ManualArticleVariant = {
   sku: string | null;
   stock: number | null;
   isActive: boolean;
+  /** Reale Lagerzeile, die für Bestandsbuchungen und Historie verwendet wird. */
+  inventoryArticleId: number;
+  inventoryArticleActive: boolean;
   /** Preis wurde aus dem zugehörigen Variantenartikel bzw. Hauptartikel ergänzt. */
   priceFallbackUsed?: boolean;
 };
@@ -57,7 +60,7 @@ function extractArticleDosage(name: string): string | null {
  */
 function getManualArticleVariants(
   article: { id: number; name: string; sku: string; sellingPrice: string | null; stock: number; shopProductId: string | null; variants: unknown },
-  allArticles: Array<{ id: number; name: string; sku: string; sellingPrice: string | null; stock: number; shopProductId: string | null }>,
+  allArticles: Array<{ id: number; name: string; sku: string; sellingPrice: string | null; stock: number; shopProductId: string | null; isActive: number }>,
 ): ManualArticleVariant[] {
   const configured = Array.isArray(article.variants) ? article.variants : [];
   const sameProductArticles = article.shopProductId
@@ -82,9 +85,20 @@ function getManualArticleVariants(
     if (!dosageKey || seen.has(dosageKey)) return [];
     seen.add(dosageKey);
 
+    const configuredSku = typeof variant.sku === "string" && variant.sku.trim() ? variant.sku.trim() : null;
     const matchingArticle = article.shopProductId
-      ? allArticles.find((candidate) => candidate.shopProductId === article.shopProductId
-        && (extractArticleDosage(candidate.name) ?? extractArticleDosage(candidate.sku)) === dosageKey)
+      ? allArticles
+        .filter((candidate) => candidate.shopProductId === article.shopProductId
+          && (extractArticleDosage(candidate.name) ?? extractArticleDosage(candidate.sku)) === dosageKey)
+        .sort((a, b) => {
+          // Eine aktive Lagerzeile ist für Checkout und Smart Sub maßgeblich.
+          // Bei mehreren Treffern ist die explizit konfigurierte SKU eindeutig.
+          const activeDifference = Number(b.isActive === 1) - Number(a.isActive === 1);
+          if (activeDifference !== 0) return activeDifference;
+          const aSkuMatch = configuredSku && a.sku.toLowerCase() === configuredSku.toLowerCase() ? 1 : 0;
+          const bSkuMatch = configuredSku && b.sku.toLowerCase() === configuredSku.toLowerCase() ? 1 : 0;
+          return bSkuMatch - aSkuMatch;
+        })[0]
       : undefined;
     const configuredPrice = Number(variant.price);
     const candidatePrice = Number(matchingArticle?.sellingPrice);
@@ -97,14 +111,17 @@ function getManualArticleVariants(
     const allowBasePriceFallback = configured.length <= 1 && variantSources.length <= 1;
     const hasBasePrice = allowBasePriceFallback && Number.isFinite(basePrice) && basePrice > 0;
     const rawStock = Number(variant.stock);
-    const configuredSku = typeof variant.sku === "string" && variant.sku.trim() ? variant.sku.trim() : null;
 
     return [{
       label: typeof labelSource === "string" ? labelSource.trim().replace(/(\d)\s*(mg|iu|ml|mcg)\b/gi, "$1 $2") : dosageKey,
       price: hasConfiguredPrice ? configuredPrice : hasCandidatePrice ? candidatePrice : hasBasePrice ? basePrice : null,
       sku: configuredSku ?? matchingArticle?.sku ?? null,
-      stock: Number.isFinite(rawStock) ? rawStock : matchingArticle?.stock ?? article.stock,
+      // Der operative Artikelbestand hat Vorrang vor einer möglicherweise
+      // veralteten Kopie im variants-JSON.
+      stock: matchingArticle?.stock ?? (Number.isFinite(rawStock) ? rawStock : article.stock),
       isActive: variant.isActive !== false && variant.isActive !== 0,
+      inventoryArticleId: matchingArticle?.id ?? article.id,
+      inventoryArticleActive: matchingArticle ? matchingArticle.isActive === 1 : true,
       ...(!hasConfiguredPrice ? { priceFallbackUsed: true } : {}),
     }];
   });
