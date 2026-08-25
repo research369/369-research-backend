@@ -735,7 +735,8 @@ export const partnerRouter = router({
       };
     }),
 
-  // Check partner credit balance (public – called from checkout when partner number is entered)
+  // Public existence check for the two-step checkout login. Financial and address data
+  // are deliberately returned only by portalLogin after password verification.
   checkCredit: publicProcedure
     .input(z.object({ partnerNumber: z.string() }))
     .query(async ({ input }) => {
@@ -750,22 +751,10 @@ export const partnerRouter = router({
         .limit(1);
 
       if (!partner) {
-        return { valid: false, creditBalance: 0, partnerName: null, discountPercent: 0 };
+        return { valid: false };
       }
 
-      return {
-        valid: true,
-        creditBalance: parseFloat(partner.creditBalance),
-        partnerName: partner.name,
-        discountPercent: parseFloat(partner.customerDiscountPercent),
-        address: {
-          street: partner.street || "",
-          houseNumber: partner.houseNumber || "",
-          zip: partner.zip || "",
-          city: partner.city || "",
-          country: partner.country || "",
-        },
-      };
+      return { valid: true };
     }),
 
   // ─── INTERNAL: payment-bound commission booking ────────────────
@@ -845,6 +834,14 @@ export const partnerRouter = router({
           partnerNumber: partner.partnerNumber,
           commissionType: partner.commissionType,
           creditBalance: parseFloat(partner.creditBalance),
+          customerDiscountPercent: parseFloat(partner.customerDiscountPercent),
+          address: {
+            street: partner.street || "",
+            houseNumber: partner.houseNumber || "",
+            zip: partner.zip || "",
+            city: partner.city || "",
+            country: partner.country || "",
+          },
         },
       };
     }),

@@ -13,13 +13,14 @@ import { getIncomingPayments, matchPaymentToOrder, intelligentMatch, type MatchR
 import { sendOrderConfirmationEmail, sendShippingNotificationEmail, sendAdminOrderNotification, sendPackingNotificationEmail } from "./emailService.js";
 import { isSubstitutionEnabled, resolveSubstitution, extractDosageMg, isSubstitutionEligible } from "./substitutionService.js";
 // KWK-Modul: statischer Import (sicherer als dynamischer Import)
-import { isKwkEnabled, bookPendingCredit, detectFraudFlags, hashAddress, calculateKwkCommission, redeemCredit as kwkRedeemCredit } from "./kwkService.js";
+import { isKwkEnabled, bookPendingCredit, detectFraudFlags, hashAddress, calculateKwkCommission, calculateKwkCommissionBase } from "./kwkService.js";
 import { partners } from "../drizzle/schema.js";
 import { sql } from "drizzle-orm";
 import { queueCustomerDuplicateReview } from "./customerIntegrityService.js";
 import { NASAL_DIY_SET_COMPONENTS, isNasalDiySetEligible } from "./nasalDiySetConfig.js";
 import { persistAddressValidation, validateGermanAddress } from "./addressValidationService.js";
 import { bookPaidPartnerCommission, redeemPartnerCreditForOrder } from "./partnerCreditService.js";
+import { resolveQrAttribution } from "./qrCampaignService.js";
 
 // Zod schemas
 const createOrderSchema = z.object({
@@ -74,6 +75,8 @@ const createOrderSchema = z.object({
   kwkDiscount: z.number().optional(),              // 10% Rabatt auf Produkte
   kwkCreditUsed: z.number().optional(),            // Eingelöstes KWK-Guthaben
   kwkCreditKwkId: z.number().optional(),           // KWK-Account-ID für Guthaben-Einlösung
+  // Opaque first-party QR attribution token (30 days). No campaign IDs are trusted from the browser.
+  qrAttributionToken: z.string().length(48).regex(/^[a-f0-9]+$/).optional(),
   // Ausschließlich für einen angemeldeten Master-Admin im manuellen WaWi-Verkauf.
   // Der Shop erhält hierfür nie einen gültigen Admin-Token.
   stockOverride: z.object({
@@ -101,6 +104,22 @@ export const orderRouter = router({
         .mutation(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
+
+      const qrAttribution = await resolveQrAttribution(input.qrAttributionToken);
+
+      const roundMoney = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
+      const lineSubtotal = roundMoney(input.items.reduce((sum, item) => sum + item.price * item.quantity, 0));
+      if (Math.abs(lineSubtotal - roundMoney(input.subtotal)) > 0.02) {
+        throw new Error("Bestellsumme stimmt nicht mit den Artikelpositionen überein");
+      }
+      const expectedTotal = roundMoney(input.subtotal - input.discount + input.shipping);
+      if ([input.subtotal, input.discount, input.shipping, input.total].some((value) => !Number.isFinite(value) || value < 0)
+          || input.discount > input.subtotal + 0.02
+          || (input.kwkCreditUsed || 0) < 0
+          || (input.kwkCreditUsed || 0) > input.discount + 0.02
+          || Math.abs(expectedTotal - roundMoney(input.total)) > 0.02) {
+        throw new Error("Ungültige Rabatt-, Versand- oder Gesamtberechnung");
+      }
 
       // Bestandsoverride ist strikt an einen authentifizierten Admin gebunden.
       // Eine Shop-Bestellung besitzt keinen WaWi-Admin-Token und kann diese Prüfung nie umgehen.
@@ -468,6 +487,15 @@ export const orderRouter = router({
         partnerDiscount: partnerDiscountAmount.toFixed(2),
         partnerCommission: partnerCommissionAmount.toFixed(2),
         creditUsed: creditUsed.toFixed(2),
+        // Set by the authenticated KWK ledger service only after successful redemption.
+        kwkCreditUsed: "0.00",
+        kwkCreditRequested: (input.kwkCreditUsed || 0).toFixed(2),
+        qrCampaignId: qrAttribution?.campaignId ?? null,
+        qrAttributionToken: qrAttribution?.attributionToken ?? null,
+        qrCode: qrAttribution?.shortCode ?? null,
+        qrCampaignName: qrAttribution?.campaignName ?? null,
+        qrCampaignMedium: qrAttribution?.medium ?? null,
+        qrCampaignLocation: qrAttribution?.locationPartner ?? null,
         // Substitutions-Notiz intern speichern (nur für WaWi sichtbar)
         internalNote: [
           input.internalNote,
@@ -632,7 +660,12 @@ export const orderRouter = router({
                 // Referral-Datensatz erstellen (dauerhaft, revisionssicher)
                 // UNIQUE auf order_id – Idempotenz durch DB-Constraint
                 try {
-                  const commissionBase = Math.max(0, (input.subtotal || 0) - (input.discount || 0) - (input.kwkDiscount || 0));
+                  const commissionBase = calculateKwkCommissionBase({
+                    subtotal: input.subtotal || 0,
+                    totalDiscount: input.discount || 0,
+                    partnerCreditUsed: input.creditUsed || 0,
+                    kwkCreditUsed: input.kwkCreditUsed || 0,
+                  });
                   const commissionAmount = calculateKwkCommission(commissionBase);
                   await pool2.query(
                     `INSERT INTO kwk_referrals
@@ -661,14 +694,6 @@ export const orderRouter = router({
                   // Idempotenz: ON CONFLICT DO NOTHING – kein Fehler bei Duplikat
                   if (!refErr?.message?.includes('duplicate')) {
                     console.warn('[KWK] Referral insert failed (non-fatal):', refErr);
-                  }
-                }
-                // KWK-Guthaben einlösen wenn vorhanden
-                if (input.kwkCreditUsed && input.kwkCreditUsed > 0 && input.kwkCreditKwkId) {
-                  try {
-                    await kwkRedeemCredit(input.kwkCreditKwkId, orderId, input.kwkCreditUsed);
-                  } catch (redeemErr) {
-                    console.warn('[KWK] Credit redemption failed (non-fatal):', redeemErr);
                   }
                 }
               }
