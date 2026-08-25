@@ -287,7 +287,9 @@ export const orderRouter = router({
             if (!dosageNorm) return true; // keine Dosage – alle Varianten
             const parenMatch = a.name.match(/\(([^)]+)\)\s*$/);
             const noParenMatch = a.name.match(/\b(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu))\s*$/i);
-            const articleDosage = parenMatch ? parenMatch[1].trim().toLowerCase() : noParenMatch ? noParenMatch[1].trim().toLowerCase() : '';
+            const nameDosage = parenMatch ? parenMatch[1].trim().toLowerCase() : noParenMatch ? noParenMatch[1].trim().toLowerCase() : '';
+            const skuDosage = extractDosageMg(a.sku);
+            const articleDosage = nameDosage || (skuDosage !== null ? String(skuDosage) + ' mg' : '');
             return articleDosage === dosageNorm;
           });
         }
@@ -300,7 +302,9 @@ export const orderRouter = router({
           if (!dosageNorm) return true;
           const parenMatch = a.name.match(/\(([^)]+)\)\s*$/);
           const noParenMatch = a.name.match(/\b(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu))\s*$/i);
-          const articleDosage = parenMatch ? parenMatch[1].trim().toLowerCase() : noParenMatch ? noParenMatch[1].trim().toLowerCase() : '';
+          const nameDosage = parenMatch ? parenMatch[1].trim().toLowerCase() : noParenMatch ? noParenMatch[1].trim().toLowerCase() : '';
+          const skuDosage = extractDosageMg(a.sku);
+          const articleDosage = nameDosage || (skuDosage !== null ? String(skuDosage) + ' mg' : '');
           return articleDosage === dosageNorm;
         });
       };
