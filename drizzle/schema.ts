@@ -461,6 +461,17 @@ export const orders = pgTable("orders", {
   partnerDiscount: decimal("partner_discount", { precision: 10, scale: 2 }).default("0"),
   partnerCommission: decimal("partner_commission", { precision: 10, scale: 2 }).default("0"),
   creditUsed: decimal("credit_used", { precision: 10, scale: 2 }).default("0"),
+  kwkCreditUsed: decimal("kwk_credit_used", { precision: 10, scale: 2 }).default("0"),
+  kwkCreditRequested: decimal("kwk_credit_requested", { precision: 10, scale: 2 }).default("0"),
+
+  // First-party marketing QR attribution. Product/serial QR codes under `/i/*`
+  // use a separate namespace and are never written into these campaign fields.
+  qrCampaignId: integer("qr_campaign_id"),
+  qrAttributionToken: varchar("qr_attribution_token", { length: 64 }),
+  qrCode: varchar("qr_code", { length: 100 }),
+  qrCampaignName: varchar("qr_campaign_name", { length: 160 }),
+  qrCampaignMedium: varchar("qr_campaign_medium", { length: 100 }),
+  qrCampaignLocation: varchar("qr_campaign_location", { length: 200 }),
 
   // Bunq payment matching
   bunqPaymentId: varchar("bunq_payment_id", { length: 100 }),
@@ -483,6 +494,8 @@ export const orders = pgTable("orders", {
   orderDateIdx: index("orders_order_date_idx").on(t.orderDate),
   customerIdIdx: index("orders_customer_id_idx").on(t.customerId),
   emailIdx: index("orders_email_idx").on(t.email),
+  qrCampaignIdx: index("orders_qr_campaign_idx").on(t.qrCampaignId, t.orderDate),
+  qrAttributionIdx: index("orders_qr_attribution_idx").on(t.qrAttributionToken),
 }));
 
 export type Order = typeof orders.$inferSelect;
@@ -1329,4 +1342,3 @@ export const bundleItems = pgTable('bundle_items', {
 });
 export type BundleItem = typeof bundleItems.$inferSelect;
 export type InsertBundleItem = typeof bundleItems.$inferInsert;
-
