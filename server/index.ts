@@ -28,6 +28,8 @@ import { ensureCommunicationTemplateSchema } from "./communicationTemplateSchema
 import { ensureNasalDiySetSchema } from "./nasalDiySetSchema.js";
 import { ensureAddressValidationSchema } from "./addressValidationSchema.js";
 import { ensureCustomerDossierSchema } from "./customerDossierSchema.js";
+import { ensureQrCampaignSchema } from "./qrCampaignSchema.js";
+import { qrRedirectRouter } from "./qrRedirectRouter.js";
 
 const app = express();
 
@@ -58,6 +60,10 @@ app.use(express.json({ limit: "50mb" }));
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString(), version: "1.2.0-kwk", fix: "paid-status-filter" });
 });
+
+// First-party marketing QR redirects. Only `/r/*` is mounted here; `/i/*` remains
+// reserved for the prepared individual product/serial URLs.
+app.use(qrRedirectRouter);
 
 // Manueller Backup-Trigger (gesichert mit WAWI_INTERNAL_KEY)
 app.post("/api/backup/trigger", async (req: any, res: any) => {
@@ -232,6 +238,13 @@ async function start() {
     await ensureCustomerDossierSchema();
   } catch (err) {
     console.warn("[Server] Customer dossier schema migration failed:", err);
+  }
+
+  // Additive first-party QR campaign and order-attribution schema.
+  try {
+    await ensureQrCampaignSchema();
+  } catch (err) {
+    console.warn("[Server] QR campaign schema migration failed:", err);
   }
 
   // Seed admin user on first start
