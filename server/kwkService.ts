@@ -170,6 +170,11 @@ export async function bookPendingCredit(
   try {
     await client.query("BEGIN");
 
+    // Serialisiert parallele Requests derselben Bestellung. Der bisherige
+    // SELECT-vor-INSERT-Check allein war bei zwei gleichzeitigen Requests
+    // nicht ausreichend.
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`kwk-pending:${orderId}`]);
+
     // Idempotenz-Check
     const existing = await client.query(
       "SELECT id FROM kwk_ledger WHERE order_id = $1 AND type = 'pending_credit' LIMIT 1",
@@ -212,11 +217,15 @@ export async function releaseCredit(orderId: string): Promise<void> {
   try {
     await client.query("BEGIN");
 
+    // Status-Webhooks und manuelle Klicks können gleichzeitig eintreffen.
+    // Pro Bestellung darf Guthaben nur einmal freigegeben werden.
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`kwk-release:${orderId}`]);
+
     // Pending-Eintrag finden
     const pendingResult = await client.query(
       `SELECT id, kwk_id, amount FROM kwk_ledger
        WHERE order_id = $1 AND type = 'pending_credit' AND status = 'pending'
-       LIMIT 1`,
+      LIMIT 1 FOR UPDATE`,
       [orderId]
     );
     if (pendingResult.rows.length === 0) {
@@ -236,6 +245,11 @@ export async function releaseCredit(orderId: string): Promise<void> {
       `INSERT INTO kwk_ledger (kwk_id, order_id, amount, type, status, note, created_by)
        VALUES ($1, $2, $3, 'credit_released', 'confirmed', $4, 'system')`,
       [kwkId, orderId, amount, `Guthaben freigegeben für Bestellung ${orderId}`]
+    );
+
+    await client.query(
+      "UPDATE kwk_referrals SET status='confirmed' WHERE order_id=$1 AND status='pending'",
+      [orderId]
     );
 
     // Cache synchronisieren
