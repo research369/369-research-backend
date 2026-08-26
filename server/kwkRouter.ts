@@ -170,6 +170,7 @@ export const kwkRouter = router({
 
       return {
         success: true,
+        id: account.id,
         token,
         kwkNumber: account.kwk_number,
         referralCode: account.referral_code,
@@ -291,7 +292,16 @@ export const kwkRouter = router({
       const balance = await computeBalanceFromLedger(kwkId);
 
       return {
-        ...account,
+        id: account.id,
+        kwkNumber: account.kwk_number,
+        referralCode: account.referral_code,
+        name: account.name,
+        email: account.email,
+        phone: account.phone,
+        company: account.company,
+        whatsapp: account.whatsapp,
+        status: account.status,
+        createdAt: account.created_at,
         referralLink: `${ENV.frontendUrl}/r/${account.referral_code}`,
         creditAvailable: balance.available,
         creditPending: balance.pending,
@@ -616,7 +626,7 @@ export const kwkRouter = router({
 
       // Prüfen ob E-Mail existiert (kein Fehler wenn nicht – Security)
       const { rows } = await pool.query(
-        "SELECT id, name FROM kwk_accounts WHERE email = $1 AND status != 'banned' LIMIT 1",
+        "SELECT id, name FROM kwk_accounts WHERE email = $1 AND status NOT IN ('gesperrt', 'deaktiviert') LIMIT 1",
         [input.email.toLowerCase()]
       );
 
