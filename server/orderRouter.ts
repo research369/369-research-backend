@@ -1010,8 +1010,9 @@ export const orderRouter = router({
         console.log(`[Partners] Zahlungsgebundene Gutschrift ${input.orderId}: ${creditResult.reason} (${creditResult.amount.toFixed(2)} €)`);
       }
 
-      // KWK-Guthaben freigeben wenn Bestellung final ist (versendet, zugestellt oder abgeholt)
-      if (["versendet", "zugestellt", "abgeholt"].includes(input.status)) {
+      // KWK-Guthaben ist wie Partnerguthaben strikt zahlungsgebunden.
+      // Wiederholte Zahlungsereignisse sind im KWK-Service idempotent.
+      if (input.status === "bezahlt") {
         try {
           const { releaseCredit } = await import('./kwkService.js');
           await releaseCredit(input.orderId);
