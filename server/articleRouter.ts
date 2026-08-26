@@ -26,6 +26,8 @@ type VariantSource = {
   stock?: unknown;
   isActive?: unknown;
   hidden?: unknown;
+  /** Optionale, persistierte Zuordnung zur tatsächlichen Lagerzeile. */
+  inventoryArticleId?: unknown;
 };
 
 type ManualArticleVariant = {
@@ -50,6 +52,16 @@ function extractArticleDosage(name: string): string | null {
   const parenthetical = name.match(/\(([^)]+)\)\s*$/);
   const trailing = name.match(/\b(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg))\s*$/i);
   return normalizeDosage(parenthetical?.[1] ?? trailing?.[1]);
+}
+
+/** Liest explizit konfigurierte operative Lagerartikel-IDs aus einer Variantenfamilie. */
+function getConfiguredInventoryArticleIds(variants: unknown): number[] {
+  if (!Array.isArray(variants)) return [];
+  return variants.flatMap((raw) => {
+    if (!raw || typeof raw !== "object") return [];
+    const id = Number((raw as VariantSource).inventoryArticleId);
+    return Number.isInteger(id) && id > 0 ? [id] : [];
+  });
 }
 
 /**
@@ -86,13 +98,21 @@ function getManualArticleVariants(
     seen.add(dosageKey);
 
     const configuredSku = typeof variant.sku === "string" && variant.sku.trim() ? variant.sku.trim() : null;
+    const parsedInventoryArticleId = Number(variant.inventoryArticleId);
+    const configuredInventoryArticleId = Number.isInteger(parsedInventoryArticleId) && parsedInventoryArticleId > 0
+      ? parsedInventoryArticleId
+      : null;
     const matchingArticle = article.shopProductId
       ? allArticles
         .filter((candidate) => candidate.shopProductId === article.shopProductId
-          && (extractArticleDosage(candidate.name) ?? extractArticleDosage(candidate.sku)) === dosageKey)
+          && (extractArticleDosage(candidate.name) ?? extractArticleDosage(candidate.sku)) === dosageKey
+          && (!configuredInventoryArticleId || candidate.id === configuredInventoryArticleId))
         .sort((a, b) => {
-          // Eine aktive Lagerzeile ist für Checkout und Smart Sub maßgeblich.
-          // Bei mehreren Treffern ist die explizit konfigurierte SKU eindeutig.
+          // Eine explizit gespeicherte Lagerartikel-ID ist immer führend.
+          const aIdMatch = configuredInventoryArticleId && a.id === configuredInventoryArticleId ? 1 : 0;
+          const bIdMatch = configuredInventoryArticleId && b.id === configuredInventoryArticleId ? 1 : 0;
+          if (aIdMatch !== bIdMatch) return bIdMatch - aIdMatch;
+          // Für alte, noch nicht migrierte Varianten bleibt die bisherige aktive Auswahl erhalten.
           const activeDifference = Number(b.isActive === 1) - Number(a.isActive === 1);
           if (activeDifference !== 0) return activeDifference;
           const aSkuMatch = configuredSku && a.sku.toLowerCase() === configuredSku.toLowerCase() ? 1 : 0;
@@ -132,13 +152,17 @@ function getManualArticleVariants(
  * canonical article's variants JSON (consolidated products). The public shop
  * must support both forms so mg selections never disappear after consolidation.
  */
-function getPublicShopVariants(article: {
-  id: number;
-  name: string;
-  stock: number;
-  sellingPrice: string | null;
-  variants: unknown;
-}): PublicShopVariant[] {
+function getPublicShopVariants(
+  article: {
+    id: number;
+    name: string;
+    stock: number;
+    sellingPrice: string | null;
+    shopProductId?: string | null;
+    variants: unknown;
+  },
+  inventoryArticles: Array<{ id: number; stock: number; shopProductId: string | null }> = [],
+): PublicShopVariant[] {
   const configured = Array.isArray(article.variants) ? article.variants : [];
   const fromConfigured = configured.flatMap((raw): PublicShopVariant[] => {
     if (!raw || typeof raw !== "object") return [];
@@ -149,8 +173,18 @@ function getPublicShopVariants(article: {
     const label = typeof variant.label === "string" && variant.label.trim() ? variant.label.trim() : dosage;
     const rawPrice = Number(variant.price);
     const price = Number.isFinite(rawPrice) ? rawPrice : Number(article.sellingPrice ?? 0);
+    const parsedInventoryArticleId = Number(variant.inventoryArticleId);
+    const configuredInventoryArticleId = Number.isInteger(parsedInventoryArticleId) && parsedInventoryArticleId > 0
+      ? parsedInventoryArticleId
+      : null;
+    // Eine explizite Lagerartikel-ID ist die einzige Quelle für den Variantenbestand.
+    // Bestehende Familien ohne solche Zuordnung behalten bewusst ihr bisheriges JSON-Verhalten.
+    const inventoryArticle = configuredInventoryArticleId && article.shopProductId
+      ? inventoryArticles.find(candidate => candidate.id === configuredInventoryArticleId
+        && candidate.shopProductId === article.shopProductId)
+      : undefined;
     const rawStock = Number(variant.stock);
-    const stock = Number.isFinite(rawStock) ? rawStock : article.stock;
+    const stock = inventoryArticle?.stock ?? (Number.isFinite(rawStock) ? rawStock : article.stock);
     const explicitlyHidden = variant.hidden === true || variant.isActive === false || variant.isActive === 0;
     return [{
       dosage,
@@ -158,7 +192,7 @@ function getPublicShopVariants(article: {
       price,
       stock,
       inStock: !explicitlyHidden && stock > 0,
-      articleId: article.id,
+      articleId: inventoryArticle?.id ?? article.id,
       ...(explicitlyHidden ? { hidden: true } : {}),
     }];
   });
@@ -251,7 +285,7 @@ export const articleRouter = router({
       );
 
       if (canonical) {
-        return getPublicShopVariants(canonical).map(variant => ({
+        return getPublicShopVariants(canonical, allArticles).map(variant => ({
           shopProductId: canonical.shopProductId!,
           inStock: variant.inStock,
           stock: variant.stock,
@@ -300,9 +334,15 @@ export const articleRouter = router({
       const allArticlesForVariants = await db.select().from(articles).orderBy(desc(articles.updatedAt));
       let allArticles = [...allArticlesForVariants];
 
-      // Filter active only
+      // Aktive Familien bleiben in der Hauptliste sichtbar. Operative Variantenlagerzeilen
+      // werden dort nicht doppelt angezeigt, sobald eine sichtbare Familie sie explizit referenziert.
+      // Sie bleiben aktiv für Wareneingang, Bestandsabzug und Smart Substitution.
+      const configuredInventoryArticleIds = new Set(
+        allArticlesForVariants.flatMap(article => getConfiguredInventoryArticleIds(article.variants)),
+      );
       if (input?.onlyActive !== false) {
-        allArticles = allArticles.filter(a => a.isActive === 1);
+        allArticles = allArticles.filter(a => a.isActive === 1
+          && !(a.shopVisible === 0 && configuredInventoryArticleIds.has(a.id)));
       }
 
       // Search
@@ -793,6 +833,13 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
     const allArticles = await db.select().from(articles)
       .where(and(eq(articles.shopVisible, 1), eq(articles.isActive, 1)))
       .orderBy(asc(articles.sortOrder), asc(articles.name));
+    // Sichtbare Produkte bleiben die einzige Shopquelle; explizit verknüpfte
+    // Variantenbestände werden jedoch immer an ihren echten Lagerzeilen gelesen.
+    const inventoryArticles = await db.select({
+      id: articles.id,
+      stock: articles.stock,
+      shopProductId: articles.shopProductId,
+    }).from(articles);
 
     // Group by shopProductId to aggregate variants
     const productMap = new Map<string, any>();
@@ -829,7 +876,7 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
         });
       }
       const product = productMap.get(pid)!;
-      product.variants.push(...getPublicShopVariants(a));
+      product.variants.push(...getPublicShopVariants(a, inventoryArticles));
       product.stock += a.stock;
       if (a.stock > 0) product.inStock = true;
     }
@@ -862,7 +909,7 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
       const first = visible[0];
       const byDosage = new Map<string, PublicShopVariant>();
       for (const article of visible) {
-        for (const variant of getPublicShopVariants(article)) {
+        for (const variant of getPublicShopVariants(article, allArticles)) {
           const key = variant.dosage.toLowerCase();
           const existing = byDosage.get(key);
           if (!existing || (!variant.hidden && variant.inStock && (!existing.inStock || existing.hidden))) {
