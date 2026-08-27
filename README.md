@@ -61,8 +61,6 @@ server/
   productAdminRouter.ts     ← Produkt-Admin (Academy-Integration)
   dhlService.ts             ← DHL API Service
   dhlExpressRouter.ts       ← DHL Express-Router
-  sendcloudService.ts       ← Sendcloud Service
-  sendcloudExpressRouter.ts ← Sendcloud Express-Router
   bunqService.ts            ← Bunq Zahlungsabgleich
   aiRouter.ts               ← KI-Funktionen (WaWi-Assist)
 drizzle/
@@ -129,7 +127,6 @@ Auto-Deploy bei jedem Push auf `main`.
 | `/api/auth/logout` | POST | Logout |
 | `/api/auth/me` | GET | Aktueller eingeloggter User |
 | `/api/trpc/*` | POST | Alle tRPC-Endpunkte (Shop + WaWi) |
-| `/api/shipping/sendcloud/*` | POST | Sendcloud Label-Erstellung |
 | `/api/dhl/*` | POST | DHL Label-Erstellung |
 
 ---

@@ -14,7 +14,6 @@ import { appRouter } from "./routers.js";
 import { getUserFromRequest, handleLogin, handleLogout, handleMe, seedAdminUser } from "./auth.js";
 import { getPool } from "./db.js";
 import type { Context } from "./trpc.js";
-import { sendcloudExpressRouter } from "./sendcloudExpressRouter.js";
 import { startBackupScheduler } from "./backupService.js";
 import { dhlExpressRouter } from "./dhlExpressRouter.js";
 import { trackingRouter } from "./trackingRouter.js";
@@ -151,9 +150,6 @@ app.use(
     },
   })
 );
-
-// ─── Sendcloud Express Router (additiv, kein Eingriff in bestehende Routes) ───
-app.use(sendcloudExpressRouter);
 
 // ─── DHL Express Router (additiv, Phase 1: DE national, Sandbox) ─────────────
 app.use(dhlExpressRouter);

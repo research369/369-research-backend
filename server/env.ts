@@ -27,13 +27,6 @@ export const ENV = {
   // Internal API key for WaWi frontend calls (no user login required)
   wawiInternalKey: process.env.WAWI_INTERNAL_KEY || "",
 
-  // Sendcloud API (shipping labels)
-  sendcloudPublicKey: process.env.SENDCLOUD_PUBLIC_KEY || "",
-  sendcloudSecretKey: process.env.SENDCLOUD_SECRET_KEY || "",
-  sendcloudWebhookSecret: process.env.SENDCLOUD_WEBHOOK_SECRET || "",
-  sendcloudShipmentIdDe: process.env.SENDCLOUD_SHIPMENT_ID_DE || "8",
-  sendcloudShipmentIdEu: process.env.SENDCLOUD_SHIPMENT_ID_EU || "8",
-
   // DHL Geschäftskunden API
   dhlApiKey:           process.env.DHL_API_KEY || "",
   // DHL Shipment Tracking API (separater Key für Sendungsverfolgung)

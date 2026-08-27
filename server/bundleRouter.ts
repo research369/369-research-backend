@@ -106,7 +106,7 @@ export const bundleRouter = router({
             const art = articleMap.get(item.articleSku) ?? null;
             // Enrich variants with inStock flag
             const enrichedVariants = art?.variants
-              ? (art.variants as Array<{ label?: string; name?: string; price: number; dosage?: string }>).map(v => {
+              ? (art.variants as Array<{ label?: string; name?: string; price: number; dosage?: string; sku?: string }>).map(v => {
                   // Existing product data contains both label- and name-based variants.
                   // A malformed variant must never make the complete bundle catalog unavailable.
                   const variantLabel = v.label || v.dosage || v.name || "";
@@ -114,7 +114,17 @@ export const bundleRouter = router({
                   const variantStock = variantSku ? globalStockMap.get(variantSku) : undefined;
                   // If no variant SKU is available, safely fall back to main article stock.
                   const inStock = variantStock !== undefined ? variantStock > 0 : (art.stock ?? 0) > 0;
-                  return { ...v, inStock, variantSku };
+                  // Alle Shop- und WaWi-Konsumenten erhalten denselben Variantenvertrag.
+                  // Dadurch bleiben die gewählte Dosierung und die operative Lager-SKU
+                  // beim Übergang Bundle → Warenkorb → Bestellung eindeutig erhalten.
+                  return {
+                    ...v,
+                    label: variantLabel,
+                    dosage: v.dosage || variantLabel,
+                    sku: v.sku || variantSku,
+                    variantSku,
+                    inStock,
+                  };
                 })
               : art?.variants;
             return {
