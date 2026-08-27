@@ -158,20 +158,17 @@ Railway deployed automatisch bei jedem Push auf den `main`-Branch des Backend-Re
 3. Nach ca. 2–3 Minuten ist das neue Backend live
 4. Verifizierung: `curl https://369-research-backend-production.up.railway.app/health`
 
-### 7.2 Frontend (Netlify – manuell via CLI)
+### 7.2 Frontend (Netlify – automatisch über GitHub)
 
-Das Frontend wird über die Netlify CLI deployed:
+Netlify liefert das Frontend ausschließlich aus dem `main`-Branch des Frontend-Repositories aus. Der verbindliche Prozess lautet:
 
-```bash
-# Im Frontend-Projektverzeichnis
-npm install
-npm run build
+1. Änderungen lokal prüfen, insbesondere mit `./node_modules/.bin/tsc --noEmit`.
+2. Nur geprüfte Änderungen in einen nachvollziehbaren Git-Commit aufnehmen.
+3. Commit nach GitHub `main` pushen: `git push origin main`.
+4. Netlify startet den Build automatisch und veröffentlicht den erzeugten Stand.
+5. Die öffentliche Shopseite und die geänderte Route nach dem Deploy prüfen.
 
-# Deploy auf Netlify
-NETLIFY_AUTH_TOKEN="$NETLIFY_AUTH_TOKEN" \
-NETLIFY_SITE_ID="$NETLIFY_SITE_ID" \
-npx netlify deploy --prod --dir=dist/public
-```
+**Verboten:** direkte ZIP-Uploads, manuelle Produktionsdeploys aus lokalen Build-Ordnern und Zugangstoken in Repository-Dateien.
 
 ### 7.3 DB-Migrationen
 
@@ -187,7 +184,7 @@ Da die direkte DB-Verbindung von außen wegen SSL-Problemen unzuverlässig ist, 
 
 Falls ein Deploy fehlschlägt oder die Seite nicht mehr funktioniert:
 
-1. **Frontend:** Im Netlify Dashboard unter "Deploys" auf ein früheres Deploy klicken und "Publish deploy" wählen. Alternativ den Branch `live-build-backup-2026-04-25` aus dem Frontend-Repo herunterladen und den Inhalt von `dist/public/` manuell auf Netlify deployen.
+1. **Frontend:** Einen zuvor geprüften GitHub-Commit über den regulären Branch-/Deployprozess wiederherstellen oder im Netlify-Dashboard einen bereits aus GitHub erzeugten früheren Deploy veröffentlichen. Keine ZIP-Uploads oder lokalen Produktionsdeploys verwenden.
 
 2. **Backend:** Im Railway Dashboard unter "Deployments" auf ein früheres Deployment klicken und "Rollback" wählen.
 

@@ -167,6 +167,8 @@ Nach einem Deploy müssen mindestens diese Punkte geprüft werden:
 
 ## 12. Migration vom 26. August 2026
 
-Die 3G-Familie wurde zuerst nach diesem Modell normalisiert. Die im Vollabgleich als kritisch bewerteten Familien werden anschließend mit demselben Datenvertrag überführt. Der einmalige Migrationscode ist nicht Teil der Laufzeit und wird nicht als Produktlogik verwendet; die dauerhafte Logik liegt ausschließlich im Router und im Datenmodell.
+Die 3G-Familie wurde zuerst nach diesem Modell normalisiert. Die im Vollabgleich als kritisch bewerteten Familien wurden anschließend mit demselben Datenvertrag überführt. Der einmalige Migrationscode ist nicht Teil der Laufzeit und wird nicht als Produktlogik verwendet; die dauerhafte Logik liegt ausschließlich im Router und im Datenmodell.
+
+Normalisiert wurden: `5-amino-1mq`, `aod-9604`, `bpc-157`, `cagrilinitide`, `cjc-1295-no-dac`, `dsip`, `epithalon`, `ghk-cu`, `ghrp-2`, `ghrp-6`, `glutathione`, `hcg`, `ipamorelin`, `mots-c`, `nad-plus`, `ss-31`, `tb-500`, `thymosin-alpha-1` und `tirzepatide`. Epithalon 50 mg ist dabei bewusst nicht kaufbar, weil es weiterhin keine eigene physische Lager-SKU gibt.
 
 Für künftige Wartung gilt dieses Dokument vor älteren Chatnotizen, temporären Auditdateien oder historisch mehrfach gespeicherten Varianten-JSONs.
