@@ -368,13 +368,33 @@ export const purchaseOrderRouter = router({
       const db = await getDb();
       if (!db) throw new Error("DB not available");
 
-      // Remove existing assignment for this order item (replace)
+      // Eine identische Wiederholung darf niemals erneut von der Charge abziehen.
+      // Bei einer bewussten Neuzuordnung wird die alte Menge zuerst zurückgebucht.
       if (input.orderItemId) {
-        await db.delete(orderItemBatches)
+        const [existingAssignment] = await db.select().from(orderItemBatches)
           .where(and(
             eq(orderItemBatches.orderId, input.orderId),
             eq(orderItemBatches.orderItemId, input.orderItemId)
-          ));
+          ))
+          .limit(1);
+        if (existingAssignment) {
+          const identical = existingAssignment.batchId === (input.batchId ?? null)
+            && existingAssignment.batchNumber === input.batchNumber
+            && existingAssignment.articleId === (input.articleId ?? null)
+            && existingAssignment.quantity === input.quantity;
+          if (identical) return { success: true, idempotent: true };
+          if (existingAssignment.batchId) {
+            await db.update(batches).set({
+              remainingQty: sql`${batches.remainingQty} + ${existingAssignment.quantity}`,
+              updatedAt: new Date(),
+            }).where(eq(batches.id, existingAssignment.batchId));
+          }
+          await db.delete(orderItemBatches)
+            .where(and(
+              eq(orderItemBatches.orderId, input.orderId),
+              eq(orderItemBatches.orderItemId, input.orderItemId)
+            ));
+        }
       }
 
       // Insert new assignment

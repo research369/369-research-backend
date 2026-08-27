@@ -94,6 +94,7 @@ const updateStatusSchema = z.object({
   status: z.enum(["offen", "bezahlt", "gepackt", "versendet", "zugestellt", "abgeholt", "storniert"]),
   trackingNumber: z.string().optional(),
   trackingCarrier: z.string().optional(),
+  sendShippingEmail: z.boolean().optional(),
   internalNote: z.string().optional(),
 });
 
@@ -1042,7 +1043,7 @@ export const orderRouter = router({
 
       // Send shipping notification email when status changes to "versendet"
       let emailResult: { sent: boolean; error?: string } = { sent: false };
-      if (input.status === "versendet") {
+      if (input.status === "versendet" && input.sendShippingEmail !== false) {
         try {
           const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1);
           if (order) {

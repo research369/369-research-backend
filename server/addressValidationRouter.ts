@@ -2,8 +2,8 @@ import { z } from "zod";
 import { desc, eq } from "drizzle-orm";
 import { router, adminProcedure, publicProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
-import { addressValidationRecords } from "../drizzle/schema.js";
-import { validateGermanAddress } from "./addressValidationService.js";
+import { addressValidationRecords, orders } from "../drizzle/schema.js";
+import { persistAddressValidation, validateGermanAddress } from "./addressValidationService.js";
 
 const addressSchema = z.object({
   street: z.string(),
@@ -32,6 +32,34 @@ function recordPreview(record: typeof addressValidationRecords.$inferSelect) {
 
 export const addressValidationRouter = router({
   validate: publicProcedure.input(addressSchema).query(async ({ input }) => validateGermanAddress(input)),
+
+  // Vor der automatischen DHL-Erstellung wird immer die tatsächlich gespeicherte
+  // Lieferadresse der Bestellung geprüft und als unveränderbarer Nachweis abgelegt.
+  validateForShipment: adminProcedure.input(z.object({ orderId: z.string().min(1) })).mutation(async ({ input, ctx }) => {
+    const db = await getDb();
+    if (!db) throw new Error("Datenbank für DHL-Adressprüfung nicht verfügbar");
+    const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1);
+    if (!order) throw new Error(`Bestellung ${input.orderId} nicht gefunden`);
+
+    const address = {
+      street: order.street || "",
+      houseNumber: order.houseNumber || "",
+      zip: order.zip || "",
+      city: order.city || "",
+      country: order.country || order.shippingCountry || "Deutschland",
+      deliveryType: ((order as any).deliveryType === "packstation" ? "packstation" : "home") as "home" | "packstation",
+    };
+    const result = await validateGermanAddress(address);
+    await persistAddressValidation({
+      input: address,
+      result,
+      context: "shipping_automation",
+      customerId: order.customerId ?? null,
+      orderId: order.orderId,
+      confirmedBy: (ctx as any).user?.username || "WaWi-Automation",
+    });
+    return result;
+  }),
 
   recordsForCustomer: adminProcedure.input(z.object({ customerId: z.number() })).query(async ({ input }) => {
     const db = await getDb();

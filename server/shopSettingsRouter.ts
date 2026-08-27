@@ -13,6 +13,7 @@ import { getDb } from "./db.js";
 import { shopSettings } from "../drizzle/schema.js";
 
 const WHATSAPP_CHANNEL_CONFIG_KEY = "whatsapp_channel_config";
+const PACKING_AUTOMATION_CONFIG_KEY = "packing_automation_config";
 
 const whatsappChannelConfigSchema = z.object({
   enabled: z.boolean(),
@@ -30,10 +31,32 @@ const whatsappChannelConfigSchema = z.object({
 
 type WhatsAppChannelConfig = z.infer<typeof whatsappChannelConfigSchema>;
 
+const packingAutomationConfigSchema = z.object({
+  enabled: z.boolean(),
+  requireServerConfirmedPackingPhoto: z.boolean(),
+  requireDhlAddressValidation: z.boolean(),
+  domesticProfile: z.enum(["DHL_DE_STANDARD", "DHL_DE_ECONOMY"]),
+  internationalProfile: z.enum(["DHL_EU"]),
+  packstationProfile: z.literal("DHL_DE_STANDARD"),
+  requestBrowserPrint: z.boolean(),
+  sendShippingEmail: z.boolean(),
+  openWhatsAppAfterLabel: z.boolean(),
+});
+type PackingAutomationConfig = z.infer<typeof packingAutomationConfigSchema>;
+
 function parseWhatsAppChannelConfig(value: string | undefined): WhatsAppChannelConfig | null {
   if (!value) return null;
   try {
     return whatsappChannelConfigSchema.parse(JSON.parse(value));
+  } catch {
+    return null;
+  }
+}
+
+function parsePackingAutomationConfig(value: string | undefined): PackingAutomationConfig | null {
+  if (!value) return null;
+  try {
+    return packingAutomationConfigSchema.parse(JSON.parse(value));
   } catch {
     return null;
   }
@@ -66,6 +89,35 @@ export const shopSettingsRouter = router({
           .where(eq(shopSettings.key, WHATSAPP_CHANNEL_CONFIG_KEY));
       } else {
         await db.insert(shopSettings).values({ key: WHATSAPP_CHANNEL_CONFIG_KEY, value: serialized });
+      }
+      return { success: true, config: input };
+    }),
+
+  // ─── ADMIN: configuration for the deterministic DHL packing workflow ─
+  getPackingAutomationConfig: adminProcedure
+    .query(async () => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+      const [setting] = await db.select().from(shopSettings)
+        .where(eq(shopSettings.key, PACKING_AUTOMATION_CONFIG_KEY))
+        .limit(1);
+      return { config: parsePackingAutomationConfig(setting?.value) };
+    }),
+
+  setPackingAutomationConfig: adminProcedure
+    .input(packingAutomationConfigSchema)
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+      const value = JSON.stringify(input);
+      const [existing] = await db.select().from(shopSettings)
+        .where(eq(shopSettings.key, PACKING_AUTOMATION_CONFIG_KEY))
+        .limit(1);
+      if (existing) {
+        await db.update(shopSettings).set({ value, updatedAt: new Date() })
+          .where(eq(shopSettings.key, PACKING_AUTOMATION_CONFIG_KEY));
+      } else {
+        await db.insert(shopSettings).values({ key: PACKING_AUTOMATION_CONFIG_KEY, value });
       }
       return { success: true, config: input };
     }),
