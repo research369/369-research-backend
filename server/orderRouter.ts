@@ -944,6 +944,11 @@ export const orderRouter = router({
         discount: parseFloat(o.discount),
         shipping: parseFloat(o.shipping),
         total: parseFloat(o.total),
+        partnerDiscount: parseFloat(o.partnerDiscount ?? "0"),
+        partnerCommission: parseFloat(o.partnerCommission ?? "0"),
+        creditUsed: parseFloat(o.creditUsed ?? "0"),
+        kwkCreditUsed: parseFloat(o.kwkCreditUsed ?? "0"),
+        kwkCreditRequested: parseFloat(o.kwkCreditRequested ?? "0"),
         items: items
           .filter(i => i.orderId === o.orderId)
           .map(i => ({
@@ -973,6 +978,11 @@ export const orderRouter = router({
         discount: parseFloat(order.discount),
         shipping: parseFloat(order.shipping),
         total: parseFloat(order.total),
+        partnerDiscount: parseFloat(order.partnerDiscount ?? "0"),
+        partnerCommission: parseFloat(order.partnerCommission ?? "0"),
+        creditUsed: parseFloat(order.creditUsed ?? "0"),
+        kwkCreditUsed: parseFloat(order.kwkCreditUsed ?? "0"),
+        kwkCreditRequested: parseFloat(order.kwkCreditRequested ?? "0"),
         items: items.map(i => ({ ...i, price: parseFloat(i.price) })),
       };
     }),
