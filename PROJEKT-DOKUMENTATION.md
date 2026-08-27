@@ -43,11 +43,8 @@ Das Frontend-Repo enthält zusätzlich einen Branch `live-build-backup-2026-04-2
 |---|---|
 | Backend-URL | https://369-research-backend-production.up.railway.app |
 | Health-Check | GET /health |
-| DB Host | autorack.proxy.rlwy.net |
-| DB Port | 58498 |
-| DB User | postgres |
-| DB Password | gNJuGiwYqHTdWjOQljMwIaUtBHClxJzZ |
-| DB Name | railway |
+| Datenbankzugang | Ausschließlich über die Railway-Umgebungsvariable `DATABASE_URL`; nie in Repository-Dateien speichern |
+| Datenbankname | Railway-Produktionsdatenbank |
 | SSL-Hinweis | SSL-Verbindung hat aktuell Probleme; direkte Verbindung von außen ist unzuverlässig. Empfohlen: SQL über Railway Dashboard oder über einen temporären API-Endpoint ausführen. |
 
 ### 3.2 Netlify (Frontend Hosting)
@@ -58,7 +55,7 @@ Das Frontend-Repo enthält zusätzlich einen Branch `live-build-backup-2026-04-2
 | Site-ID | b251d2a8-34cb-4eb1-9094-f08394b4d48b |
 | Site-Name | 369-research |
 | Live-URL | https://www.369research.eu |
-| Netlify PAT | nfp_htzvQtC2AB7dSA2NjsMYsQCJXT9EXE7se400 |
+| Netlify-Zugang | Ausschließlich über das Netlify-Dashboard bzw. sichere Umgebungsvariablen; keine Tokens im Repository |
 | Build-Command | npm run build |
 | Publish-Dir | dist/public |
 
@@ -66,15 +63,15 @@ Das Frontend-Repo enthält zusätzlich einen Branch `live-build-backup-2026-04-2
 
 | Bereich | Benutzername | Passwort | URL |
 |---|---|---|---|
-| WaWi Admin | admin | zcmgUSSF2336 | /wawi/login |
-| Test-Partner (Max Testpartner) | P-1001 | Test1234! | /partner |
+| WaWi Admin | Im sicheren Passwort-Manager verwaltet | Im sicheren Passwort-Manager verwaltet | /wawi/login |
+| Test-Partner | Nur für berechtigte Tests; Zugangsdaten im sicheren Passwort-Manager | Nur für berechtigte Tests; Zugangsdaten im sicheren Passwort-Manager | /partner |
 
 ### 3.4 Backend Environment Variables (Railway)
 
 | Variable | Wert / Beschreibung |
 |---|---|
-| JWT_SECRET | 369research-jwt-secret-2026-railway-production |
-| DATABASE_URL | postgresql://postgres:gNJuGiwYqHTdWjOQljMwIaUtBHClxJzZ@autorack.proxy.rlwy.net:58498/railway |
+| JWT_SECRET | Ausschließlich als geschützte Railway-Umgebungsvariable |
+| DATABASE_URL | Ausschließlich als geschützte Railway-Umgebungsvariable; niemals versionieren |
 
 ---
 
@@ -171,8 +168,8 @@ npm install
 npm run build
 
 # Deploy auf Netlify
-NETLIFY_AUTH_TOKEN=nfp_htzvQtC2AB7dSA2NjsMYsQCJXT9EXE7se400 \
-NETLIFY_SITE_ID=b251d2a8-34cb-4eb1-9094-f08394b4d48b \
+NETLIFY_AUTH_TOKEN="$NETLIFY_AUTH_TOKEN" \
+NETLIFY_SITE_ID="$NETLIFY_SITE_ID" \
 npx netlify deploy --prod --dir=dist/public
 ```
 
