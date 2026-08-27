@@ -1062,8 +1062,9 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
         if (article) {
           availability.set(pid, { inStock: article.stock > 0, stock: article.stock });
         } else {
-          // Not tracked in WaWi = assume available
-          availability.set(pid, { inStock: true, stock: 999 });
+          // Ohne aktive WaWi-Lagerzeile gibt es keinen verifizierbaren Bestand.
+          // Niemals eine künstliche Pseudo-Verfügbarkeit ausgeben.
+          availability.set(pid, { inStock: false, stock: 0 });
         }
       }
 
