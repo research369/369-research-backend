@@ -212,7 +212,7 @@ dhlExpressRouter.post(
       if (s === "DEUTSCHLAND" || s === "GERMANY" || s === "DEU" || s === "DE") return "DE";
       return raw.trim();
     };
-    // ── Packstation-Erkennung ────────────────────────────────────────────────
+    // ── DHL-Abholort-Erkennung ────────────────────────────────────────────────
     // Prüft delivery_type aus DB ODER erkennt "Packstation" im street-Feld (Fallback)
     // Drei Erkennungswege (OR-Logik, alle idempotent):
     // 1. delivery_type = "packstation" (gesetzt beim Checkout)
@@ -223,6 +223,9 @@ dhlExpressRouter.post(
       (order as any).deliveryType === "packstation" ||
       /^packstation\b/i.test((order.street ?? "").trim()) ||
       (!!dhlPostNumberRaw && !(order.street ?? "").trim());
+    const isPostfiliale =
+      (order as any).deliveryType === "postfiliale" ||
+      /^postfiliale\b/i.test((order.street ?? "").trim());
 
     const consignee: DhlConsignee = {
       name1:         `${order.firstName} ${order.lastName}`.trim(),
@@ -236,34 +239,34 @@ dhlExpressRouter.post(
       phone:         order.phone ?? undefined,
     };
 
-    if (isPackstation) {
-      // DHL Packstation-Adressformat:
+    if (isPackstation || isPostfiliale) {
+      // DHL-Abholort-Adressformat:
       //   name1 = Kundenname
-      //   name2 = DHL-Postnummer (Pflichtfeld für Packstation-Zustellung)
-      //   addressStreet = "Packstation"
-      //   addressHouse  = Packstation-Nummer (z.B. "123")
+      //   name2 = DHL-Postnummer (Pflichtfeld)
+      //   addressStreet = "Packstation" oder "Postfiliale"
+      //   addressHouse  = Standortnummer
       const dhlPostNumber = dhlPostNumberRaw; // bereits oben aus order gelesen
       if (!dhlPostNumber) {
         // Sicherheitsnetz: Wenn keine Postnummer hinterlegt, Label-Erstellung blockieren
         res.status(422).json({
           success: false,
-          error: "Packstation-Lieferung: DHL-Postnummer fehlt. Bitte Bestellung manuell prüfen.",
+          error: `${isPostfiliale ? "Postfilial" : "Packstation"}-Lieferung: DHL-Postnummer fehlt. Bitte Bestellung manuell prüfen.`,
         });
         return;
       }
-      consignee.addressStreet = "Packstation";
-      // Packstation-Nummer: aus houseNumber ODER aus street-Feld parsen (z.B. "Packstation 135 118" → "135")
-      let packstationNr = (order.houseNumber ?? "").trim();
-      if (!packstationNr) {
+      const pickupLocationLabel = isPostfiliale ? "Postfiliale" : "Packstation";
+      consignee.addressStreet = pickupLocationLabel;
+      // Standortnummer: aus houseNumber ODER aus street-Feld parsen.
+      let pickupLocationNr = (order.houseNumber ?? "").trim();
+      if (!pickupLocationNr) {
         // Fallback: street-Feld parsen → "Packstation 135 118" → erster Token nach "Packstation" ist die Nr.
         const streetParts = (order.street ?? "").trim().split(/\s+/);
-        // streetParts[0] = "Packstation", streetParts[1] = Packstation-Nr., streetParts[2] = ggf. Zusatz
-        if (streetParts.length >= 2) packstationNr = streetParts[1];
+        if (streetParts.length >= 2) pickupLocationNr = streetParts[1];
       }
-      consignee.addressHouse = packstationNr || "";
+      consignee.addressHouse = pickupLocationNr || "";
       // name2 = Postnummer (DHL-Pflichtfeld)
       consignee.name2 = dhlPostNumber.slice(0, 20);
-      console.log(`[dhlRouter] Packstation-Lieferung: Packstation ${packstationNr}, Post-Nr. ${dhlPostNumber}`);
+      console.log(`[dhlRouter] ${pickupLocationLabel}-Lieferung: ${pickupLocationLabel} ${pickupLocationNr}, Post-Nr. ${dhlPostNumber}`);
     } else if (order.company?.trim()) {
       // Firmenname als name1 wenn vorhanden, Personenname dann in name2
       const fullName = `${order.firstName} ${order.lastName}`.trim();

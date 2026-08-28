@@ -8,7 +8,7 @@ export type AddressValidationInput = {
   zip: string;
   city: string;
   country: string;
-  deliveryType?: "home" | "packstation";
+  deliveryType?: "home" | "packstation" | "postfiliale";
 };
 
 export type AddressValidationResult = {
@@ -72,8 +72,9 @@ async function providerGet(url: string, timeoutMs: number): Promise<unknown[]> {
 export async function validateGermanAddress(input: AddressValidationInput): Promise<AddressValidationResult> {
   const config = await getConfig();
   const checkedAt = new Date().toISOString();
-  if (!config.enabled || !isGermanCountry(input.country, config) || input.deliveryType === "packstation") {
-    return { applicable: false, status: "not_applicable", warnings: [], provider: null, checkedAt, details: { reason: input.deliveryType === "packstation" ? "packstation" : "country_not_configured" } };
+  if (!config.enabled || !isGermanCountry(input.country, config) || input.deliveryType === "packstation" || input.deliveryType === "postfiliale") {
+    const pickupLocation = input.deliveryType === "packstation" || input.deliveryType === "postfiliale";
+    return { applicable: false, status: "not_applicable", warnings: [], provider: null, checkedAt, details: { reason: pickupLocation ? input.deliveryType : "country_not_configured" } };
   }
 
   const warnings: AddressValidationResult["warnings"] = [];

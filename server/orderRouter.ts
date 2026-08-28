@@ -21,10 +21,13 @@ import { NASAL_DIY_SET_COMPONENTS, isNasalDiySetEligible } from "./nasalDiySetCo
 import { persistAddressValidation, validateGermanAddress } from "./addressValidationService.js";
 import { bookPaidPartnerCommission, redeemPartnerCreditForOrder } from "./partnerCreditService.js";
 import { resolveQrAttribution } from "./qrCampaignService.js";
+import { withStoreSourceMarker } from "./storeSource.js";
 
 // Zod schemas
 const createOrderSchema = z.object({
   orderId: z.string().optional(), // now generated server-side via DB sequence
+  // Zusätzliche Shopquelle. Ohne Angabe bleibt die bestehende 369-Research-Logik unverändert.
+  storeKey: z.enum(["369research", "peps4pets"]).optional().default("369research"),
   items: z.array(z.object({
     name: z.string(),
     dosage: z.string().optional(),
@@ -51,7 +54,7 @@ const createOrderSchema = z.object({
     country: z.string(),
     company: z.string().optional(),
     // Packstation support
-    deliveryType: z.enum(["home", "packstation"]).optional().default("home"),
+    deliveryType: z.enum(["home", "packstation", "postfiliale"]).optional().default("home"),
     dhlPostNumber: z.string().optional(),
   }),
   subtotal: z.number(),
@@ -470,8 +473,8 @@ export const orderRouter = router({
         zip: (input.customer.zip ?? "").trim(), // trim() verhindert DHL-Fehler
         city: input.customer.city,
         country: input.customer.country,
-        // Bei Packstation: company NICHT mit Postnummer befüllen
-        company: input.customer.deliveryType === "packstation" ? null : (input.customer.company || null),
+        // Bei DHL-Abholorten: company NICHT mit Postnummer befüllen
+        company: input.customer.deliveryType === "packstation" || input.customer.deliveryType === "postfiliale" ? null : (input.customer.company || null),
         deliveryType: input.customer.deliveryType || "home",
         dhlPostNumber: input.customer.dhlPostNumber || null,
         subtotal: input.subtotal.toFixed(2),
@@ -498,11 +501,11 @@ export const orderRouter = router({
         qrCampaignMedium: qrAttribution?.medium ?? null,
         qrCampaignLocation: qrAttribution?.locationPartner ?? null,
         // Substitutions-Notiz intern speichern (nur für WaWi sichtbar)
-        internalNote: [
+        internalNote: withStoreSourceMarker(input.storeKey, [
           input.internalNote,
           (input as any)._stockOverrideNote,
           (input as any)._substitutionNotes,
-        ].filter(Boolean).join(' | ') || null,
+        ]),
       });
 
       // Insert order items. If a client omitted the selected dosage, recover it
