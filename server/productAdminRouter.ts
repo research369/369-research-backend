@@ -338,6 +338,11 @@ export const productAdminRouter = router({
       name: z.string().max(200).optional(),
       description: z.string().optional(),
       shortDescription: z.string().max(500).optional(),
+      seoTitle: z.string().max(70).optional(),
+      seoDescription: z.string().max(160).optional(),
+      merchantTitle: z.string().max(150).optional(),
+      merchantDescription: z.string().max(5000).optional(),
+      imageAlt: z.string().max(200).optional(),
     }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
@@ -366,6 +371,11 @@ export const productAdminRouter = router({
       if (input.name !== undefined) patch.name = input.name;
       if (input.description !== undefined) patch.description = input.description;
       if (input.shortDescription !== undefined) patch.shortDescription = input.shortDescription;
+      if (input.seoTitle !== undefined) patch.seoTitle = input.seoTitle;
+      if (input.seoDescription !== undefined) patch.seoDescription = input.seoDescription;
+      if (input.merchantTitle !== undefined) patch.merchantTitle = input.merchantTitle;
+      if (input.merchantDescription !== undefined) patch.merchantDescription = input.merchantDescription;
+      if (input.imageAlt !== undefined) patch.imageAlt = input.imageAlt;
 
       if (existing[0]) {
         await db.update(articleTranslations).set(patch as any).where(eq(articleTranslations.id, existing[0].id));
