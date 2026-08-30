@@ -12,7 +12,7 @@
  */
 
 import { z } from "zod";
-import { eq, desc } from "drizzle-orm";
+import { and, eq, desc } from "drizzle-orm";
 import { router, productManagerProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
 import {
@@ -354,7 +354,12 @@ export const productAdminRouter = router({
       const existing = await db
         .select()
         .from(articleTranslations)
-        .where(eq(articleTranslations.articleId, article[0].id))
+        .where(
+          and(
+            eq(articleTranslations.articleId, article[0].id),
+            eq(articleTranslations.lang, input.lang),
+          ),
+        )
         .limit(1);
 
       const patch: Record<string, unknown> = { articleId: article[0].id, lang: input.lang };
