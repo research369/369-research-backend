@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import {
   calculateAuthoritativeKwkOrder,
   calculatePromoDiscount,
+  calculateAuthoritativeShipping,
   normalizeKwkPhone,
   parsePromoMetadata,
+  resolveAuthoritativeItemPrice,
 } from "./kwkCheckoutPricing.js";
 
 test("general promo and KWK stack sequentially while shipping stays untouched", () => {
@@ -69,9 +71,24 @@ test("KWK credit is a payment instrument and cannot reduce shipping", () => {
 });
 
 test("promo metadata and phone normalization are deterministic", () => {
-  assert.deepEqual(parsePromoMetadata('Text | {"restrict":["3g"]}'), { restrict: ["3g"] });
-  assert.deepEqual(parsePromoMetadata("Text"), { restrict: [] });
+  assert.deepEqual(parsePromoMetadata('Text | {"restrict":["3g"],"freeShipping":["de"]}'), { restrict: ["3g"], freeShipping: ["de"] });
+  assert.deepEqual(parsePromoMetadata("Text"), { restrict: [], freeShipping: [] });
   assert.equal(normalizeKwkPhone("+49 (0) 171-123 45"), "4917112345");
   assert.equal(normalizeKwkPhone("0171 123 45"), "4917112345");
   assert.equal(normalizeKwkPhone("0049 171 123 45"), "4917112345");
+});
+
+test("catalog prices and option surcharges are authoritative", () => {
+  const catalog = [{
+    sku: "TEST-10MG", shopProductId: "test", name: "Test (10 mg)", sellingPrice: "49.00",
+    salePrice: null, variants: [{ dosage: "10mg", price: 55 }], isActive: 1, shopVisible: 1,
+  }];
+  assert.equal(resolveAuthoritativeItemPrice({ shopProductId: "test", dosage: "10 mg", price: 1, quantity: 1 }, catalog), 55);
+  assert.equal(resolveAuthoritativeItemPrice({ shopProductId: "test", dosage: "10 mg", price: 1, quantity: 1, isPlugPlay: true }, catalog), 70);
+});
+
+test("shipping comes from the delivery country and is never discounted by KWK", () => {
+  assert.equal(calculateAuthoritativeShipping({ country: "Deutschland", items: [] }), 8);
+  assert.equal(calculateAuthoritativeShipping({ country: "Schweiz", items: [{ isPlugPlay: true }] }), 25);
+  assert.equal(calculateAuthoritativeShipping({ country: "Deutschland", items: [{ isPlugPlay: true }], promoDescription: 'Aktion | {"freeShipping":["de"]}' }), 0);
 });
