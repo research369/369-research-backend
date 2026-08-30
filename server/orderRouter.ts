@@ -8,12 +8,12 @@ import { z } from "zod";
 import { eq, desc, inArray, and, or } from "drizzle-orm";
 import { router, publicProcedure, adminProcedure } from "./trpc.js";
 import { getDb, getPool } from "./db.js";
-import { orders, orderItems, articles, stockHistory, customers, customerCommunications } from "../drizzle/schema.js";
+import { orders, orderItems, articles, stockHistory, customers, customerCommunications, promoCodes } from "../drizzle/schema.js";
 import { getIncomingPayments, matchPaymentToOrder, intelligentMatch, type MatchResult } from "./bunqService.js";
 import { sendOrderConfirmationEmail, sendShippingNotificationEmail, sendAdminOrderNotification, sendPackingNotificationEmail } from "./emailService.js";
 import { isSubstitutionEnabled, resolveSubstitution, extractDosageMg, isSubstitutionEligible } from "./substitutionService.js";
 // KWK-Modul: statischer Import (sicherer als dynamischer Import)
-import { isKwkEnabled, bookPendingCredit, detectFraudFlags, hashAddress, calculateKwkCommission, calculateKwkCommissionBase } from "./kwkService.js";
+import { isKwkEnabled, hashAddress, calculateKwkCommission, calculateKwkCommissionBase } from "./kwkService.js";
 import { partners } from "../drizzle/schema.js";
 import { sql } from "drizzle-orm";
 import { queueCustomerDuplicateReview } from "./customerIntegrityService.js";
@@ -22,6 +22,17 @@ import { persistAddressValidation, validateGermanAddress } from "./addressValida
 import { bookPaidPartnerCommission, redeemPartnerCreditForOrder } from "./partnerCreditService.js";
 import { resolveQrAttribution } from "./qrCampaignService.js";
 import { withStoreSourceMarker } from "./storeSource.js";
+import {
+  calculateAuthoritativeKwkOrder,
+  calculateAuthoritativeShipping,
+  calculatePromoDiscount,
+  normalizeKwkPhone,
+  roundMoney,
+  resolveAuthoritativeItemPrice,
+  resolveShippingRegion,
+  type PromoDefinition,
+} from "./kwkCheckoutPricing.js";
+import { verifyKwkToken } from "./kwkAuth.js";
 
 // Zod schemas
 const createOrderSchema = z.object({
@@ -81,6 +92,7 @@ const createOrderSchema = z.object({
   kwkDiscount: z.number().optional(),              // 10% Rabatt auf Produkte
   kwkCreditUsed: z.number().optional(),            // Eingelöstes KWK-Guthaben
   kwkCreditKwkId: z.number().optional(),           // KWK-Account-ID für Guthaben-Einlösung
+  kwkCreditToken: z.string().min(20).optional(),   // Authentifiziert die Guthaben-Einlösung
   // Opaque first-party QR attribution token (30 days). No campaign IDs are trusted from the browser.
   qrAttributionToken: z.string().length(48).regex(/^[a-f0-9]+$/).optional(),
   // Ausschließlich für einen angemeldeten Master-Admin im manuellen WaWi-Verkauf.
@@ -114,11 +126,153 @@ export const orderRouter = router({
 
       const qrAttribution = await resolveQrAttribution(input.qrAttributionToken);
 
-      const roundMoney = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
+      const requestedKwkCredit = roundMoney(input.kwkCreditUsed || 0);
+      const hasKwkRequest = Boolean(input.kwkCode?.trim())
+        || requestedKwkCredit > 0
+        || (input.kwkDiscount || 0) > 0;
+
+      if (hasKwkRequest) {
+        const catalog = await db.select({
+          sku: articles.sku,
+          shopProductId: articles.shopProductId,
+          name: articles.name,
+          sellingPrice: articles.sellingPrice,
+          salePrice: articles.salePrice,
+          variants: articles.variants,
+          isActive: articles.isActive,
+          shopVisible: articles.shopVisible,
+        }).from(articles);
+        input.items = input.items.map((item) => ({
+          ...item,
+          price: resolveAuthoritativeItemPrice(item, catalog),
+        }));
+        input.subtotal = roundMoney(input.items.reduce((sum, item) => sum + item.price * item.quantity, 0));
+      }
+
       const lineSubtotal = roundMoney(input.items.reduce((sum, item) => sum + item.price * item.quantity, 0));
-      if (Math.abs(lineSubtotal - roundMoney(input.subtotal)) > 0.02) {
+      if (!hasKwkRequest && Math.abs(lineSubtotal - roundMoney(input.subtotal)) > 0.02) {
         throw new Error("Bestellsumme stimmt nicht mit den Artikelpositionen überein");
       }
+
+      // ── KWK: verbindliche serverseitige Geschäfts- und Summenregeln ──
+      // Allgemeine Aktionscodes dürfen mit KWK kombiniert werden. Jede Form einer
+      // Partnerzuordnung (Code, Nummer, Rabatt oder Guthaben) schließt KWK dagegen aus.
+      let kwkReferralAccount: { id: number; email: string; phone: string } | null = null;
+      let kwkCreditAccountId: number | null = null;
+      if (hasKwkRequest) {
+        const normalizedDiscountCode = input.discountCode?.trim().toUpperCase() || "";
+        let discountCodeIsPartnerCode = false;
+        if (normalizedDiscountCode) {
+          const [matchingPartner] = await db.select({ id: partners.id }).from(partners)
+            .where(and(sql`UPPER(TRIM(${partners.code})) = ${normalizedDiscountCode}`, eq(partners.isActive, 1)))
+            .limit(1);
+          discountCodeIsPartnerCode = Boolean(matchingPartner);
+        }
+
+        const hasPartnerCombination = Boolean(
+          input.partnerCode?.trim()
+          || input.partnerNumber?.trim()
+          || (input.partnerDiscount || 0) > 0
+          || (input.creditUsed || 0) > 0
+          || discountCodeIsPartnerCode
+        );
+        if (hasPartnerCombination) {
+          throw new Error("KWK_PARTNER_AUSGESCHLOSSEN: Partnercodes, Partnerbestellungen und Partnerguthaben können nicht mit KWK kombiniert werden.");
+        }
+        if (input.kwkCode?.trim() && requestedKwkCredit > 0) {
+          throw new Error("KWK_NEUKUNDENRABATT_UND_GUTHABEN_NICHT_KOMBINIERBAR");
+        }
+        if (requestedKwkCredit > 0) {
+          const authenticatedKwk = input.kwkCreditToken ? verifyKwkToken(input.kwkCreditToken) : null;
+          if (!authenticatedKwk) {
+            throw new Error("KWK_GUTHABEN_AUTHENTIFIZIERUNG_ERFORDERLICH");
+          }
+          kwkCreditAccountId = authenticatedKwk.kwkId;
+        }
+
+        let promoDefinition: PromoDefinition | null = null;
+        if (normalizedDiscountCode) {
+          const [promo] = await db.select().from(promoCodes)
+            .where(and(eq(promoCodes.code, normalizedDiscountCode), eq(promoCodes.isActive, 1)))
+            .limit(1);
+          if (!promo) {
+            throw new Error("KWK_AKTIONSCODE_UNGUELTIG: Mit KWK können ausschließlich gültige allgemeine Aktionscodes kombiniert werden.");
+          }
+
+          const now = new Date();
+          const validUntil = promo.validUntil ? new Date(promo.validUntil) : null;
+          if (validUntil) validUntil.setHours(23, 59, 59, 999);
+          const minimumOrder = Number(promo.minOrder || 0);
+          if ((promo.validFrom && now < promo.validFrom)
+            || (validUntil && now > validUntil)
+            || ((promo.maxUses || 0) > 0 && promo.currentUses >= (promo.maxUses || 0))
+            || (minimumOrder > 0 && input.subtotal < minimumOrder)) {
+            throw new Error("KWK_AKTIONSCODE_UNGUELTIG: Der allgemeine Aktionscode ist für diese Bestellung nicht gültig.");
+          }
+
+          promoDefinition = {
+            discountType: promo.discountType,
+            percentage: Number(promo.percentage || 0),
+            fixedAmount: Number(promo.fixedAmount || 0),
+            description: promo.description,
+          };
+        }
+
+        if (input.kwkCode?.trim()) {
+          if (!await isKwkEnabled()) {
+            throw new Error("KWK_PROGRAMM_INAKTIV");
+          }
+          const pool = await getPool();
+          if (!pool) throw new Error("Database not available");
+          const referralAccountResult = await pool.query(
+            `SELECT id, email, phone FROM kwk_accounts
+             WHERE referral_code=$1 AND status='aktiv' AND deleted_at IS NULL LIMIT 1`,
+            [input.kwkCode.trim().toUpperCase()],
+          );
+          if (referralAccountResult.rows.length !== 1) {
+            throw new Error("KWK_CODE_UNGUELTIG");
+          }
+          const resolvedKwkAccount = referralAccountResult.rows[0] as { id: number; email: string; phone: string };
+          kwkReferralAccount = resolvedKwkAccount;
+
+          const customerEmail = (input.customer.email || "").trim().toLowerCase();
+          const customerPhone = normalizeKwkPhone(input.customer.phone);
+          const selfReferral = Boolean(
+            (customerEmail && customerEmail === String(resolvedKwkAccount.email || "").trim().toLowerCase())
+            || (customerPhone && customerPhone === normalizeKwkPhone(String(resolvedKwkAccount.phone || "")))
+          );
+          if (selfReferral) {
+            throw new Error("KWK_SELBSTWERBUNG_NICHT_ERLAUBT");
+          }
+        }
+
+        const promoDiscount = calculatePromoDiscount({
+          subtotal: input.subtotal,
+          items: input.items,
+          promo: promoDefinition,
+        });
+        input.shipping = calculateAuthoritativeShipping({
+          country: input.customer.country,
+          items: input.items,
+          promoDescription: promoDefinition?.description,
+        });
+        input.shippingCountry = resolveShippingRegion(input.customer.country);
+        const authoritative = calculateAuthoritativeKwkOrder({
+          subtotal: input.subtotal,
+          shipping: input.shipping,
+          promoDiscount,
+          kwkCreditUsed: requestedKwkCredit,
+          applyReferralDiscount: Boolean(kwkReferralAccount),
+        });
+
+        // Ab hier werden ausschließlich die vom Server ermittelten Geldwerte gespeichert,
+        // per E-Mail versendet und für Guthaben/Provisionen verwendet.
+        input.kwkDiscount = authoritative.kwkDiscount;
+        input.kwkCreditUsed = authoritative.kwkCreditUsed;
+        input.discount = authoritative.totalDiscount;
+        input.total = authoritative.total;
+      }
+
       const expectedTotal = roundMoney(input.subtotal - input.discount + input.shipping);
       if ([input.subtotal, input.discount, input.shipping, input.total].some((value) => !Number.isFinite(value) || value < 0)
           || input.discount > input.subtotal + 0.02
@@ -127,6 +281,7 @@ export const orderRouter = router({
           || Math.abs(expectedTotal - roundMoney(input.total)) > 0.02) {
         throw new Error("Ungültige Rabatt-, Versand- oder Gesamtberechnung");
       }
+      const authoritativeKwkCredit = roundMoney(input.kwkCreditUsed || 0);
 
       // Bestandsoverride ist strikt an einen authentifizierten Admin gebunden.
       // Eine Shop-Bestellung besitzt keinen WaWi-Admin-Token und kann diese Prüfung nie umgehen.
@@ -345,6 +500,75 @@ export const orderRouter = router({
       await db.transaction(async (tx) => {
       const db = tx;
 
+      // Das KWK-Guthaben wird innerhalb derselben Transaktion wie die Bestellung
+      // geprüft und reserviert. So kann kein rabattierter Auftrag ohne Gegenbuchung
+      // entstehen und die vom Browser gesendete Account-ID wird nicht vertraut.
+      if (authoritativeKwkCredit > 0 && kwkCreditAccountId) {
+        const lockedAccount = await db.execute(sql`
+          SELECT id FROM kwk_accounts
+          WHERE id=${kwkCreditAccountId} AND status='aktiv' AND deleted_at IS NULL
+          FOR UPDATE
+        `);
+        if (lockedAccount.rows.length !== 1) {
+          throw new Error("KWK_GUTHABEN_ACCOUNT_NICHT_AKTIV");
+        }
+        const balanceResult = await db.execute(sql`
+          SELECT COALESCE(SUM(CASE
+            WHEN type IN ('credit_released','redeemed','cancelled','refund','manual_correction')
+             AND status='confirmed' THEN amount ELSE 0 END), 0) AS available
+          FROM kwk_ledger WHERE kwk_id=${kwkCreditAccountId}
+        `);
+        const available = Number(balanceResult.rows[0]?.available || 0);
+        if (available + 0.001 < authoritativeKwkCredit) {
+          throw new Error(`KWK_GUTHABEN_NICHT_AUSREICHEND: Verfügbar ${available.toFixed(2)} €`);
+        }
+      }
+
+      // KWK gilt ausschließlich für die erste Bestellung eines echten Neukunden.
+      // Der Identitätsschlüssel serialisiert parallele Checkout-Versuche, damit nicht
+      // zwei gleichzeitige Erstbestellungen denselben 10%-Rabatt erhalten können.
+      if (kwkReferralAccount) {
+        const normalizedEmail = (input.customer.email || "").trim().toLowerCase();
+        const normalizedPhone = normalizeKwkPhone(input.customer.phone);
+        // E-Mail und Telefon werden getrennt gesperrt. Ein Kunde kann sonst zwei
+        // parallele Requests mit gleicher E-Mail, aber unterschiedlichen Telefonnummern
+        // senden und beide könnten denselben Erstbestellungsrabatt erhalten.
+        if (normalizedEmail) {
+          await db.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`kwk-new-customer-email:${normalizedEmail}`}))`);
+        }
+        if (normalizedPhone) {
+          await db.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`kwk-new-customer-phone:${normalizedPhone}`}))`);
+        }
+
+        const previousOrderConditions = [];
+        if (normalizedEmail) {
+          previousOrderConditions.push(sql`LOWER(TRIM(${orders.email})) = ${normalizedEmail}`);
+        }
+        if (normalizedPhone) {
+          previousOrderConditions.push(sql`
+            CASE
+              WHEN regexp_replace(${orders.phone}, '[^0-9]', '', 'g') LIKE '0049%'
+                THEN '49' || regexp_replace(SUBSTRING(regexp_replace(${orders.phone}, '[^0-9]', '', 'g') FROM 5), '^0+', '')
+              WHEN regexp_replace(${orders.phone}, '[^0-9]', '', 'g') LIKE '490%'
+                THEN '49' || SUBSTRING(regexp_replace(${orders.phone}, '[^0-9]', '', 'g') FROM 4)
+              WHEN regexp_replace(${orders.phone}, '[^0-9]', '', 'g') LIKE '49%'
+                THEN regexp_replace(${orders.phone}, '[^0-9]', '', 'g')
+              WHEN regexp_replace(${orders.phone}, '[^0-9]', '', 'g') LIKE '0%'
+                THEN '49' || regexp_replace(regexp_replace(${orders.phone}, '[^0-9]', '', 'g'), '^0+', '')
+              ELSE regexp_replace(${orders.phone}, '[^0-9]', '', 'g')
+            END = ${normalizedPhone}
+          `);
+        }
+        const previousOrders = previousOrderConditions.length > 0
+          ? await db.select({ id: orders.id }).from(orders)
+            .where(or(...previousOrderConditions))
+            .limit(1)
+          : [];
+        if (previousOrders.length > 0) {
+          throw new Error("KWK_NUR_NEUKUNDEN: Der 10%-Empfehlungsrabatt gilt ausschließlich für die erste Bestellung.");
+        }
+      }
+
             // ── Stock check: verify all peptide items are in stock before creating order ──
       const allArticlesForCheck = await db.select().from(articles).where(eq(articles.isActive, 1));
       const outOfStockItems: string[] = [];
@@ -562,8 +786,7 @@ export const orderRouter = router({
         partnerDiscount: partnerDiscountAmount.toFixed(2),
         partnerCommission: partnerCommissionAmount.toFixed(2),
         creditUsed: creditUsed.toFixed(2),
-        // Set by the authenticated KWK ledger service only after successful redemption.
-        kwkCreditUsed: "0.00",
+        kwkCreditUsed: (input.kwkCreditUsed || 0).toFixed(2),
         kwkCreditRequested: (input.kwkCreditUsed || 0).toFixed(2),
         qrCampaignId: qrAttribution?.campaignId ?? null,
         qrAttributionToken: qrAttribution?.attributionToken ?? null,
@@ -578,6 +801,29 @@ export const orderRouter = router({
           (input as any)._substitutionNotes,
         ]),
       });
+
+      if (authoritativeKwkCredit > 0 && kwkCreditAccountId) {
+        await db.execute(sql`
+          INSERT INTO kwk_ledger (kwk_id, order_id, amount, type, status, note, created_by)
+          VALUES (${kwkCreditAccountId}, ${orderId}, ${(-authoritativeKwkCredit).toFixed(2)},
+                  'redeemed', 'confirmed', ${`Guthaben eingelöst bei Bestellung ${orderId}`}, 'system')
+        `);
+        await db.execute(sql`
+          UPDATE kwk_accounts
+          SET credit_available = (
+                SELECT COALESCE(SUM(CASE
+                  WHEN type IN ('credit_released','redeemed','cancelled','refund','manual_correction')
+                   AND status='confirmed' THEN amount ELSE 0 END), 0)
+                FROM kwk_ledger WHERE kwk_id=${kwkCreditAccountId}
+              ),
+              credit_redeemed = (
+                SELECT COALESCE(SUM(ABS(amount)), 0) FROM kwk_ledger
+                WHERE kwk_id=${kwkCreditAccountId} AND type='redeemed' AND status='confirmed'
+              ),
+              updated_at=NOW()
+          WHERE id=${kwkCreditAccountId}
+        `);
+      }
 
       // Insert order items. If a client omitted the selected dosage, recover it
       // generically from the persisted product variants and the exact selected unit price.
@@ -704,80 +950,49 @@ export const orderRouter = router({
         }
       }
 
-      // ── KWK-Modul: Referral + Pending-Guthaben (additiv, nach bestehender Logik) ──
-      // Nur ausführen wenn Feature aktiv und KWK-Code vorhanden
-      if (input.kwkCode) {
-        try {
-          const kwkActive = await isKwkEnabled();
-          if (kwkActive) {
-            const pool2 = await getPool();
-            if (pool2) {
-              // KWK-Account finden
-              const kwkResult = await pool2.query(
-                "SELECT id, status FROM kwk_accounts WHERE referral_code = $1 AND deleted_at IS NULL LIMIT 1",
-                [input.kwkCode.toUpperCase()]
-              );
-              if (kwkResult.rows.length > 0 && kwkResult.rows[0].status === 'aktiv') {
-                const kwkId = kwkResult.rows[0].id;
-                // Missbrauchsflags prüfen
-                const addressHash = hashAddress(
-                  input.customer.street,
-                  input.customer.zip,
-                  input.customer.city
-                );
-                const fraudFlags = await detectFraudFlags(
-                  kwkId,
-                  input.customer.email || "",
-                  input.customer.phone,
-                  addressHash
-                );
-                const hasFraud = fraudFlags.sameEmail || fraudFlags.samePhone || fraudFlags.sameAddress;
-                // Referral-Datensatz erstellen (dauerhaft, revisionssicher)
-                // UNIQUE auf order_id – Idempotenz durch DB-Constraint
-                try {
-                  const commissionBase = calculateKwkCommissionBase({
-                    subtotal: input.subtotal || 0,
-                    totalDiscount: input.discount || 0,
-                    partnerCreditUsed: input.creditUsed || 0,
-                    kwkCreditUsed: input.kwkCreditUsed || 0,
-                  });
-                  const commissionAmount = calculateKwkCommission(commissionBase);
-                  await pool2.query(
-                    `INSERT INTO kwk_referrals
-                       (kwk_id, order_id, customer_email, customer_phone, customer_address_hash,
-                        discount_applied, commission_base, commission_amount, fraud_flags, status)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                     ON CONFLICT (order_id) DO NOTHING`,
-                    [
-                      kwkId, orderId,
-                      (input.customer.email || "").toLowerCase(),
-                      input.customer.phone,
-                      addressHash,
-                      (input.kwkDiscount || 0).toFixed(2),
-                      commissionBase.toFixed(2),
-                      commissionAmount.toFixed(2),
-                      JSON.stringify(fraudFlags),
-                      hasFraud ? 'review' : 'pending',
-                    ]
-                  );
-                  // Pending-Guthaben buchen (nur wenn kein Fraud)
-                  if (!hasFraud && commissionAmount > 0) {
-                    await bookPendingCredit(kwkId, orderId, commissionAmount);
-                  }
-                  console.log(`[KWK] Referral created: order ${orderId} → KWK-${kwkId}, commission: ${commissionAmount.toFixed(2)}€, fraud: ${hasFraud}`);
-                } catch (refErr: any) {
-                  // Idempotenz: ON CONFLICT DO NOTHING – kein Fehler bei Duplikat
-                  if (!refErr?.message?.includes('duplicate')) {
-                    console.warn('[KWK] Referral insert failed (non-fatal):', refErr);
-                  }
-                }
-              }
-            }
-          }
-        } catch (kwkErr) {
-          // KWK-Fehler sind niemals fatal – Bestellung läuft immer durch
-          console.warn('[KWK] KWK processing failed (non-fatal):', kwkErr);
+      // KWK-Zuordnung und Pending-Guthaben werden in derselben DB-Transaktion wie
+      // Bestellung und Bestand geschrieben. Ein KWK-Fehler darf keinen rabattierten
+      // Auftrag ohne Werberzuordnung hinterlassen.
+      if (kwkReferralAccount) {
+        const kwkId = kwkReferralAccount.id;
+        const addressHash = hashAddress(input.customer.street, input.customer.zip, input.customer.city);
+        const fraudFlags = { sameEmail: false, samePhone: false, sameAddress: false };
+        const commissionBase = calculateKwkCommissionBase({
+          subtotal: input.subtotal,
+          totalDiscount: input.discount,
+          partnerCreditUsed: 0,
+          kwkCreditUsed: 0,
+        });
+        const commissionAmount = calculateKwkCommission(commissionBase);
+
+        await db.execute(sql`
+          INSERT INTO kwk_referrals
+            (kwk_id, order_id, customer_email, customer_phone, customer_address_hash,
+             discount_applied, commission_base, commission_amount, fraud_flags, status)
+          VALUES
+            (${kwkId}, ${orderId}, ${(input.customer.email || "").trim().toLowerCase()},
+             ${input.customer.phone}, ${addressHash}, ${(input.kwkDiscount || 0).toFixed(2)},
+             ${commissionBase.toFixed(2)}, ${commissionAmount.toFixed(2)},
+             ${JSON.stringify(fraudFlags)}::jsonb, 'pending')
+        `);
+
+        if (commissionAmount > 0) {
+          await db.execute(sql`
+            INSERT INTO kwk_ledger (kwk_id, order_id, amount, type, status, note, created_by)
+            VALUES (${kwkId}, ${orderId}, ${commissionAmount.toFixed(2)}, 'pending_credit', 'pending',
+                    ${`Pending-Gutschrift für Bestellung ${orderId}`}, 'system')
+          `);
+          await db.execute(sql`
+            UPDATE kwk_accounts
+            SET credit_pending = (
+                  SELECT COALESCE(SUM(amount), 0) FROM kwk_ledger
+                  WHERE kwk_id=${kwkId} AND type='pending_credit' AND status='pending'
+                ),
+                updated_at=NOW()
+            WHERE id=${kwkId}
+          `);
         }
+        console.log(`[KWK] Atomare Neukundenempfehlung ${orderId} → KWK-${kwkId}, pending ${commissionAmount.toFixed(2)}€`);
       }
 
       // ── Auto-create or link customer ──
@@ -976,7 +1191,17 @@ export const orderRouter = router({
       // Eine zusätzliche interne Mail wäre redundant und führt zu 4 Mails pro Bestellung.
       // sendAdminOrderNotification wurde hier entfernt.
 
-      return { success: true, orderId: orderId, externalOrderReference: externalOrderReference || undefined };
+      return {
+        success: true,
+        orderId,
+        externalOrderReference: externalOrderReference || undefined,
+        subtotal: input.subtotal,
+        discount: input.discount,
+        kwkDiscount: input.kwkDiscount || 0,
+        kwkCreditUsed: input.kwkCreditUsed || 0,
+        shipping: input.shipping,
+        total: input.total,
+      };
       } finally {
         if (p4pLockClient) {
           try {

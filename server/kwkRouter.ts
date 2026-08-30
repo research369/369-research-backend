@@ -28,13 +28,11 @@
 
 import { z } from "zod";
 import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
 import { router, publicProcedure, adminProcedure, middleware } from "./trpc.js";
 import { getPool } from "./db.js";
 import { ENV } from "./env.js";
 import {
   isKwkEnabled,
-  generateKwkNumber,
   generateReferralCode,
   computeBalanceFromLedger,
   detectFraudFlags,
@@ -48,24 +46,9 @@ import {
   KWK_COMMISSION_PERCENT,
 } from "./kwkService.js";
 import type { Request } from "express";
+import { createKwkToken, verifyKwkToken } from "./kwkAuth.js";
 
 // ── KWK Auth Helpers ──────────────────────────────────────────────────────
-
-const KWK_TOKEN_EXPIRY = "30d";
-
-function createKwkToken(kwkId: number): string {
-  return jwt.sign({ kwkId, type: "kwk" }, ENV.jwtSecret, { expiresIn: KWK_TOKEN_EXPIRY });
-}
-
-function verifyKwkToken(token: string): { kwkId: number } | null {
-  try {
-    const payload = jwt.verify(token, ENV.jwtSecret) as any;
-    if (payload.type !== "kwk") return null;
-    return { kwkId: payload.kwkId };
-  } catch {
-    return null;
-  }
-}
 
 async function getKwkFromRequest(req: Request): Promise<{ kwkId: number } | null> {
   const authHeader = req.headers.authorization;
@@ -128,45 +111,57 @@ export const kwkRouter = router({
       const pool = await getPool();
       if (!pool) throw new Error("Database not available");
 
-      // E-Mail-Duplikat prüfen
-      const existing = await pool.query(
-        "SELECT id FROM kwk_accounts WHERE email = $1 LIMIT 1",
-        [input.email.toLowerCase()]
-      );
-      if (existing.rows.length > 0) {
-        throw new Error("Diese E-Mail-Adresse ist bereits registriert");
-      }
-
-      // KWK-Nummer und Referral-Code generieren
-      const kwkNumber = await generateKwkNumber();
-      const referralCode = generateReferralCode(kwkNumber);
-
       // Passwort hashen (bcrypt, gleiche Methode wie Partner-Auth)
       const passwordHash = await bcrypt.hash(input.password, 12);
+      const client = await pool.connect();
+      let account: { id: number; kwk_number: string; referral_code: string };
+      try {
+        await client.query("BEGIN");
+        // Nummernvergabe und E-Mail-Prüfung werden serialisiert, damit auch zwei
+        // gleichzeitige Registrierungen niemals dieselbe KWK-Nummer erhalten.
+        await client.query("SELECT pg_advisory_xact_lock(hashtext('kwk-account-registration'))");
+        const existing = await client.query(
+          "SELECT id FROM kwk_accounts WHERE LOWER(TRIM(email)) = $1 LIMIT 1",
+          [input.email.trim().toLowerCase()],
+        );
+        if (existing.rows.length > 0) {
+          throw new Error("Diese E-Mail-Adresse ist bereits registriert");
+        }
 
-      // Account erstellen
-      const result = await pool.query(
-        `INSERT INTO kwk_accounts
-           (kwk_number, referral_code, name, email, phone, password_hash, company, whatsapp, notes)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-         RETURNING id, kwk_number, referral_code`,
-        [
-          kwkNumber,
-          referralCode,
-          input.name,
-          input.email.toLowerCase(),
-          input.phone,
-          passwordHash,
-          input.company || null,
-          input.whatsapp || null,
-          input.notes || null,
-        ]
-      );
-
-      const account = result.rows[0];
+        const lastNumber = await client.query(
+          `SELECT COALESCE(MAX(CAST(SUBSTRING(kwk_number FROM 5) AS INTEGER)), 100000) AS max_number
+           FROM kwk_accounts WHERE kwk_number ~ '^KWK-[0-9]+$'`,
+        );
+        const kwkNumber = `KWK-${String(Number(lastNumber.rows[0].max_number) + 1).padStart(6, "0")}`;
+        const referralCode = generateReferralCode(kwkNumber);
+        const result = await client.query(
+          `INSERT INTO kwk_accounts
+             (kwk_number, referral_code, name, email, phone, password_hash, company, whatsapp, notes)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           RETURNING id, kwk_number, referral_code`,
+          [
+            kwkNumber,
+            referralCode,
+            input.name,
+            input.email.trim().toLowerCase(),
+            input.phone,
+            passwordHash,
+            input.company || null,
+            input.whatsapp || null,
+            input.notes || null,
+          ],
+        );
+        account = result.rows[0];
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
       const token = createKwkToken(account.id);
 
-      console.log(`[KWK] New account registered: ${kwkNumber} (${input.email})`);
+      console.log(`[KWK] New account registered: ${account.kwk_number} (${input.email})`);
 
       return {
         success: true,
