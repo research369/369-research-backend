@@ -22,6 +22,10 @@ export interface SendCrmEmailInput {
   source: CrmEmailSource;
   idempotencyKey?: string;
   bcc?: string[];
+  senderName?: string;
+  senderEmail?: string;
+  from?: string;
+  replyTo?: string;
 }
 
 export interface SendCrmEmailResult {
@@ -79,6 +83,10 @@ export async function sendAndArchiveAutomaticOrderEmail(input: {
   htmlBody: string;
   bcc?: string[];
   idempotencyKey?: string;
+  senderName?: string;
+  senderEmail?: string;
+  from?: string;
+  replyTo?: string;
 }): Promise<SendCrmEmailResult> {
   const customerId = await resolveOrCreateOrderCustomer(input.orderId, input.recipientEmail);
   return sendAndArchiveCrmEmail({
@@ -91,6 +99,10 @@ export async function sendAndArchiveAutomaticOrderEmail(input: {
     source: "automatic",
     bcc: input.bcc,
     idempotencyKey: input.idempotencyKey || `automatic-${input.orderId}-${nanoid(20)}`,
+    senderName: input.senderName,
+    senderEmail: input.senderEmail,
+    from: input.from,
+    replyTo: input.replyTo,
   });
 }
 
@@ -150,9 +162,9 @@ export async function sendAndArchiveCrmEmail(input: SendCrmEmailInput): Promise<
     body: input.plainText || htmlToPlainText(input.htmlBody),
     htmlBody: input.htmlBody,
     recipientEmail,
-    senderName: "369 Research",
-    senderEmail: CRM_EMAIL_FROM_ADDRESS,
-    replyTo: CRM_EMAIL_REPLY_TO,
+    senderName: input.senderName || "369 Research",
+    senderEmail: input.senderEmail || CRM_EMAIL_FROM_ADDRESS,
+    replyTo: input.replyTo || CRM_EMAIL_REPLY_TO,
     orderId: input.orderId || null,
     createdBy: input.createdBy,
     idempotencyKey,
@@ -162,9 +174,9 @@ export async function sendAndArchiveCrmEmail(input: SendCrmEmailInput): Promise<
   }).returning();
 
   const payload: Record<string, unknown> = {
-    from: CRM_EMAIL_FROM,
+    from: input.from || CRM_EMAIL_FROM,
     to: [recipientEmail],
-    reply_to: CRM_EMAIL_REPLY_TO,
+    reply_to: input.replyTo || CRM_EMAIL_REPLY_TO,
     subject: input.subject.trim(),
     html: input.htmlBody,
     text: input.plainText || htmlToPlainText(input.htmlBody),

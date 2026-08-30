@@ -953,6 +953,8 @@ export const orderRouter = router({
       try {
         const emailSent = await sendOrderConfirmationEmail({
           orderId: orderId,
+          storeKey: input.storeKey,
+          externalOrderReference,
           customer: input.customer,
           items: input.items.map(i => ({ ...i, dosage: i.dosage || null, variant: i.variant || null })),
           subtotal: input.subtotal,
