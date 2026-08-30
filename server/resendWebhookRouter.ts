@@ -3,8 +3,8 @@ import { Resend } from "resend";
 import { eq } from "drizzle-orm";
 import { getDb } from "./db.js";
 import { ENV } from "./env.js";
-import { communicationEvents, customerCommunications } from "../drizzle/schema.js";
-import { sendOperatorDeliveryFailureAlert, shouldAlertOnDeliveryEvent } from "./mailDeliveryAlert.js";
+import { communicationEvents, customerCommunications, customers } from "../drizzle/schema.js";
+import { sendOperatorDeliveryFailureAlert, shouldSendOperatorDeliveryFailureAlert } from "./mailDeliveryAlert.js";
 
 export const resendWebhookRouter: ReturnType<typeof Router> = Router();
 
@@ -83,8 +83,16 @@ resendWebhookRouter.post("/api/webhooks/resend", async (req, res) => {
     }
 
     const comm = communication[0];
+    const customer = await db.select({ id: customers.id })
+      .from(customers)
+      .where(eq(customers.id, comm.customerId))
+      .limit(1);
     const status = EVENT_STATUS[eventType] || "unknown";
-    const requiresOperatorAlert = shouldAlertOnDeliveryEvent(eventType);
+    const requiresOperatorAlert = shouldSendOperatorDeliveryFailureAlert({
+      eventType,
+      recipientEmail: comm.recipientEmail,
+      customerRecordExists: customer.length > 0,
+    });
     const bounceMessage = eventType === "email.bounced"
       ? (event?.data?.bounce?.message || event?.data?.bounce?.diagnosticCode?.join("\n") || "Unzustellbar")
       : eventType === "email.failed"

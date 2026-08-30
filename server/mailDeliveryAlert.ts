@@ -34,6 +34,30 @@ export function shouldAlertOnDeliveryEvent(eventType: string): boolean {
   return DELIVERY_FAILURE_EVENT_TYPES.has(eventType);
 }
 
+/**
+ * Reserved .invalid domains are used exclusively by controlled QA runs and
+ * cannot receive email. They must never create an operational customer alert.
+ */
+export function isTechnicalQaRecipient(recipientEmail: string | null | undefined): boolean {
+  const normalized = recipientEmail?.trim().toLowerCase() || "";
+  return normalized.endsWith(".invalid");
+}
+
+/**
+ * An alert is useful only for a real customer communication which still has
+ * an active customer record. Delayed provider events for deleted QA records
+ * are journalled but intentionally do not notify the operator.
+ */
+export function shouldSendOperatorDeliveryFailureAlert(input: {
+  eventType: string;
+  recipientEmail: string | null | undefined;
+  customerRecordExists: boolean;
+}): boolean {
+  return shouldAlertOnDeliveryEvent(input.eventType)
+    && input.customerRecordExists
+    && !isTechnicalQaRecipient(input.recipientEmail);
+}
+
 export function buildDeliveryFailureAlert(input: DeliveryFailureAlertInput): { subject: string; text: string; html: string } {
   const eventLabel: Record<string, string> = {
     "email.bounced": "dauerhaft unzustellbar",

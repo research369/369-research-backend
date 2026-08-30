@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildDeliveryFailureAlert, shouldAlertOnDeliveryEvent } from "./mailDeliveryAlert.js";
+import {
+  buildDeliveryFailureAlert,
+  isTechnicalQaRecipient,
+  shouldAlertOnDeliveryEvent,
+  shouldSendOperatorDeliveryFailureAlert,
+} from "./mailDeliveryAlert.js";
 
 test("Zustellwarnung erfasst nur nicht zugestellte Kundenmailereignisse", () => {
   assert.equal(shouldAlertOnDeliveryEvent("email.bounced"), true);
@@ -9,6 +14,27 @@ test("Zustellwarnung erfasst nur nicht zugestellte Kundenmailereignisse", () => 
   assert.equal(shouldAlertOnDeliveryEvent("email.delivery_delayed"), true);
   assert.equal(shouldAlertOnDeliveryEvent("email.delivered"), false);
   assert.equal(shouldAlertOnDeliveryEvent("email.opened"), false);
+});
+
+test("Zustellwarnung unterdrückt nur technische QA-Empfänger und bereinigte Datensätze", () => {
+  assert.equal(isTechnicalQaRecipient("qa-launch-check@example.invalid"), true);
+  assert.equal(isTechnicalQaRecipient("kunde@example.de"), false);
+
+  assert.equal(shouldSendOperatorDeliveryFailureAlert({
+    eventType: "email.bounced",
+    recipientEmail: "qa-launch-check@example.invalid",
+    customerRecordExists: true,
+  }), false);
+  assert.equal(shouldSendOperatorDeliveryFailureAlert({
+    eventType: "email.bounced",
+    recipientEmail: "kunde@example.de",
+    customerRecordExists: false,
+  }), false);
+  assert.equal(shouldSendOperatorDeliveryFailureAlert({
+    eventType: "email.bounced",
+    recipientEmail: "kunde@example.de",
+    customerRecordExists: true,
+  }), true);
 });
 
 test("Zustellwarnung enthält nur prüfungsrelevante Metadaten und keinen Kundenmailinhalt", () => {
