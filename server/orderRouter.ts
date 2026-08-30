@@ -503,8 +503,15 @@ export const orderRouter = router({
       if (kwkReferralAccount) {
         const normalizedEmail = (input.customer.email || "").trim().toLowerCase();
         const normalizedPhone = normalizeKwkPhone(input.customer.phone);
-        const identityLock = `kwk-new-customer:${normalizedEmail || "no-email"}:${normalizedPhone}`;
-        await db.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${identityLock}))`);
+        // E-Mail und Telefon werden getrennt gesperrt. Ein Kunde kann sonst zwei
+        // parallele Requests mit gleicher E-Mail, aber unterschiedlichen Telefonnummern
+        // senden und beide könnten denselben Erstbestellungsrabatt erhalten.
+        if (normalizedEmail) {
+          await db.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`kwk-new-customer-email:${normalizedEmail}`}))`);
+        }
+        if (normalizedPhone) {
+          await db.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`kwk-new-customer-phone:${normalizedPhone}`}))`);
+        }
 
         const previousOrderConditions = [];
         if (normalizedEmail) {
