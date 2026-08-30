@@ -223,11 +223,11 @@ export const productAdminRouter = router({
       shopProductId: z.string().min(1),
       variants: z.array(z.object({
         sku: z.string().min(1).max(100),
-        name: z.string().min(1).max(100),
+        name: z.string().min(1).max(100).optional(),
         label: z.string().min(1).max(100),
         price: z.number().positive().max(9999),
         dosage: z.string().min(1).max(100),
-        isActive: z.boolean(),
+        isActive: z.boolean().default(true),
         inventoryArticleId: z.number().int().positive(),
       })).min(1).max(50),
     }))
