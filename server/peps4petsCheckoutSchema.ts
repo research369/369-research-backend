@@ -1,5 +1,11 @@
 import { getPool } from "./db.js";
 
+let peps4petsCheckoutSchemaReady = false;
+
+export function isPeps4petsCheckoutSchemaReady(): boolean {
+  return peps4petsCheckoutSchemaReady;
+}
+
 /**
  * Additive P4P order metadata. The canonical WaWi order ID remains untouched;
  * P4P gets a separate external customer reference and an evidence-bound key.
@@ -30,4 +36,5 @@ export async function ensurePeps4petsCheckoutSchema(): Promise<void> {
       AND column_name IN ('store_key', 'external_order_reference', 'checkout_idempotency_key')
   `);
   if (rows.length !== 3) throw new Error("Peps4pets-Auftragsschema unvollständig");
+  peps4petsCheckoutSchemaReady = true;
 }

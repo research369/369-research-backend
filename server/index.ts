@@ -29,7 +29,7 @@ import { ensureAddressValidationSchema } from "./addressValidationSchema.js";
 import { ensureCustomerDossierSchema } from "./customerDossierSchema.js";
 import { ensureQrCampaignSchema } from "./qrCampaignSchema.js";
 import { qrRedirectRouter } from "./qrRedirectRouter.js";
-import { ensurePeps4petsCheckoutSchema } from "./peps4petsCheckoutSchema.js";
+import { ensurePeps4petsCheckoutSchema, isPeps4petsCheckoutSchemaReady } from "./peps4petsCheckoutSchema.js";
 
 const app = express();
 
@@ -58,7 +58,13 @@ app.use(express.json({ limit: "50mb" }));
 
 // Health check
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString(), version: "1.2.0-kwk", fix: "paid-status-filter" });
+  res.json({
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    version: "1.2.0-kwk",
+    fix: "paid-status-filter",
+    peps4petsCheckoutSchema: isPeps4petsCheckoutSchemaReady() ? "ready" : "pending",
+  });
 });
 
 // First-party marketing QR redirects. Only `/r/*` is mounted here; `/i/*` remains
