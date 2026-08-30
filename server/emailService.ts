@@ -230,6 +230,27 @@ function buildPeps4petsOrderConfirmationHtml(data: OrderEmailData, customerRefer
   return `<!doctype html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head><body style="margin:0;background:#f4f7f3;color:#143d32;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;"><main style="max-width:640px;margin:0 auto;padding:32px 18px;"><section style="background:#fff;border:1px solid #d9e4dc;border-radius:24px;overflow:hidden;"><header style="padding:28px 32px;background:#143d32;color:#fff;"><p style="margin:0 0 10px;font-size:11px;letter-spacing:1.5px;color:#cfe0d1;">PEPS4PETS · VETERINÄRWISSENSCHAFTLICHE FORSCHUNG</p><h1 style="margin:0;font-size:28px;line-height:1.2;">Deine Bestellung ist eingegangen.</h1></header><div style="padding:30px 32px;"><p style="margin:0 0 22px;color:#486259;line-height:1.6;">Vielen Dank für deine Bestellung, ${escapeHtml(data.customer.firstName)}.</p><div style="padding:18px 20px;border-radius:16px;background:#f1f6f1;margin-bottom:24px;"><p style="margin:0 0 8px;font-size:11px;letter-spacing:1px;color:#486259;">BESTELLREFERENZ</p><p style="margin:0;font-size:22px;font-weight:800;letter-spacing:.5px;color:#143d32;">${escapeHtml(customerReference)}</p></div><table style="width:100%;border-collapse:collapse;margin-bottom:20px;"><thead><tr><th style="padding:0 0 8px;text-align:left;font-size:11px;letter-spacing:1px;color:#789087;">ARTIKEL</th><th style="padding:0 8px 8px;text-align:center;font-size:11px;letter-spacing:1px;color:#789087;">MENGE</th><th style="padding:0 0 8px;text-align:right;font-size:11px;letter-spacing:1px;color:#789087;">PREIS</th></tr></thead><tbody>${itemRows}</tbody></table><div style="padding-top:14px;border-top:1px solid #dce9df;text-align:right;"><span style="color:#486259;font-size:14px;">Gesamtbetrag&nbsp;&nbsp;</span><strong style="font-size:22px;color:#143d32;">${data.total.toFixed(2)} €</strong></div></div><div style="padding:26px 32px;background:#edf5ee;border-top:1px solid #d9e4dc;"><h2 style="margin:0 0 10px;font-size:18px;color:#143d32;">Zahlungsdetails</h2><p style="margin:0 0 14px;color:#486259;line-height:1.55;">Zahlungsart: <strong>${escapeHtml(getPaymentMethodLabel(data.paymentMethod))}</strong></p><table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #d9e4dc;border-radius:12px;overflow:hidden;"><tbody>${getBankDetails(data.paymentMethod)}<tr><td style="padding:10px 12px;color:#789087;font-size:13px;border-top:1px solid #d9e4dc;">Empfänger</td><td style="padding:10px 12px;color:#143d32;font-weight:700;font-size:13px;border-top:1px solid #d9e4dc;">369 Research</td></tr><tr><td style="padding:12px;color:#143d32;font-size:13px;font-weight:700;background:#dcecdf;">Verwendungszweck</td><td style="padding:12px;color:#143d32;font-size:16px;font-weight:800;background:#dcecdf;">${escapeHtml(customerReference)}</td></tr></tbody></table><p style="margin:14px 0 0;color:#486259;font-size:13px;line-height:1.55;">Bitte übernimm Gesamtbetrag und Verwendungszweck exakt. Nach erfolgreicher Zuordnung bereiten wir deine Bestellung weiter vor.</p></div><footer style="padding:20px 32px;text-align:center;color:#789087;font-size:12px;line-height:1.5;">Fragen zu deiner Bestellung? <a href="mailto:support@peps4pets.de" style="color:#143d32;font-weight:700;">support@peps4pets.de</a><br>Peps4pets · Ausschließlich für veterinärwissenschaftliche Forschungszwecke.</footer></section></main></body></html>`;
 }
 
+export function getOrderConfirmationPresentation(data: OrderEmailData): {
+  subject: string;
+  html: string;
+  profile?: typeof PEPS4PETS_EMAIL_PROFILE;
+} | null {
+  const isPeps4petsOrder = data.storeKey === "peps4pets";
+  const customerReference = isPeps4petsOrder ? data.externalOrderReference : data.orderId;
+  if (isPeps4petsOrder && !customerReference) return null;
+
+  return isPeps4petsOrder
+    ? {
+        subject: `Bestellbestätigung ${customerReference} – Peps4pets`,
+        html: buildPeps4petsOrderConfirmationHtml(data, customerReference!),
+        profile: PEPS4PETS_EMAIL_PROFILE,
+      }
+    : {
+        subject: `Bestellbestätigung ${data.orderId} – 369 Research`,
+        html: buildOrderConfirmationHtml(data),
+      };
+}
+
 export async function sendOrderConfirmationEmail(data: OrderEmailData): Promise<boolean> {
   const recipientEmail = data.customer.email?.trim() || "";
   if (!isValidEmail(recipientEmail)) {
@@ -237,27 +258,21 @@ export async function sendOrderConfirmationEmail(data: OrderEmailData): Promise<
     return false;
   }
 
-  const isPeps4petsOrder = data.storeKey === "peps4pets";
-  const customerReference = isPeps4petsOrder ? data.externalOrderReference : data.orderId;
-  if (isPeps4petsOrder && !customerReference) {
+  const presentation = getOrderConfirmationPresentation(data);
+  if (!presentation) {
     console.warn(`[Email] Peps4pets confirmation skipped: missing external reference for ${data.orderId}`);
     return false;
   }
-  const html = isPeps4petsOrder
-    ? buildPeps4petsOrderConfirmationHtml(data, customerReference!)
-    : buildOrderConfirmationHtml(data);
   try {
     const result = await sendAndArchiveAutomaticOrderEmail({
       orderId: data.orderId,
       recipientEmail,
-      subject: isPeps4petsOrder
-        ? `Bestellbestätigung ${customerReference} – Peps4pets`
-        : `Bestellbestätigung ${data.orderId} – 369 Research`,
-      htmlBody: html,
+      subject: presentation.subject,
+      htmlBody: presentation.html,
       bcc: [CUSTOMER_EMAIL_BCC],
       // Checkout-Wiederholungen dürfen keine zweite Bestellbestätigung erzeugen.
       idempotencyKey: `order-confirmation-${data.orderId}`,
-      ...(isPeps4petsOrder ? PEPS4PETS_EMAIL_PROFILE : {}),
+      ...(presentation.profile || {}),
     });
     if (!result.sent) {
       console.warn(`[Email] Order confirmation failed for ${data.orderId}:`, result.error);
