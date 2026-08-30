@@ -4,8 +4,9 @@ import { eq } from "drizzle-orm";
 import { getDb } from "./db.js";
 import { ENV } from "./env.js";
 import { communicationEvents, customerCommunications } from "../drizzle/schema.js";
+import { sendOperatorDeliveryFailureAlert, shouldAlertOnDeliveryEvent } from "./mailDeliveryAlert.js";
 
-export const resendWebhookRouter = Router();
+export const resendWebhookRouter: ReturnType<typeof Router> = Router();
 
 const EVENT_STATUS: Record<string, string> = {
   "email.sent": "sent",
@@ -62,13 +63,13 @@ resendWebhookRouter.post("/api/webhooks/resend", async (req, res) => {
     const db = await getDb();
     if (!db) throw new Error("Datenbank nicht verfügbar");
 
-    const existingEvent = await db.select({ id: communicationEvents.id })
+    const existingEvent = await db.select({
+      id: communicationEvents.id,
+      operatorAlertStatus: communicationEvents.operatorAlertStatus,
+    })
       .from(communicationEvents)
       .where(eq(communicationEvents.providerEventId, providerEventId))
       .limit(1);
-    if (existingEvent.length > 0) {
-      return res.status(200).json({ ok: true, duplicate: true });
-    }
 
     const communication = await db.select()
       .from(customerCommunications)
@@ -83,32 +84,60 @@ resendWebhookRouter.post("/api/webhooks/resend", async (req, res) => {
 
     const comm = communication[0];
     const status = EVENT_STATUS[eventType] || "unknown";
+    const requiresOperatorAlert = shouldAlertOnDeliveryEvent(eventType);
     const bounceMessage = eventType === "email.bounced"
       ? (event?.data?.bounce?.message || event?.data?.bounce?.diagnosticCode?.join("\n") || "Unzustellbar")
       : eventType === "email.failed"
         ? (event?.data?.error?.message || "Versandfehler")
         : null;
 
-    await db.insert(communicationEvents).values({
-      communicationId: comm.id,
-      provider: "resend",
-      providerEventId,
-      eventType,
-      occurredAt,
-      payload: rawPayload,
-    });
+    let eventRecordId = existingEvent[0]?.id;
+    const shouldRetryAlert = requiresOperatorAlert && existingEvent[0]?.operatorAlertStatus !== "sent";
+    if (!eventRecordId) {
+      const [storedEvent] = await db.insert(communicationEvents).values({
+        communicationId: comm.id,
+        provider: "resend",
+        providerEventId,
+        eventType,
+        occurredAt,
+        payload: rawPayload,
+        operatorAlertStatus: requiresOperatorAlert ? "pending" : null,
+      }).returning({ id: communicationEvents.id });
+      eventRecordId = storedEvent.id;
 
-    await db.update(customerCommunications)
-      .set({
-        deliveryStatus: status,
-        deliveryStatusAt: occurredAt,
-        status: (status === "bounced" || status === "failed" || status === "suppressed") ? "failed" : "sent",
+      await db.update(customerCommunications)
+        .set({
+          deliveryStatus: status,
+          deliveryStatusAt: occurredAt,
+          status: (status === "bounced" || status === "failed" || status === "suppressed") ? "failed" : "sent",
+          errorMessage: bounceMessage,
+        })
+        .where(eq(customerCommunications.id, comm.id));
+    }
+
+    if (shouldRetryAlert) {
+      const alert = await sendOperatorDeliveryFailureAlert({
+        providerEventId,
+        eventType,
+        occurredAt,
+        orderId: comm.orderId,
+        recipientEmail: comm.recipientEmail || "nicht hinterlegt",
+        subject: comm.subject || "Kundenmail ohne Betreff",
         errorMessage: bounceMessage,
-      })
-      .where(eq(customerCommunications.id, comm.id));
+      });
+      await db.update(communicationEvents).set({
+        operatorAlertStatus: alert.sent ? "sent" : "failed",
+        operatorAlertSentAt: alert.sent ? new Date() : null,
+        operatorAlertError: alert.sent ? null : (alert.error || "Betreiberalarm fehlgeschlagen"),
+      }).where(eq(communicationEvents.id, eventRecordId));
+      if (!alert.sent) {
+        console.error(`[CRM] Betreiberalarm für Zustellereignis ${providerEventId} fehlgeschlagen: ${alert.error}`);
+        return res.status(500).json({ error: "Betreiberalarm konnte nicht zugestellt werden" });
+      }
+    }
 
     console.info(`[CRM] Resend event ${eventType} stored for communication ${comm.id}`);
-    return res.status(200).json({ ok: true, tracked: true });
+    return res.status(200).json({ ok: true, tracked: true, duplicate: existingEvent.length > 0 });
   } catch (error: any) {
     console.error("[CRM] Resend webhook processing failed:", error?.message || error);
     return res.status(500).json({ error: "Webhook konnte nicht verarbeitet werden" });

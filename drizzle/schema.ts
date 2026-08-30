@@ -314,6 +314,9 @@ export const communicationEvents = pgTable("communication_events", {
   eventType: varchar("event_type", { length: 80 }).notNull(),
   occurredAt: timestamp("occurred_at").notNull(),
   payload: text("payload"),
+  operatorAlertStatus: varchar("operator_alert_status", { length: 24 }),
+  operatorAlertSentAt: timestamp("operator_alert_sent_at"),
+  operatorAlertError: text("operator_alert_error"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 

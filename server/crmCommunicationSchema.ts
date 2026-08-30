@@ -42,8 +42,16 @@ export async function ensureCrmCommunicationSchema(): Promise<void> {
       event_type VARCHAR(80) NOT NULL,
       occurred_at TIMESTAMP NOT NULL,
       payload TEXT,
+      operator_alert_status VARCHAR(24),
+      operator_alert_sent_at TIMESTAMP,
+      operator_alert_error TEXT,
       created_at TIMESTAMP NOT NULL DEFAULT NOW()
     );
+
+    ALTER TABLE communication_events
+      ADD COLUMN IF NOT EXISTS operator_alert_status VARCHAR(24),
+      ADD COLUMN IF NOT EXISTS operator_alert_sent_at TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS operator_alert_error TEXT;
 
     CREATE INDEX IF NOT EXISTS communication_events_communication_created_idx
       ON communication_events (communication_id, created_at DESC);
