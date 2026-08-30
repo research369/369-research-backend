@@ -213,10 +213,13 @@ function buildOrderConfirmationHtml(data: OrderEmailData): string {
 }
 
 const PEPS4PETS_EMAIL_PROFILE = {
-  from: "369 Research <noreply@peps4pets.de>",
-  senderEmail: "noreply@peps4pets.de",
+  // Übergangsprofil: P4P-Layout und -Betreff bleiben getrennt, der etablierte
+  // Coreversand-Absender übernimmt bis zur aktivierten P4P-Mailbox Zustellung
+  // und Antworten.
+  from: "369 Research <noreply@coreversand.de>",
+  senderEmail: "noreply@coreversand.de",
   senderName: "369 Research",
-  replyTo: "support@peps4pets.de",
+  replyTo: "support@369research.eu",
 } as const;
 
 function escapeHtml(value: string): string {

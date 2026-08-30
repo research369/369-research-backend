@@ -23,7 +23,7 @@ const baseOrder = {
   paymentMethod: "wise",
 };
 
-test("Peps4pets-Bestellmail nutzt P4P-Referenz und eigenes Absenderprofil", () => {
+test("Peps4pets-Bestellmail nutzt P4P-Referenz mit vorläufigem Coreversand-Absenderprofil", () => {
   const presentation = getOrderConfirmationPresentation({
     ...baseOrder,
     storeKey: "peps4pets",
@@ -32,8 +32,9 @@ test("Peps4pets-Bestellmail nutzt P4P-Referenz und eigenes Absenderprofil", () =
 
   assert.ok(presentation);
   assert.equal(presentation.subject, "Bestellbestätigung P4P-1101 – Peps4pets");
-  assert.equal(presentation.profile?.from, "369 Research <noreply@peps4pets.de>");
-  assert.equal(presentation.profile?.replyTo, "support@peps4pets.de");
+  assert.equal(presentation.profile?.from, "369 Research <noreply@coreversand.de>");
+  assert.equal(presentation.profile?.senderEmail, "noreply@coreversand.de");
+  assert.equal(presentation.profile?.replyTo, "support@369research.eu");
   assert.match(presentation.html, /P4P-1101/);
   assert.match(presentation.html, /SEPA- oder Echtzeitüberweisung \(Wise\)/);
   assert.doesNotMatch(presentation.html, /369-10607/);
