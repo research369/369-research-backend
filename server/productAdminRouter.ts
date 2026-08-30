@@ -210,7 +210,99 @@ export const productAdminRouter = router({
       return { success: true, articleId: old.id };
     }),
 
-  // ─── 4. UPDATE SEO ────────────────────────────────────────
+  // ─── 4. UPDATE VARIANTS ───────────────────────────────────
+  /**
+   * Variantenvertrag: nur am explizit ausgewählten Stammartikel.
+   * Jeder aktive Eintrag muss auf einen aktiven Lagerartikel derselben
+   * Produktfamilie verweisen. Preise, Bestand und Sichtbarkeit bleiben dabei
+   * unverändert; es wird ausschließlich das variants-JSON normalisiert.
+   */
+  updateVariants: productManagerProcedure
+    .input(z.object({
+      articleId: z.number().int().positive(),
+      shopProductId: z.string().min(1),
+      variants: z.array(z.object({
+        sku: z.string().min(1).max(100),
+        name: z.string().min(1).max(100),
+        label: z.string().min(1).max(100),
+        price: z.number().positive().max(9999),
+        dosage: z.string().min(1).max(100),
+        isActive: z.boolean(),
+        inventoryArticleId: z.number().int().positive(),
+      })).min(1).max(50),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      const db = await getDb();
+      if (!db) throw new Error("DB nicht verfügbar");
+
+      const existing = await db
+        .select()
+        .from(articles)
+        .where(and(eq(articles.id, input.articleId), eq(articles.shopProductId, input.shopProductId)))
+        .limit(1);
+      const article = existing[0];
+      if (!article) {
+        throw new Error("Stammartikel passt nicht zur angegebenen Produktfamilie");
+      }
+
+      const activeVariants = input.variants.filter(variant => variant.isActive);
+      if (activeVariants.length === 0) {
+        throw new Error("Mindestens eine aktive Variante ist erforderlich");
+      }
+      const seenSkus = new Set<string>();
+      const seenInventoryIds = new Set<number>();
+      for (const variant of activeVariants) {
+        if (seenSkus.has(variant.sku)) {
+          throw new Error(`Doppelte Varianten-SKU: ${variant.sku}`);
+        }
+        if (seenInventoryIds.has(variant.inventoryArticleId)) {
+          throw new Error(`Doppelte Lagerartikel-ID: ${variant.inventoryArticleId}`);
+        }
+        seenSkus.add(variant.sku);
+        seenInventoryIds.add(variant.inventoryArticleId);
+      }
+
+      const inventoryRows = await db
+        .select({
+          id: articles.id,
+          sku: articles.sku,
+          shopProductId: articles.shopProductId,
+          isActive: articles.isActive,
+        })
+        .from(articles);
+      const inventoryById = new Map(inventoryRows.map(row => [row.id, row]));
+      for (const variant of activeVariants) {
+        const inventory = inventoryById.get(variant.inventoryArticleId);
+        if (!inventory) {
+          throw new Error(`Lagerartikel ${variant.inventoryArticleId} nicht gefunden`);
+        }
+        if (inventory.shopProductId !== input.shopProductId) {
+          throw new Error(`Lagerartikel ${variant.inventoryArticleId} gehört nicht zur Produktfamilie`);
+        }
+        if (inventory.sku !== variant.sku) {
+          throw new Error(`SKU ${variant.sku} passt nicht zu Lagerartikel ${variant.inventoryArticleId}`);
+        }
+        if (inventory.isActive !== 1) {
+          throw new Error(`Lagerartikel ${variant.inventoryArticleId} ist inaktiv`);
+        }
+      }
+
+      await db.update(articles)
+        .set({ variants: input.variants as any })
+        .where(eq(articles.id, article.id));
+      await writeAuditLog(db, {
+        articleId: article.id,
+        action: "UPDATE_VARIANTS",
+        fieldName: "variants",
+        oldValue: { variants: article.variants },
+        newValue: { variants: input.variants },
+        changedBy: ctx.user?.email ?? "product_manager",
+        rollbackData: { variants: article.variants },
+      });
+      return { success: true, articleId: article.id, variantCount: input.variants.length };
+    }),
+
+  // ─── 5. UPDATE SEO ────────────────────────────────────────
   /** SEO: seoTitle, seoDescription, seoKeywords, schemaJson – pro Sprache */
   updateSeo: productManagerProcedure
     .input(z.object({
