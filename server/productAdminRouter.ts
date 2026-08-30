@@ -336,7 +336,7 @@ export const productAdminRouter = router({
       shopProductId: z.string(),
       lang: z.string().min(2).max(5),
       name: z.string().max(200).optional(),
-      description: z.string().optional(),
+      description: z.union([z.string(), z.record(z.unknown()), z.array(z.unknown()), z.null()]).optional(),
       shortDescription: z.string().max(500).optional(),
       seoTitle: z.string().max(70).optional(),
       seoDescription: z.string().max(160).optional(),
