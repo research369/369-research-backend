@@ -15,6 +15,7 @@ export type PromoDefinition = {
 
 export type PromoMetadata = {
   restrict: string[];
+  freeShipping: string[];
 };
 
 export const roundMoney = (value: number): number =>
@@ -30,9 +31,9 @@ export const normalizeKwkPhone = (value: string): string => {
 };
 
 export function parsePromoMetadata(description?: string | null): PromoMetadata {
-  if (!description) return { restrict: [] };
+  if (!description) return { restrict: [], freeShipping: [] };
   const separatorIndex = description.lastIndexOf(" | {");
-  if (separatorIndex === -1) return { restrict: [] };
+  if (separatorIndex === -1) return { restrict: [], freeShipping: [] };
 
   try {
     const metadata = JSON.parse(description.substring(separatorIndex + 3).trim());
@@ -40,10 +41,95 @@ export function parsePromoMetadata(description?: string | null): PromoMetadata {
       restrict: Array.isArray(metadata.restrict)
         ? metadata.restrict.filter((value: unknown): value is string => typeof value === "string")
         : [],
+      freeShipping: Array.isArray(metadata.freeShipping)
+        ? metadata.freeShipping.filter((value: unknown): value is string => typeof value === "string")
+        : [],
     };
   } catch {
-    return { restrict: [] };
+    return { restrict: [], freeShipping: [] };
   }
+}
+
+export type KwkCatalogArticle = {
+  sku: string;
+  shopProductId: string | null;
+  name: string;
+  sellingPrice: string | number | null;
+  salePrice: string | number | null;
+  variants: unknown;
+  isActive: number;
+  shopVisible: number;
+};
+
+function normalizeDosage(value: unknown): string {
+  return typeof value === "string"
+    ? value.trim().replace(/(\d)\s*(mg|iu|ml|mcg)\b/gi, "$1 $2").toLowerCase()
+    : "";
+}
+
+function articleDosage(article: KwkCatalogArticle): string {
+  const match = article.name.match(/(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu))\s*\)?\s*$/i);
+  return normalizeDosage(match?.[1]);
+}
+
+export function resolveAuthoritativeItemPrice(
+  item: KwkCheckoutItem & { dosage?: string; isPlugPlay?: boolean; isNasalDiySet?: boolean; isFreeGift?: boolean },
+  catalog: KwkCatalogArticle[],
+): number {
+  if (item.isFreeGift) return 0;
+  const productId = (item.shopProductId || "").trim().toLowerCase();
+  if (!productId) throw new Error("KWK_ARTIKEL_OHNE_PRODUKTREFERENZ");
+
+  const family = catalog.filter((article) => article.isActive === 1 && (
+    article.shopProductId?.trim().toLowerCase() === productId
+    || article.sku.trim().toLowerCase() === productId
+  ));
+  const canonical = family.find((article) => article.shopVisible === 1 && Array.isArray(article.variants) && article.variants.length > 0)
+    ?? family.find((article) => article.shopVisible === 1)
+    ?? family[0];
+  if (!canonical) throw new Error(`KWK_ARTIKEL_NICHT_GEFUNDEN: ${item.shopProductId}`);
+
+  const salePrice = Number(canonical.salePrice);
+  let basePrice = Number.isFinite(salePrice) && salePrice > 0 ? salePrice : NaN;
+  const dosage = normalizeDosage(item.dosage);
+  if (!Number.isFinite(basePrice) && dosage) {
+    const configuredVariants = family.flatMap((article) => Array.isArray(article.variants) ? article.variants : []);
+    const configured = configuredVariants.find((raw) => {
+      if (!raw || typeof raw !== "object") return false;
+      const variant = raw as Record<string, unknown>;
+      return normalizeDosage(variant.dosage ?? variant.label ?? variant.name) === dosage;
+    }) as Record<string, unknown> | undefined;
+    const configuredPrice = Number(configured?.price);
+    const inventoryPrice = Number(family.find((article) => articleDosage(article) === dosage)?.sellingPrice);
+    basePrice = Number.isFinite(configuredPrice) && configuredPrice > 0 ? configuredPrice : inventoryPrice;
+  }
+  if (!Number.isFinite(basePrice)) basePrice = Number(canonical.sellingPrice);
+  if (!Number.isFinite(basePrice) || basePrice < 0) {
+    throw new Error(`KWK_ARTIKELPREIS_NICHT_ERMITTELBAR: ${item.shopProductId}`);
+  }
+
+  const optionSurcharge = (item.isPlugPlay ? 15 : 0) + (item.isNasalDiySet ? 7 : 0);
+  return roundMoney(basePrice + optionSurcharge);
+}
+
+export function resolveShippingRegion(country: string): "de" | "eu" | "ch" {
+  const normalized = country.trim().toLowerCase();
+  if (["de", "deutschland", "germany", "allemagne"].includes(normalized)) return "de";
+  if (["ch", "schweiz", "switzerland", "suisse", "svizzera"].includes(normalized)) return "ch";
+  return "eu";
+}
+
+export function calculateAuthoritativeShipping(input: {
+  country: string;
+  items: Array<{ isPlugPlay?: boolean; isNasalSpray?: boolean; isNasalDiySet?: boolean }>;
+  promoDescription?: string | null;
+}): number {
+  const region = resolveShippingRegion(input.country);
+  const { freeShipping } = parsePromoMetadata(input.promoDescription);
+  if (freeShipping.some((entry) => entry.toLowerCase() === region)) return 0;
+  const base = region === "de" ? 8 : region === "ch" ? 18 : 15;
+  const coldChain = input.items.some((item) => item.isPlugPlay || (item.isNasalSpray && !item.isNasalDiySet));
+  return base + (coldChain ? 7 : 0);
 }
 
 function productMatchesRestriction(productId: string, restriction: string): boolean {
