@@ -17,7 +17,7 @@ import { isKwkEnabled, bookPendingCredit, detectFraudFlags, hashAddress, calcula
 import { partners } from "../drizzle/schema.js";
 import { sql } from "drizzle-orm";
 import { queueCustomerDuplicateReview } from "./customerIntegrityService.js";
-import { NASAL_DIY_SET_COMPONENTS, isNasalDiySetEligible } from "./nasalDiySetConfig.js";
+import { getNasalSprayKitAvailability, getNasalSprayKitConfig, isNasalSprayKitEligible } from "./nasalDiySetConfig.js";
 import { persistAddressValidation, validateGermanAddress } from "./addressValidationService.js";
 import { bookPaidPartnerCommission, redeemPartnerCreditForOrder } from "./partnerCreditService.js";
 import { resolveQrAttribution } from "./qrCampaignService.js";
@@ -389,13 +389,48 @@ export const orderRouter = router({
         }
       }
 
-      // DIY-Nasenspray-Set darf nur für die zentral freigegebenen Produkte bestellt werden.
-      // Der Checkout kann die Bestands- oder Produktfreigabe nicht über Namen manipulieren.
-      const diyNasalItems = input.items.filter((item) => item.isNasalDiySet === true);
-      for (const item of diyNasalItems) {
-        if (!isNasalDiySetEligible(item.shopProductId)) {
-          throw new Error(`DIY-Nasenspray-Set ist für ${item.name} nicht verfügbar`);
+      // Nasenspray Kit: ausschließlich serverseitig konfigurierte Produkte und
+      // ausreichend vorhandenes BAC Wasser 10 ml. Der Browser kann weder die
+      // Freigabe noch den Lieferumfang oder die Verfügbarkeit manipulieren.
+      const nasalSprayKitItems = input.items.filter((item) => item.isNasalDiySet === true);
+      const nasalSprayKitConfig = await getNasalSprayKitConfig();
+      const nasalSprayKitAvailability = await getNasalSprayKitAvailability(nasalSprayKitConfig);
+      const requestedKitUnits = nasalSprayKitItems.reduce((sum, item) => sum + item.quantity, 0);
+      for (const item of nasalSprayKitItems) {
+        if (!isNasalSprayKitEligible(nasalSprayKitConfig, item.shopProductId)) {
+          throw new Error(`Nasenspray Kit ist für ${item.name} nicht verfügbar`);
         }
+        if (!item.shopProductId || !item.dosage) {
+          throw new Error("Nasenspray Kit benötigt eine eindeutige Produkt- und Variantenangabe");
+        }
+
+        const [kitProduct] = await db
+          .select({ variants: articles.variants, sellingPrice: articles.sellingPrice, salePrice: articles.salePrice })
+          .from(articles)
+          .where(and(eq(articles.isActive, 1), eq(articles.shopProductId, item.shopProductId)))
+          .limit(1);
+        const configuredVariants = Array.isArray(kitProduct?.variants)
+          ? kitProduct.variants as Array<{ dosage?: unknown; price?: unknown; hidden?: unknown }>
+          : [];
+        const configuredVariant = configuredVariants.find((variant) =>
+          variant.hidden !== true
+          && typeof variant.dosage === "string"
+          && variant.dosage.trim().toLowerCase() === item.dosage!.trim().toLowerCase(),
+        );
+        const configuredBasePrice = Number(configuredVariant?.price ?? kitProduct?.sellingPrice);
+        const configuredSalePrice = Number(kitProduct?.salePrice);
+        // Muss die öffentliche Preiswahl von ProductCard/ProductModal exakt spiegeln:
+        // Ein positiver Angebotswert gilt produktweit, sonst der gewählte Variantenpreis.
+        const basePrice = Number.isFinite(configuredSalePrice) && configuredSalePrice > 0
+          ? configuredSalePrice
+          : configuredBasePrice;
+        const expectedKitPrice = roundMoney(basePrice + nasalSprayKitConfig.surcharge);
+        if (!Number.isFinite(basePrice) || basePrice < 0 || Math.abs(roundMoney(item.price) - expectedKitPrice) > 0.02) {
+          throw new Error(`Nasenspray Kit Preis für ${item.name} ist nicht gültig`);
+        }
+      }
+      if (requestedKitUnits > 0 && (!nasalSprayKitAvailability.kitAvailable || nasalSprayKitAvailability.availableUnits < requestedKitUnits)) {
+        throw new Error("Nasenspray Kit ist aktuell nicht verfügbar: BAC Wasser 10 ml reicht nicht aus");
       }
 
       // ── Stock deduction: reduce stock for all ordered peptide items ──
@@ -592,17 +627,19 @@ export const orderRouter = router({
         }
       }
 
-      // ── DIY-Nasenspray-Set: enthaltene Komponenten als transparente Bestellpositionen ──
-      // BAC Wasser 10 ml ist bestandsgeführt; die weiteren Komponenten sind sichtbar,
-      // bis sie als eigene WaWi-Artikel mit SKU und Bestand angelegt werden.
-      for (const item of diyNasalItems) {
-        for (const component of NASAL_DIY_SET_COMPONENTS) {
+      // ── Nasenspray Kit: transparente Zubehörpositionen und BAC-Bestandsabzug ──
+      // BAC Wasser 10 ml ist die einzige bestandsgeführte Komponente. Flasche und
+      // Aufziehspritze/Kanüle gehören zum Lieferumfang, aber erhalten bewusst keine
+      // erfundene WaWi-Lagerzeile.
+      for (const item of nasalSprayKitItems) {
+        for (const component of nasalSprayKitConfig.components) {
           let componentArticle: typeof articles.$inferSelect | undefined;
-          if (component.inventoryTracked) {
+          if (component.inventoryTracked && component.articleShopProductId) {
             [componentArticle] = await db.select().from(articles)
-              .where(eq(articles.shopProductId, component.articleShopProductId))
+              .where(and(eq(articles.shopProductId, component.articleShopProductId), eq(articles.isActive, 1)))
               .limit(1);
           }
+          const componentQuantity = item.quantity * component.quantityPerKit;
           await db.insert(orderItems).values({
             orderId,
             name: component.name,
@@ -610,22 +647,21 @@ export const orderRouter = router({
             variant: component.variant,
             type: "accessory",
             price: "0.00",
-            quantity: item.quantity,
+            quantity: componentQuantity,
             articleId: componentArticle?.id ?? null,
             isNasalDiySet: true,
           });
 
-          if (componentArticle && (componentArticle.stock ?? 0) > 0) {
-            const deduct = Math.min(item.quantity, componentArticle.stock ?? 0);
-            const newStock = (componentArticle.stock ?? 0) - deduct;
+          if (componentArticle) {
+            const newStock = (componentArticle.stock ?? 0) - componentQuantity;
             await db.update(articles).set({ stock: newStock, updatedAt: new Date() }).where(eq(articles.id, componentArticle.id));
             await db.insert(stockHistory).values({
               articleId: componentArticle.id,
-              quantityChange: -deduct,
+              quantityChange: -componentQuantity,
               changeType: "verkauf",
               quantityBefore: componentArticle.stock ?? 0,
               quantityAfter: newStock,
-              reason: `DIY-Nasenspray-Set für Bestellung ${orderId}`,
+              reason: `Nasenspray Kit für Bestellung ${orderId}`,
               orderId,
               userName: "system",
             });

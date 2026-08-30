@@ -6,6 +6,7 @@ import { eq, desc, asc, like, and, sql, gte, lte, inArray } from "drizzle-orm";
 import { router, adminProcedure, productManagerProcedure, packingProcedure, publicProcedure } from "./trpc.js";
 import { getDb, getPool } from "./db.js";
 import { articles, stockHistory, orderItems, orders, articleTranslations, articleFaq } from "../drizzle/schema.js";
+import { getNasalSprayKitAvailability, getNasalSprayKitConfig } from "./nasalDiySetConfig.js";
 
 type PublicShopVariant = {
   dosage: string;
@@ -965,6 +966,29 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
         products,
       };
     }),
+
+  /**
+   * PUBLIC: Der Nasenspray-Kit-Vertrag für die Storefront.
+   * Rein lesend; Preis, Freigaben und BAC-Verfügbarkeit bleiben serverseitig.
+   */
+  nasalSprayKit: publicProcedure.query(async () => {
+    const config = await getNasalSprayKitConfig();
+    const availability = await getNasalSprayKitAvailability(config);
+    return {
+      version: config.version,
+      displayName: config.displayName,
+      surcharge: config.surcharge,
+      products: config.products,
+      components: config.components.map(({ name, variant, inventoryTracked, quantityPerKit }) => ({
+        name,
+        variant,
+        inventoryTracked,
+        quantityPerKit,
+      })),
+      kitAvailable: availability.kitAvailable,
+      availableUnits: availability.availableUnits,
+    };
+  }),
 
   // PUBLIC: Get all shop-visible products (Single Source of Truth)
   shopProducts: publicProcedure.query(async () => {
