@@ -24,9 +24,12 @@ import { resolveQrAttribution } from "./qrCampaignService.js";
 import { withStoreSourceMarker } from "./storeSource.js";
 import {
   calculateAuthoritativeKwkOrder,
+  calculateAuthoritativeShipping,
   calculatePromoDiscount,
   normalizeKwkPhone,
   roundMoney,
+  resolveAuthoritativeItemPrice,
+  resolveShippingRegion,
   type PromoDefinition,
 } from "./kwkCheckoutPricing.js";
 import { verifyKwkToken } from "./kwkAuth.js";
@@ -123,8 +126,31 @@ export const orderRouter = router({
 
       const qrAttribution = await resolveQrAttribution(input.qrAttributionToken);
 
+      const requestedKwkCredit = roundMoney(input.kwkCreditUsed || 0);
+      const hasKwkRequest = Boolean(input.kwkCode?.trim())
+        || requestedKwkCredit > 0
+        || (input.kwkDiscount || 0) > 0;
+
+      if (hasKwkRequest) {
+        const catalog = await db.select({
+          sku: articles.sku,
+          shopProductId: articles.shopProductId,
+          name: articles.name,
+          sellingPrice: articles.sellingPrice,
+          salePrice: articles.salePrice,
+          variants: articles.variants,
+          isActive: articles.isActive,
+          shopVisible: articles.shopVisible,
+        }).from(articles);
+        input.items = input.items.map((item) => ({
+          ...item,
+          price: resolveAuthoritativeItemPrice(item, catalog),
+        }));
+        input.subtotal = roundMoney(input.items.reduce((sum, item) => sum + item.price * item.quantity, 0));
+      }
+
       const lineSubtotal = roundMoney(input.items.reduce((sum, item) => sum + item.price * item.quantity, 0));
-      if (Math.abs(lineSubtotal - roundMoney(input.subtotal)) > 0.02) {
+      if (!hasKwkRequest && Math.abs(lineSubtotal - roundMoney(input.subtotal)) > 0.02) {
         throw new Error("Bestellsumme stimmt nicht mit den Artikelpositionen überein");
       }
 
@@ -133,11 +159,6 @@ export const orderRouter = router({
       // Partnerzuordnung (Code, Nummer, Rabatt oder Guthaben) schließt KWK dagegen aus.
       let kwkReferralAccount: { id: number; email: string; phone: string } | null = null;
       let kwkCreditAccountId: number | null = null;
-      const requestedKwkCredit = roundMoney(input.kwkCreditUsed || 0);
-      const hasKwkRequest = Boolean(input.kwkCode?.trim())
-        || requestedKwkCredit > 0
-        || (input.kwkDiscount || 0) > 0;
-
       if (hasKwkRequest) {
         const normalizedDiscountCode = input.discountCode?.trim().toUpperCase() || "";
         let discountCodeIsPartnerCode = false;
@@ -230,6 +251,12 @@ export const orderRouter = router({
           items: input.items,
           promo: promoDefinition,
         });
+        input.shipping = calculateAuthoritativeShipping({
+          country: input.customer.country,
+          items: input.items,
+          promoDescription: promoDefinition?.description,
+        });
+        input.shippingCountry = resolveShippingRegion(input.customer.country);
         const authoritative = calculateAuthoritativeKwkOrder({
           subtotal: input.subtotal,
           shipping: input.shipping,
