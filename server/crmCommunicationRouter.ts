@@ -1,20 +1,23 @@
 import { z } from "zod";
-import { and, desc, eq, ilike } from "drizzle-orm";
+import { and, desc, eq, ilike, or } from "drizzle-orm";
 import { router, adminProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
 import { customerCommunications, customers, orders } from "../drizzle/schema.js";
 import { sendAndArchiveCrmEmail } from "./crmCommunicationService.js";
 
-async function resolveCustomerForOrder(orderId: string): Promise<{ customerId: number; email: string; name: string }> {
+async function resolveCustomerForOrder(orderId: string): Promise<{ customerId: number; email: string; name: string; canonicalOrderId: string }> {
   const db = await getDb();
   if (!db) throw new Error("Datenbank nicht verfügbar");
 
-  const [order] = await db.select().from(orders).where(eq(orders.orderId, orderId)).limit(1);
+  const [order] = await db.select().from(orders).where(or(
+    eq(orders.orderId, orderId),
+    eq(orders.externalOrderReference, orderId),
+  )).limit(1);
   if (!order) throw new Error("Bestellung nicht gefunden");
 
   if (order.customerId) {
     const [customer] = await db.select().from(customers).where(eq(customers.id, order.customerId)).limit(1);
-    if (customer) return { customerId: customer.id, email: customer.email || order.email, name: customer.name };
+    if (customer) return { customerId: customer.id, email: customer.email || order.email, name: customer.name, canonicalOrderId: order.orderId };
   }
 
   const [matchingCustomer] = await db.select().from(customers)
@@ -23,7 +26,7 @@ async function resolveCustomerForOrder(orderId: string): Promise<{ customerId: n
   if (matchingCustomer) {
     await db.update(orders).set({ customerId: matchingCustomer.id, updatedAt: new Date() })
       .where(eq(orders.id, order.id));
-    return { customerId: matchingCustomer.id, email: matchingCustomer.email || order.email, name: matchingCustomer.name };
+    return { customerId: matchingCustomer.id, email: matchingCustomer.email || order.email, name: matchingCustomer.name, canonicalOrderId: order.orderId };
   }
 
   // An order without a customer record cannot have a durable CRM history. Create one
@@ -46,7 +49,7 @@ async function resolveCustomerForOrder(orderId: string): Promise<{ customerId: n
 
   await db.update(orders).set({ customerId: createdCustomer.id, updatedAt: new Date() })
     .where(eq(orders.id, order.id));
-  return { customerId: createdCustomer.id, email: createdCustomer.email || order.email, name: createdCustomer.name };
+  return { customerId: createdCustomer.id, email: createdCustomer.email || order.email, name: createdCustomer.name, canonicalOrderId: order.orderId };
 }
 
 export const crmCommunicationRouter = router({
@@ -65,8 +68,13 @@ export const crmCommunicationRouter = router({
     .query(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new Error("Datenbank nicht verfügbar");
+      const [order] = await db.select({ orderId: orders.orderId }).from(orders).where(or(
+        eq(orders.orderId, input.orderId),
+        eq(orders.externalOrderReference, input.orderId),
+      )).limit(1);
+      if (!order) return [];
       return db.select().from(customerCommunications)
-        .where(eq(customerCommunications.orderId, input.orderId))
+        .where(eq(customerCommunications.orderId, order.orderId))
         .orderBy(desc(customerCommunications.createdAt));
     }),
 
@@ -94,10 +102,12 @@ export const crmCommunicationRouter = router({
 
       let customerId = input.customerId;
       let recipientEmail = "";
+      let canonicalOrderId = input.orderId;
       if (input.orderId) {
         const context = await resolveCustomerForOrder(input.orderId);
         customerId = context.customerId;
         recipientEmail = context.email;
+        canonicalOrderId = context.canonicalOrderId;
       } else if (customerId) {
         const [customer] = await db.select().from(customers).where(eq(customers.id, customerId)).limit(1);
         if (!customer) throw new Error("Kunde nicht gefunden");
@@ -111,7 +121,7 @@ export const crmCommunicationRouter = router({
         subject: input.subject,
         htmlBody: input.htmlBody,
         plainText: input.plainText,
-        orderId: input.orderId || null,
+        orderId: canonicalOrderId || null,
         createdBy: ctx.user.name || ctx.user.username,
         source: "manual",
         idempotencyKey: input.idempotencyKey,

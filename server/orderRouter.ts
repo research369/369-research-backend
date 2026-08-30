@@ -5,7 +5,7 @@
  */
 
 import { z } from "zod";
-import { eq, desc, inArray, and } from "drizzle-orm";
+import { eq, desc, inArray, and, or } from "drizzle-orm";
 import { router, publicProcedure, adminProcedure } from "./trpc.js";
 import { getDb, getPool } from "./db.js";
 import { orders, orderItems, articles, stockHistory, customers, customerCommunications } from "../drizzle/schema.js";
@@ -1006,7 +1006,7 @@ export const orderRouter = router({
       if (input?.search) {
         const s = `%${input.search.toLowerCase()}%`;
         conditions.push(
-          sql`(LOWER(${orders.orderId}) LIKE ${s} OR LOWER(${orders.firstName}) LIKE ${s} OR LOWER(${orders.lastName}) LIKE ${s} OR LOWER(${orders.email}) LIKE ${s})`
+          sql`(LOWER(${orders.orderId}) LIKE ${s} OR LOWER(${orders.externalOrderReference}) LIKE ${s} OR LOWER(${orders.firstName}) LIKE ${s} OR LOWER(${orders.lastName}) LIKE ${s} OR LOWER(${orders.email}) LIKE ${s})`
         );
       }
 
@@ -1053,10 +1053,13 @@ export const orderRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
-      const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1);
+      const [order] = await db.select().from(orders).where(or(
+        eq(orders.orderId, input.orderId),
+        eq(orders.externalOrderReference, input.orderId),
+      )).limit(1);
       if (!order) throw new Error("Order not found");
 
-      const items = await db.select().from(orderItems).where(eq(orderItems.orderId, input.orderId));
+      const items = await db.select().from(orderItems).where(eq(orderItems.orderId, order.orderId));
 
       return {
         ...order,
