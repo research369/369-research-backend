@@ -29,6 +29,7 @@ import { ensureAddressValidationSchema } from "./addressValidationSchema.js";
 import { ensureCustomerDossierSchema } from "./customerDossierSchema.js";
 import { ensureQrCampaignSchema } from "./qrCampaignSchema.js";
 import { qrRedirectRouter } from "./qrRedirectRouter.js";
+import { ensurePeps4petsCheckoutSchema } from "./peps4petsCheckoutSchema.js";
 
 const app = express();
 
@@ -241,6 +242,15 @@ async function start() {
     await ensureQrCampaignSchema();
   } catch (err) {
     console.warn("[Server] QR campaign schema migration failed:", err);
+  }
+
+  // Peps4pets: isolated storefront metadata, a separate visible reference and
+  // evidence-bound retry protection. Existing 369 order contracts stay unchanged.
+  try {
+    await ensurePeps4petsCheckoutSchema();
+    console.log("[Server] Peps4pets checkout schema ready");
+  } catch (err) {
+    console.warn("[Server] Peps4pets checkout schema migration failed:", err);
   }
 
   // Seed admin user on first start

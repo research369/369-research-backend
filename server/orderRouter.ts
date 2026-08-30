@@ -28,6 +28,9 @@ const createOrderSchema = z.object({
   orderId: z.string().optional(), // now generated server-side via DB sequence
   // Zusätzliche Shopquelle. Ohne Angabe bleibt die bestehende 369-Research-Logik unverändert.
   storeKey: z.enum(["369research", "peps4pets"]).optional().default("369research"),
+  // Nur Peps4pets verwendet diesen evidenzgebundenen Schlüssel. Die kanonische
+  // WaWi-Nummer bleibt unabhängig davon weiterhin der interne Primärvertrag.
+  checkoutIdempotencyKey: z.string().trim().min(12).max(128).optional(),
   items: z.array(z.object({
     name: z.string(),
     dosage: z.string().optional(),
@@ -203,7 +206,49 @@ export const orderRouter = router({
         }
       };
 
-      // ── Generate sequential order ID from DB sequence ──
+      const isPeps4petsOrder = input.storeKey === "peps4pets";
+      const checkoutIdempotencyKey = isPeps4petsOrder ? input.checkoutIdempotencyKey : undefined;
+      if (isPeps4petsOrder && !checkoutIdempotencyKey) {
+        throw new Error("Peps4pets-Bestellungen benötigen einen stabilen Checkout-Schlüssel");
+      }
+
+      const existingP4pResponse = (existingOrder: typeof orders.$inferSelect) => ({
+        success: true,
+        orderId: existingOrder.orderId,
+        externalOrderReference: existingOrder.externalOrderReference || undefined,
+      });
+
+      let p4pLockClient: any = null;
+      if (isPeps4petsOrder && checkoutIdempotencyKey) {
+        const [existingBeforeLock] = await db.select().from(orders)
+          .where(eq(orders.checkoutIdempotencyKey, checkoutIdempotencyKey)).limit(1);
+        if (existingBeforeLock) return existingP4pResponse(existingBeforeLock);
+
+        const pool = await getPool();
+        if (!pool) throw new Error("Datenbank nicht verfügbar");
+        const lockClient = await pool.connect();
+        const lockResult = await lockClient.query(
+          "SELECT pg_try_advisory_lock(hashtext($1)) AS locked",
+          [`peps4pets-checkout:${checkoutIdempotencyKey}`],
+        );
+        if (!lockResult.rows[0]?.locked) {
+          lockClient.release();
+          const [existingWhileLocked] = await db.select().from(orders)
+            .where(eq(orders.checkoutIdempotencyKey, checkoutIdempotencyKey)).limit(1);
+          if (existingWhileLocked) return existingP4pResponse(existingWhileLocked);
+          throw new Error("Deine Bestellung wird bereits verarbeitet. Bitte warte einen Moment und versuche es erneut.");
+        }
+        p4pLockClient = lockClient;
+      }
+
+      try {
+      if (isPeps4petsOrder && checkoutIdempotencyKey) {
+        const [existingAfterLock] = await db.select().from(orders)
+          .where(eq(orders.checkoutIdempotencyKey, checkoutIdempotencyKey)).limit(1);
+        if (existingAfterLock) return existingP4pResponse(existingAfterLock);
+      }
+
+      // ── Generate sequential canonical WaWi order ID from DB sequence ──
       let orderId = input.orderId || `369-${Date.now()}`;
       try {
         const { sql } = await import('drizzle-orm');
@@ -217,6 +262,8 @@ export const orderRouter = router({
       } catch (err) {
         console.warn('[Orders] Failed to generate sequential order ID, using fallback:', err);
       }
+
+      let externalOrderReference: string | null = null;
 
       // Ein bewusst übergangener Hinweis wird sofort mit der finalen Bestellnummer
       // festgeschrieben. Der Nachweis enthält keine änderbare UI-Aktion.
@@ -280,14 +327,23 @@ export const orderRouter = router({
       }
 
       // ── Idempotency check: if order already exists, skip re-processing ──
-      const existingOrder = await db.select().from(orders).where(eq(orders.orderId, orderId)).limit(1);
+      const existingOrder = isPeps4petsOrder && checkoutIdempotencyKey
+        ? await db.select().from(orders).where(eq(orders.checkoutIdempotencyKey, checkoutIdempotencyKey)).limit(1)
+        : await db.select().from(orders).where(eq(orders.orderId, orderId)).limit(1);
       if (existingOrder.length > 0) {
         console.warn(`[Orders] Duplicate request for order ${orderId} – completing only idempotent ledger steps`);
         if (parseFloat(existingOrder[0].creditUsed || "0") > 0) {
           await redeemPartnerCreditForOrder(orderId);
         }
-        return { success: true, orderId: orderId };
+        return isPeps4petsOrder ? existingP4pResponse(existingOrder[0]) : { success: true, orderId: orderId };
       }
+
+      // Stock check, stock movement, order persistence, order items and customer link
+      // form one transaction. A failure in this section cannot leave a partial P4P order.
+      let customerId: number | null = null;
+      let customerIntegrityTrigger: "order_customer_created" | "order_customer_changed" | null = null;
+      await db.transaction(async (tx) => {
+      const db = tx;
 
             // ── Stock check: verify all peptide items are in stock before creating order ──
       const allArticlesForCheck = await db.select().from(articles).where(eq(articles.isActive, 1));
@@ -398,6 +454,18 @@ export const orderRouter = router({
         }
       }
 
+      // P4P receives an additional customer-facing reference only once the stock
+      // check succeeded. It never replaces the canonical WaWi order ID.
+      if (isPeps4petsOrder) {
+        const p4pSequence = await db.execute(sql`SELECT nextval('peps4pets_order_reference_seq') AS reference_number`);
+        const p4pRows = p4pSequence as any;
+        const referenceNumber = p4pRows?.[0]?.reference_number ?? p4pRows?.rows?.[0]?.reference_number;
+        if (referenceNumber === undefined || referenceNumber === null) {
+          throw new Error("Die Peps4pets-Bestellreferenz konnte nicht erzeugt werden");
+        }
+        externalOrderReference = `P4P-${String(referenceNumber)}`;
+      }
+
       // ── Stock deduction: reduce stock for all ordered peptide items ──
       // Bei Substitution: Bestand der Ersatz-Varianten abziehen, nicht der bestellten Variante
       for (let itemIdx = 0; itemIdx < input.items.length; itemIdx++) {
@@ -463,6 +531,9 @@ export const orderRouter = router({
       // Insert order
       await db.insert(orders).values({
         orderId: orderId,
+        storeKey: input.storeKey,
+        externalOrderReference,
+        checkoutIdempotencyKey: checkoutIdempotencyKey || null,
         firstName: input.customer.firstName,
         lastName: input.customer.lastName,
         // Leerer Wert statt einer künstlichen Platzhalteradresse, wenn keine E-Mail erfasst wurde.
@@ -710,8 +781,6 @@ export const orderRouter = router({
       }
 
       // ── Auto-create or link customer ──
-      let customerId: number | null = null;
-      let customerIntegrityTrigger: "order_customer_created" | "order_customer_changed" | null = null;
       try {
         const customerEmail = (input.customer.email || "").toLowerCase().trim();
         const customerPhone = input.customer.phone.trim();
@@ -855,6 +924,8 @@ export const orderRouter = router({
         console.warn("[Customers] Failed to auto-create/link customer:", err);
       }
 
+      });
+
       // Nach Kundenverknüpfung wird der bereits gesicherte Nachweis zusätzlich der
       // Kundenakte zugeordnet, ohne seinen Inhalt oder seine Bestätigung zu verändern.
       if (customerId && addressWarningNeedsConfirmation) {
@@ -903,7 +974,16 @@ export const orderRouter = router({
       // Eine zusätzliche interne Mail wäre redundant und führt zu 4 Mails pro Bestellung.
       // sendAdminOrderNotification wurde hier entfernt.
 
-      return { success: true, orderId: orderId };
+      return { success: true, orderId: orderId, externalOrderReference: externalOrderReference || undefined };
+      } finally {
+        if (p4pLockClient) {
+          try {
+            await p4pLockClient.query("SELECT pg_advisory_unlock(hashtext($1))", [`peps4pets-checkout:${checkoutIdempotencyKey}`]);
+          } finally {
+            p4pLockClient.release();
+          }
+        }
+      }
     }),
 
   // ADMIN: List all orders with items
@@ -1161,10 +1241,11 @@ export const orderRouter = router({
       const alreadyBunqMatched = !!order.bunqPaymentId;
 
       // Run intelligent matching
-      const match = intelligentMatch(
-        {
-          orderId: order.orderId,
-          firstName: order.firstName,
+        const match = intelligentMatch(
+          {
+            orderId: order.orderId,
+            externalOrderReference: order.externalOrderReference,
+            firstName: order.firstName,
           lastName: order.lastName,
           total: order.total,
         },

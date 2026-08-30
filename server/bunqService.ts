@@ -264,18 +264,18 @@ function normalize(str: string): string {
 
 /**
  * Extract potential order IDs from a description string.
- * Matches patterns like "369-10003", "369 10003", "36910003", "369_10003"
+ * Matches canonical "369" references and additive P4P customer references.
  */
 function extractOrderIds(description: string): string[] {
   const results: string[] = [];
-  // Match "369" followed by optional separator and digits
-  const patterns = [
-    /369[\s\-_\.]*(\d{4,6})/gi,  // 369-10003, 369 10003, 36910003
+  const patterns: Array<{ pattern: RegExp; normalize: (value: string) => string }> = [
+    { pattern: /369[\s\-_\.]*(\d{4,6})/gi, normalize: (value) => `369-${value}` },
+    { pattern: /p4p[\s\-_\.]*(\d{4,8})/gi, normalize: (value) => `P4P-${value}` },
   ];
-  for (const pattern of patterns) {
+  for (const { pattern, normalize: normalizeReference } of patterns) {
     let match;
     while ((match = pattern.exec(description)) !== null) {
-      results.push(`369-${match[1]}`);
+      results.push(normalizeReference(match[1]));
     }
   }
   return results;
@@ -297,7 +297,7 @@ export interface MatchResult {
  * Returns the best match with confidence level.
  */
 export function intelligentMatch(
-  order: { orderId: string; firstName: string; lastName: string; total: string },
+  order: { orderId: string; externalOrderReference?: string | null; firstName: string; lastName: string; total: string },
   payments: BunqPayment[]
 ): MatchResult {
   const orderTotal = parseFloat(order.total);
@@ -321,9 +321,12 @@ export function intelligentMatch(
 
     // Check 1: Order number in description (with fuzzy matching)
     const extractedIds = extractOrderIds(paymentDesc);
-    const orderNumberMatch = extractedIds.some(
-      id => id.toUpperCase() === order.orderId.toUpperCase()
-    ) || paymentDesc.toUpperCase().includes(order.orderId.toUpperCase());
+    const acceptedReferences = [order.orderId, order.externalOrderReference]
+      .filter((reference): reference is string => Boolean(reference));
+    const orderNumberMatch = acceptedReferences.some((reference) =>
+      extractedIds.some((id) => id.toUpperCase() === reference.toUpperCase())
+      || paymentDesc.toUpperCase().includes(reference.toUpperCase()),
+    );
 
     // Check 2: Name matching (sender name contains customer name parts or vice versa)
     const nameMatch = orderNameParts.length > 0 && orderNameParts.some(part =>
@@ -399,7 +402,7 @@ export function intelligentMatch(
 
 /**
  * Legacy: Match a payment description against an order ID
- * Order IDs are like "369-XXXXXX"
+ * Order IDs can be canonical "369-XXXXXX" values or P4P customer references.
  */
 export function matchPaymentToOrder(
   payment: BunqPayment,
