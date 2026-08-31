@@ -112,8 +112,6 @@ Auto-Deploy bei jedem Push auf `main`.
 | `DHL_API_KEY` | DHL API Key | ja |
 | `DHL_BUSINESS_USERNAME` | DHL Business Account Username | ja |
 | `DHL_BUSINESS_PASSWORD` | DHL Business Account Passwort | ja |
-| `SENDCLOUD_PUBLIC_KEY` | Sendcloud Public Key | optional |
-| `SENDCLOUD_SECRET_KEY` | Sendcloud Secret Key | optional |
 | `PORT` | Server Port (Railway setzt automatisch) | auto |
 
 ---
