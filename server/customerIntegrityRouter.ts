@@ -45,8 +45,18 @@ export const customerIntegrityRouter = router({
     if (!customer) return null;
     const linked = (await db.select().from(orders).orderBy(desc(orders.orderDate))).filter((order) => order.customerId === customer.id);
     const countable = linked.filter((order) => PAID.has(order.status));
-    // Nur die in der UI gezeigten jüngsten Bestellungen mit Positionen anreichern.
-    // Umsatz und Anzahl bleiben trotzdem über die gesamte Historie korrekt berechnet.
+    // Die ausführliche Bestellansicht bleibt absichtlich auf die jüngsten zehn
+    // Aufträge begrenzt. Interne Notizen werden jedoch unabhängig davon aus der
+    // vollständigen, bereits verknüpften Kundenhistorie geliefert: Eine neue
+    // Bestellung darf einen älteren Hinweis niemals aus dem Kundenkontext drücken.
+    const historicalNotes = linked
+      .filter((order) => typeof order.internalNote === "string" && order.internalNote.trim().length > 0)
+      .map((order) => ({
+        orderId: order.orderId,
+        orderDate: order.orderDate,
+        status: order.status,
+        internalNote: order.internalNote!.trim(),
+      }));
     const historyOrders = linked.slice(0, 10);
     const historyOrderIds = historyOrders.map((order) => order.orderId);
     const historyItems = historyOrderIds.length > 0
@@ -63,6 +73,7 @@ export const customerIntegrityRouter = router({
       totalOrders: countable.length,
       totalSpent: countable.reduce((sum, order) => sum + Number(order.total || 0), 0),
       lastOrderAt: linked[0]?.orderDate || null,
+      historicalNotes,
       orders: historyOrders.map((order) => ({
         orderId: order.orderId,
         orderDate: order.orderDate,
