@@ -7,6 +7,7 @@ import {
   normalizeKwkPhone,
   parsePromoMetadata,
   resolveAuthoritativeItemPrice,
+  requiresColdChainShipping,
 } from "./kwkCheckoutPricing.js";
 
 test("general promo and KWK stack sequentially while shipping stays untouched", () => {
@@ -91,4 +92,14 @@ test("shipping comes from the delivery country and is never discounted by KWK", 
   assert.equal(calculateAuthoritativeShipping({ country: "Deutschland", items: [] }), 8);
   assert.equal(calculateAuthoritativeShipping({ country: "Schweiz", items: [{ isPlugPlay: true }] }), 25);
   assert.equal(calculateAuthoritativeShipping({ country: "Deutschland", items: [{ isPlugPlay: true }], promoDescription: 'Aktion | {"freeShipping":["de"]}' }), 0);
+});
+
+test("finished nasal sprays always require cold-chain shipping, including legacy bundle variants", () => {
+  assert.equal(requiresColdChainShipping({ isNasalSpray: true }), true);
+  assert.equal(requiresColdChainShipping({ name: "Selank (10 mg)", variant: "Bundle: Mind X Bundle (Nasenspray)" }), true);
+  assert.equal(requiresColdChainShipping({ name: "DIY Nasenspray-Set", isNasalDiySet: true }), false);
+  assert.equal(calculateAuthoritativeShipping({
+    country: "Deutschland",
+    items: [{ name: "Selank (10 mg)", variant: "Bundle: Mind X Bundle (Nasenspray)" }],
+  }), 15);
 });

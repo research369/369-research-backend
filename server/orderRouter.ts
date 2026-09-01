@@ -26,6 +26,7 @@ import {
   calculateAuthoritativeKwkOrder,
   calculateAuthoritativeShipping,
   calculatePromoDiscount,
+  requiresColdChainShipping,
   normalizeKwkPhone,
   roundMoney,
   resolveAuthoritativeItemPrice,
@@ -149,7 +150,28 @@ export const orderRouter = router({
         input.subtotal = roundMoney(input.items.reduce((sum, item) => sum + item.price * item.quantity, 0));
       }
 
-      const lineSubtotal = roundMoney(input.items.reduce((sum, item) => sum + item.price * item.quantity, 0));
+        // Kühlpflichtige Artikel dürfen niemals mit der normalen DHL-Gebühr
+        // durchrutschen. Ein bereits gewährter Gratisversand (0 €) bleibt dabei
+        // ausdrücklich erhalten; alle normalen Versandbeträge werden mindestens
+        // auf die serverseitig berechnete Kühlversandpauschale angehoben.
+        const serverBaseShipping = calculateAuthoritativeShipping({
+          country: input.customer.country,
+          items: [],
+        });
+        const serverColdShipping = calculateAuthoritativeShipping({
+          country: input.customer.country,
+          items: input.items,
+        });
+        if (
+          input.items.some(requiresColdChainShipping)
+          && input.shipping >= serverBaseShipping
+          && input.shipping < serverColdShipping
+        ) {
+          input.shipping = serverColdShipping;
+          input.shippingCountry = resolveShippingRegion(input.customer.country);
+        }
+
+        const lineSubtotal = roundMoney(input.items.reduce((sum, item) => sum + item.price * item.quantity, 0));
       if (!hasKwkRequest && Math.abs(lineSubtotal - roundMoney(input.subtotal)) > 0.02) {
         throw new Error("Bestellsumme stimmt nicht mit den Artikelpositionen überein");
       }

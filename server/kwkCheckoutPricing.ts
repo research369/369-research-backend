@@ -119,17 +119,37 @@ export function resolveShippingRegion(country: string): "de" | "eu" | "ch" {
   return "eu";
 }
 
+export type ShippingCheckoutItem = {
+  name?: string;
+  variant?: string;
+  isPlugPlay?: boolean;
+  isNasalSpray?: boolean;
+  isNasalDiySet?: boolean;
+};
+
+/**
+ * Kühlversand ist für Plug&Play und fertig gemischte Nasensprays verpflichtend.
+ * Neben dem persistierten Flag schützt die Rückfallerkennung Bestellungen aus
+ * älteren Bundleversionen, deren Variantenbezeichnung „Nasenspray“ enthält.
+ */
+export function requiresColdChainShipping(item: ShippingCheckoutItem): boolean {
+  if (item.isPlugPlay === true) return true;
+  if (item.isNasalDiySet === true) return false;
+  if (item.isNasalSpray === true) return true;
+  const descriptor = `${item.name || ""} ${item.variant || ""}`.toLowerCase();
+  return descriptor.includes("nasenspray") && !descriptor.includes("diy");
+}
+
 export function calculateAuthoritativeShipping(input: {
   country: string;
-  items: Array<{ isPlugPlay?: boolean; isNasalSpray?: boolean; isNasalDiySet?: boolean }>;
+  items: ShippingCheckoutItem[];
   promoDescription?: string | null;
 }): number {
   const region = resolveShippingRegion(input.country);
   const { freeShipping } = parsePromoMetadata(input.promoDescription);
   if (freeShipping.some((entry) => entry.toLowerCase() === region)) return 0;
   const base = region === "de" ? 8 : region === "ch" ? 18 : 15;
-  const coldChain = input.items.some((item) => item.isPlugPlay || (item.isNasalSpray && !item.isNasalDiySet));
-  return base + (coldChain ? 7 : 0);
+  return base + (input.items.some(requiresColdChainShipping) ? 7 : 0);
 }
 
 function productMatchesRestriction(productId: string, restriction: string): boolean {
