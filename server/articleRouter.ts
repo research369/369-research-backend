@@ -340,6 +340,22 @@ export const articleRouter = router({
       const configuredInventoryArticleIds = new Set(
         allArticlesForVariants.flatMap(article => getConfiguredInventoryArticleIds(article.variants)),
       );
+      // Eine Variantenfamilie gilt im WaWi-Niedrigbestandsmodus als relevant,
+      // sobald die Familienzeile ODER eine aktiv verknüpfte Lagerzeile unter
+      // ihrem eigenen Meldebestand liegt. Die Shop-Kaufbarkeit bleibt davon
+      // getrennt: Nullbestand darf die WaWi-Variante nie verschwinden lassen.
+      const isLowStockArticleOrFamily = (article: typeof allArticlesForVariants[number]) => {
+        if (article.stock < article.minStock) return true;
+        const linkedInventoryIds = getConfiguredInventoryArticleIds(article.variants);
+        return linkedInventoryIds.some((inventoryId) => {
+          const inventoryArticle = allArticlesForVariants.find(candidate => candidate.id === inventoryId);
+          return Boolean(
+            inventoryArticle
+            && inventoryArticle.isActive === 1
+            && inventoryArticle.stock < inventoryArticle.minStock,
+          );
+        });
+      };
       if (input?.onlyActive !== false) {
         allArticles = allArticles.filter(a => a.isActive === 1
           && !(a.shopVisible === 0 && configuredInventoryArticleIds.has(a.id)));
@@ -357,7 +373,7 @@ export const articleRouter = router({
 
       // Low stock filter
       if (input?.onlyLowStock) {
-        allArticles = allArticles.filter(a => a.stock < a.minStock);
+        allArticles = allArticles.filter(isLowStockArticleOrFamily);
       }
 
       // Sort
