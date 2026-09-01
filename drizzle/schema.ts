@@ -438,6 +438,14 @@ export const orders = pgTable("orders", {
   subtotal: decimal("subtotal", { precision: 10, scale: 2 }).notNull(),
   discount: decimal("discount", { precision: 10, scale: 2 }).notNull().default("0"),
   discountCode: varchar("discount_code", { length: 50 }),
+  /** Strukturierte, additive Herkunft aller Preisnachlässe für WaWi und Audit. */
+  discountBreakdown: jsonb("discount_breakdown").$type<Array<{
+    source: string;
+    label: string;
+    amount: number;
+    percentage?: number;
+    code?: string;
+  }>>(),
   shipping: decimal("shipping", { precision: 10, scale: 2 }).notNull(),
   shippingCountry: varchar("shipping_country", { length: 10 }).notNull(),
   total: decimal("total", { precision: 10, scale: 2 }).notNull(),

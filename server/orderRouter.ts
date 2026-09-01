@@ -36,6 +36,26 @@ import {
 import { verifyKwkToken } from "./kwkAuth.js";
 
 // Zod schemas
+const discountBreakdownEntrySchema = z.object({
+  source: z.enum([
+    "promotion_code",
+    "partner_self_discount",
+    "partner_credit",
+    "kwk_referral",
+    "kwk_credit",
+    "manual_global_percent",
+    "manual_global_amount",
+    "manual_line_percent",
+    "manual_line_amount",
+    "credit_note",
+    "unattributed",
+  ]),
+  label: z.string().trim().min(1).max(180),
+  amount: z.number().nonnegative(),
+  percentage: z.number().min(0).max(100).optional(),
+  code: z.string().trim().min(1).max(80).optional(),
+});
+
 const createOrderSchema = z.object({
   orderId: z.string().optional(), // now generated server-side via DB sequence
   // Zusätzliche Shopquelle. Ohne Angabe bleibt die bestehende 369-Research-Logik unverändert.
@@ -75,6 +95,8 @@ const createOrderSchema = z.object({
   subtotal: z.number(),
   discount: z.number(),
   discountCode: z.string().nullable(),
+  // Additiv: erklärt den bereits errechneten Rabatt, verändert ihn nicht.
+  discountBreakdown: z.array(discountBreakdownEntrySchema).max(30).optional(),
   shipping: z.number(),
   shippingCountry: z.string(),
   total: z.number(),
@@ -304,6 +326,33 @@ export const orderRouter = router({
         throw new Error("Ungültige Rabatt-, Versand- oder Gesamtberechnung");
       }
       const authoritativeKwkCredit = roundMoney(input.kwkCreditUsed || 0);
+      const submittedDiscountBreakdown = (input.discountBreakdown || [])
+        .filter((entry) => entry.amount > 0)
+        .map((entry) => ({
+          ...entry,
+          amount: roundMoney(entry.amount),
+          percentage: entry.percentage === undefined ? undefined : roundMoney(entry.percentage),
+        }));
+      const submittedDiscountBreakdownTotal = roundMoney(
+        submittedDiscountBreakdown.reduce((sum, entry) => sum + entry.amount, 0),
+      );
+      if (submittedDiscountBreakdownTotal > roundMoney(input.discount) + 0.02) {
+        throw new Error("Rabattaufschlüsselung übersteigt den Gesamtbetrag");
+      }
+      const remainingUnattributedDiscount = roundMoney(input.discount - submittedDiscountBreakdownTotal);
+      const discountBreakdown = [
+        ...submittedDiscountBreakdown,
+        ...(remainingUnattributedDiscount > 0
+          ? [{
+              source: "unattributed" as const,
+              label: input.discountCode?.trim()
+                ? `Nicht aufgeschlüsselter Rest zu Rabattcode: ${input.discountCode.trim()}`
+                : "Rabattursprung nicht strukturiert übermittelt",
+              amount: remainingUnattributedDiscount,
+              ...(input.discountCode?.trim() ? { code: input.discountCode.trim() } : {}),
+            }]
+          : []),
+      ];
 
       // Bestandsoverride ist strikt an einen authentifizierten Admin gebunden.
       // Eine Shop-Bestellung besitzt keinen WaWi-Admin-Token und kann diese Prüfung nie umgehen.
@@ -797,6 +846,7 @@ export const orderRouter = router({
         subtotal: input.subtotal.toFixed(2),
         discount: input.discount.toFixed(2),
         discountCode: input.discountCode,
+        discountBreakdown,
         shipping: input.shipping.toFixed(2),
         shippingCountry: input.shippingCountry,
         total: input.total.toFixed(2),
@@ -1275,6 +1325,7 @@ export const orderRouter = router({
         ...o,
         subtotal: parseFloat(o.subtotal),
         discount: parseFloat(o.discount),
+        discountBreakdown: o.discountBreakdown || [],
         shipping: parseFloat(o.shipping),
         total: parseFloat(o.total),
         partnerDiscount: parseFloat(o.partnerDiscount ?? "0"),
@@ -1312,6 +1363,7 @@ export const orderRouter = router({
         ...order,
         subtotal: parseFloat(order.subtotal),
         discount: parseFloat(order.discount),
+        discountBreakdown: order.discountBreakdown || [],
         shipping: parseFloat(order.shipping),
         total: parseFloat(order.total),
         partnerDiscount: parseFloat(order.partnerDiscount ?? "0"),
@@ -1763,6 +1815,7 @@ export const orderRouter = router({
       subtotal: z.number(),
       discount: z.number(),
       discountCode: z.string().nullable().optional(),
+      discountBreakdown: z.array(discountBreakdownEntrySchema).max(30).optional(),
       shipping: z.number(),
       total: z.number(),
     }))
@@ -1779,6 +1832,7 @@ export const orderRouter = router({
         subtotal: input.subtotal.toFixed(2),
         discount: input.discount.toFixed(2),
         discountCode: input.discountCode || null,
+        ...(input.discountBreakdown !== undefined ? { discountBreakdown: input.discountBreakdown } : {}),
         shipping: input.shipping.toFixed(2),
         total: input.total.toFixed(2),
         updatedAt: new Date(),

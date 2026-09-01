@@ -28,6 +28,7 @@ import { ensureNasalDiySetSchema } from "./nasalDiySetSchema.js";
 import { ensureAddressValidationSchema } from "./addressValidationSchema.js";
 import { ensureCustomerDossierSchema } from "./customerDossierSchema.js";
 import { ensureQrCampaignSchema } from "./qrCampaignSchema.js";
+import { ensureDiscountProvenanceSchema } from "./discountProvenanceSchema.js";
 import { qrRedirectRouter } from "./qrRedirectRouter.js";
 import { ensurePeps4petsCheckoutSchema, isPeps4petsCheckoutSchemaReady } from "./peps4petsCheckoutSchema.js";
 
@@ -248,6 +249,13 @@ async function start() {
     await ensureQrCampaignSchema();
   } catch (err) {
     console.warn("[Server] QR campaign schema migration failed:", err);
+  }
+
+  // Additive Rabattprovenienz: Rabattbetrag und bestehende Rabattcodes bleiben unverändert.
+  try {
+    await ensureDiscountProvenanceSchema();
+  } catch (err) {
+    console.warn("[Server] Discount provenance schema migration failed:", err);
   }
 
   // Peps4pets: isolated storefront metadata, a separate visible reference and
