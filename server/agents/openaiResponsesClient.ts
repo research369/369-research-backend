@@ -1,8 +1,3 @@
-type OpenAIResponseOutputText = {
-  type?: string;
-  text?: string;
-};
-
 type OpenAIResponseContent = {
   type?: string;
   text?: string;
@@ -65,10 +60,7 @@ export async function callOpenAIResponses(
   const body: Record<string, unknown> = {
     model: request.model,
     instructions: request.instructions,
-    input: request.input.map((message) => ({
-      role: message.role,
-      content: [{ type: "input_text", text: message.content }],
-    })),
+    input: request.input,
     max_output_tokens: request.maxOutputTokens ?? 1800,
   };
 
