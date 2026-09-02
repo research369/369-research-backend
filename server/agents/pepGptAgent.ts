@@ -40,7 +40,7 @@ export class PepGptAgent implements Agent {
 
   async run(request: AgentRequest): Promise<AgentResponse> {
     const knowledge = await loadPepKnowledge();
-    const model = process.env.PEPGPT_MODEL || "gpt-5";
+    const model = process.env.PEPGPT_MODEL || "gpt-5.6-sol";
     const provider = "openai";
 
     await this.eventSink?.({
