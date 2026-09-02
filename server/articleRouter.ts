@@ -6,6 +6,7 @@ import { eq, desc, asc, like, and, sql, gte, lte, inArray } from "drizzle-orm";
 import { router, adminProcedure, productManagerProcedure, packingProcedure, publicProcedure } from "./trpc.js";
 import { getDb, getPool } from "./db.js";
 import { articles, stockHistory, orderItems, orders, articleTranslations, articleFaq } from "../drizzle/schema.js";
+import { getNasalSprayKitAvailability, getNasalSprayKitConfig } from "./nasalDiySetConfig.js";
 
 type PublicShopVariant = {
   dosage: string;
@@ -841,6 +842,169 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
       }).where(eq(articles.id, input.id));
       return { success: true };
     }),
+
+  /**
+   * PUBLIC: Versioned commerce read model for store rendering, SEO artefacts and
+   * channel-specific feed generation. This endpoint is read-only and additive:
+   * it does not replace the existing shopProducts contract.
+   *
+   * Merchant publication is intentionally fail-closed. A variant is eligible
+   * only when an explicit matching article_channel_eligibility record exists
+   * with status = approved for the requested channel, market and locale.
+   */
+  shopCatalogManifest: publicProcedure
+    .input(z.object({
+      locale: z.string().min(2).max(10).default("de"),
+      market: z.string().length(2).default("DE"),
+      channel: z.string().min(2).max(50).default("web"),
+    }).optional())
+    .query(async ({ input }) => {
+      const locale = input?.locale ?? "de";
+      const market = input?.market.toUpperCase() ?? "DE";
+      const channel = input?.channel ?? "web";
+      const pool = await getPool();
+      if (!pool) throw new Error("Commerce read model is unavailable");
+
+      const { rows } = await pool.query(`
+        SELECT
+          a.id AS article_id,
+          a.shop_product_id,
+          a.sku,
+          a.name AS default_name,
+          a.selling_price,
+          a.sale_price,
+          a.stock,
+          a.category,
+          a.short_description AS default_short_description,
+          a.mockup_image_url,
+          a.label_image_url,
+          a.gallery_images,
+          a.purity,
+          a.cas_number,
+          a.molecular_weight,
+          a.updated_at AS source_updated_at,
+          s.slug AS seo_slug,
+          s.seo_title AS seo_title,
+          s.seo_description AS seo_description,
+          s.image_alt AS seo_image_alt,
+          s.robots AS seo_robots,
+          s.canonical AS seo_canonical,
+          s.og_image AS seo_og_image,
+          t.name AS translation_name,
+          t.short_description AS translation_short_description,
+          t.seo_title AS translation_seo_title,
+          t.seo_description AS translation_seo_description,
+          t.merchant_title AS translation_merchant_title,
+          t.merchant_description AS translation_merchant_description,
+          t.image_alt AS translation_image_alt,
+          ce.status AS channel_status,
+          ce.blocked_reason AS channel_blocked_reason,
+          ce.reviewed_at AS channel_reviewed_at,
+          ce.valid_from AS channel_valid_from,
+          ce.valid_until AS channel_valid_until
+        FROM articles a
+        LEFT JOIN article_seo s ON s.article_id = a.id
+        LEFT JOIN article_translations t ON t.article_id = a.id AND t.lang = $1
+        LEFT JOIN article_channel_eligibility ce
+          ON ce.article_id = a.id
+          AND ce.channel = $2
+          AND ce.market = $3
+          AND ce.locale = $1
+        WHERE a.shop_visible = 1
+          AND a.is_active = 1
+          AND a.shop_product_id IS NOT NULL
+          AND a.shop_product_id <> ''
+        ORDER BY a.sort_order ASC, a.name ASC
+      `, [locale, channel, market]);
+
+      const generatedAt = new Date().toISOString();
+      const products = rows.map((row) => {
+        const slug = row.seo_slug || row.shop_product_id;
+        const robots = row.seo_robots || "index,follow";
+        const channelStatus = row.channel_status || "review_required";
+        const validFrom = row.channel_valid_from ? new Date(row.channel_valid_from) : null;
+        const validUntil = row.channel_valid_until ? new Date(row.channel_valid_until) : null;
+        const isWithinReviewWindow = (!validFrom || validFrom <= new Date())
+          && (!validUntil || validUntil >= new Date());
+        const merchantEligible = channel === "merchant_google"
+          && channelStatus === "approved"
+          && isWithinReviewWindow;
+
+        return {
+          articleId: Number(row.article_id),
+          productId: row.shop_product_id,
+          sku: row.sku,
+          locale,
+          market,
+          sourceUpdatedAt: row.source_updated_at,
+          product: {
+            name: row.translation_name || row.default_name,
+            shortDescription: row.translation_short_description || row.default_short_description || null,
+            category: row.category || null,
+            purity: row.purity || null,
+            casNumber: row.cas_number || null,
+            molecularWeight: row.molecular_weight || null,
+            images: [row.mockup_image_url, row.label_image_url, row.seo_og_image]
+              .filter((image, index, images) => Boolean(image) && images.indexOf(image) === index),
+          },
+          offer: {
+            currency: "EUR",
+            price: Number(row.sale_price || row.selling_price || 0),
+            availability: Number(row.stock) > 0 ? "in_stock" : "out_of_stock",
+          },
+          seo: {
+            slug,
+            canonicalPath: `/product/${slug}`,
+            robots,
+            indexable: !robots.toLowerCase().includes("noindex"),
+            title: row.translation_seo_title || row.seo_title || null,
+            description: row.translation_seo_description || row.seo_description || null,
+            imageAlt: row.translation_image_alt || row.seo_image_alt || null,
+            canonicalOverride: row.seo_canonical || null,
+          },
+          channel: {
+            name: channel,
+            status: channelStatus,
+            eligible: merchantEligible,
+            blockedReason: row.channel_blocked_reason || null,
+            reviewedAt: row.channel_reviewed_at || null,
+          },
+        };
+      });
+
+      return {
+        schemaVersion: "1.0.0",
+        generatedAt,
+        locale,
+        market,
+        channel,
+        failClosed: channel === "merchant_google",
+        products,
+      };
+    }),
+
+  /**
+   * PUBLIC: Der Nasenspray-Kit-Vertrag für die Storefront.
+   * Rein lesend; Preis, Freigaben und BAC-Verfügbarkeit bleiben serverseitig.
+   */
+  nasalSprayKit: publicProcedure.query(async () => {
+    const config = await getNasalSprayKitConfig();
+    const availability = await getNasalSprayKitAvailability(config);
+    return {
+      version: config.version,
+      displayName: config.displayName,
+      surcharge: config.surcharge,
+      products: config.products,
+      components: config.components.map(({ name, variant, inventoryTracked, quantityPerKit }) => ({
+        name,
+        variant,
+        inventoryTracked,
+        quantityPerKit,
+      })),
+      kitAvailable: availability.kitAvailable,
+      availableUnits: availability.availableUnits,
+    };
+  }),
 
   // PUBLIC: Get all shop-visible products (Single Source of Truth)
   shopProducts: publicProcedure.query(async () => {
