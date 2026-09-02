@@ -8,6 +8,7 @@ import { customerRouter } from "./customerRouter.js";
 import { labelRouter } from "./labelRouter.js";
 import { partnerRouter } from "./partnerRouter.js";
 import { aiRouter } from "./aiRouter.js";
+import { agentRouter } from "./agentRouter.js";
 import { promoCodeRouter } from "./promoCodeRouter.js";
 import { shopSettingsRouter } from "./shopSettingsRouter.js";
 import { invoiceRouter } from "./invoiceRouter.js";
@@ -33,6 +34,7 @@ export const appRouter = router({
   label: labelRouter,
   partner: partnerRouter,
   ai: aiRouter,
+  agent: agentRouter,
   promoCode: promoCodeRouter,
   shopSettings: shopSettingsRouter,
   invoice: invoiceRouter,
