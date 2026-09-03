@@ -86,6 +86,7 @@ test("catalog prices and option surcharges are authoritative", () => {
   }];
   assert.equal(resolveAuthoritativeItemPrice({ shopProductId: "test", dosage: "10 mg", price: 1, quantity: 1 }, catalog), 55);
   assert.equal(resolveAuthoritativeItemPrice({ shopProductId: "test", dosage: "10 mg", price: 1, quantity: 1, isPlugPlay: true }, catalog), 70);
+  assert.equal(resolveAuthoritativeItemPrice({ shopProductId: "test", dosage: "10 mg", price: 1, quantity: 1, isFinishedNasal: true }, catalog), 70);
 });
 
 test("shipping comes from the delivery country and is never discounted by KWK", () => {

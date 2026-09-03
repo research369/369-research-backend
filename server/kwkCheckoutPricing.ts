@@ -73,7 +73,7 @@ function articleDosage(article: KwkCatalogArticle): string {
 }
 
 export function resolveAuthoritativeItemPrice(
-  item: KwkCheckoutItem & { dosage?: string; isPlugPlay?: boolean; isNasalDiySet?: boolean; isFreeGift?: boolean },
+  item: KwkCheckoutItem & { dosage?: string; isPlugPlay?: boolean; isNasalDiySet?: boolean; isFinishedNasal?: boolean; isFreeGift?: boolean },
   catalog: KwkCatalogArticle[],
 ): number {
   if (item.isFreeGift) return 0;
@@ -108,7 +108,7 @@ export function resolveAuthoritativeItemPrice(
     throw new Error(`KWK_ARTIKELPREIS_NICHT_ERMITTELBAR: ${item.shopProductId}`);
   }
 
-  const optionSurcharge = (item.isPlugPlay ? 15 : 0) + (item.isNasalDiySet ? 7 : 0);
+  const optionSurcharge = (item.isPlugPlay ? 15 : 0) + (item.isNasalDiySet ? 7 : 0) + (item.isFinishedNasal ? 15 : 0);
   return roundMoney(basePrice + optionSurcharge);
 }
 
