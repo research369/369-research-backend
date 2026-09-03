@@ -26,13 +26,14 @@ function actor(ctx: { user?: { name?: string | null; username?: string | null } 
   return ctx.user?.name || ctx.user?.username || "admin";
 }
 
-function derivedStatus(paidOrderCount: number, totalSpent: number, tags: string[]) {
+export function deriveCustomerStatus(paidOrderCount: number, totalSpent: number, tags: string[]) {
   const normalized = tags.map((tag) => tag.toLocaleLowerCase("de-DE"));
   if (normalized.includes("vip")) return { key: "vip", label: "VIP", color: "amber" };
   if (paidOrderCount >= 6 || totalSpent >= 1000) return { key: "vielbesteller", label: "Vielbesteller", color: "violet" };
   if (paidOrderCount >= 3) return { key: "stammkunde", label: "Stammkunde", color: "emerald" };
-  if (paidOrderCount >= 1) return { key: "wiederkehrend", label: "Wiederkehrend", color: "blue" };
-  return { key: "neukunde", label: "Neukunde", color: "sky" };
+  if (paidOrderCount >= 2) return { key: "wiederkehrend", label: "Wiederkehrend", color: "blue" };
+  if (paidOrderCount === 1) return { key: "erstbesteller", label: "Erstbesteller", color: "sky" };
+  return { key: "neukunde", label: "Neukunde", color: "slate" };
 }
 
 const PAID_STATUSES = new Set(["bezahlt", "gepackt", "versendet", "zugestellt"]);
@@ -94,7 +95,7 @@ export const customerDossierRouter = router({
     });
     const paidOrders = allOrders.filter((order) => PAID_STATUSES.has(order.status));
     const totalSpent = paidOrders.reduce((sum, order) => sum + Number(order.total || 0), 0);
-    const status = derivedStatus(paidOrders.length, totalSpent, rawTags);
+    const status = deriveCustomerStatus(paidOrders.length, totalSpent, rawTags);
     const openCases = allCases.filter((item) => item.status === "open" || item.status === "in_progress");
 
     const orderMap = new Map(allOrders.map((order) => [order.orderId, order]));
