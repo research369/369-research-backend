@@ -1,9 +1,12 @@
-export type StoreKey = "369research" | "peps4pets";
+export type StoreKey = "369research" | "peps4pets" | "ladypeps";
 
 const PEPS4PETS_MARKER = "[QUELLE: PEPS4PETS]";
+const LADYPEPS_MARKER = "[QUELLE: LADYPEPS]";
 
 export function sourceMarkerForStore(storeKey: StoreKey): string | null {
-  return storeKey === "peps4pets" ? PEPS4PETS_MARKER : null;
+  if (storeKey === "peps4pets") return PEPS4PETS_MARKER;
+  if (storeKey === "ladypeps") return LADYPEPS_MARKER;
+  return null;
 }
 
 export function withStoreSourceMarker(storeKey: StoreKey, notes: Array<string | null | undefined>): string | null {

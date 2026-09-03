@@ -17,7 +17,7 @@ const CUSTOMER_EMAIL_BCC = "369rebackup@gmail.com";
 
 interface OrderEmailData {
   orderId: string;
-  storeKey?: "369research" | "peps4pets";
+  storeKey?: "369research" | "peps4pets" | "ladypeps";
   externalOrderReference?: string | null;
   customer: {
     firstName: string;

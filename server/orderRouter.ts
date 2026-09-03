@@ -59,7 +59,7 @@ const discountBreakdownEntrySchema = z.object({
 const createOrderSchema = z.object({
   orderId: z.string().optional(), // now generated server-side via DB sequence
   // Zusätzliche Shopquelle. Ohne Angabe bleibt die bestehende 369-Research-Logik unverändert.
-  storeKey: z.enum(["369research", "peps4pets"]).optional().default("369research"),
+  storeKey: z.enum(["369research", "peps4pets", "ladypeps"]).optional().default("369research"),
   // Nur Peps4pets verwendet diesen evidenzgebundenen Schlüssel. Die kanonische
   // WaWi-Nummer bleibt unabhängig davon weiterhin der interne Primärvertrag.
   checkoutIdempotencyKey: z.string().trim().min(12).max(128).optional(),
