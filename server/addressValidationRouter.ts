@@ -61,6 +61,40 @@ export const addressValidationRouter = router({
     return result;
   }),
 
+  /**
+   * Bewusster Ausnahmeweg für eine im Packprozess fachlich geprüfte Lieferadresse.
+   * Die eigentliche Prüfwarnung, der Bearbeiter und ein unveränderbarer Nachweis
+   * werden gespeichert. Der nachfolgende DHL-Ablauf darf nur nach dieser Aktion
+   * die erneute Warnung für genau diesen Abschluss überspringen.
+   */
+  confirmShipmentAddressOverride: adminProcedure.input(z.object({ orderId: z.string().min(1) })).mutation(async ({ input, ctx }) => {
+    const db = await getDb();
+    if (!db) throw new Error("Datenbank für DHL-Adressprüfung nicht verfügbar");
+    const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1);
+    if (!order) throw new Error(`Bestellung ${input.orderId} nicht gefunden`);
+
+    const address = {
+      street: order.street || "",
+      houseNumber: order.houseNumber || "",
+      zip: order.zip || "",
+      city: order.city || "",
+      country: order.country || order.shippingCountry || "Deutschland",
+      deliveryType: ((order as any).deliveryType === "packstation" ? "packstation" : "home") as "home" | "packstation",
+    };
+    const result = await validateGermanAddress(address);
+    const confirmedBy = (ctx as any).user?.name || (ctx as any).user?.username || "Master-Admin";
+    await persistAddressValidation({
+      input: address,
+      result,
+      context: "shipping_automation",
+      customerId: order.customerId ?? null,
+      orderId: order.orderId,
+      overrideConfirmed: true,
+      confirmedBy,
+    });
+    return { ...result, overrideConfirmed: true, overrideConfirmedBy: confirmedBy };
+  }),
+
   recordsForCustomer: adminProcedure.input(z.object({ customerId: z.number() })).query(async ({ input }) => {
     const db = await getDb();
     if (!db) throw new Error("Datenbank für Adressnachweise nicht verfügbar");
