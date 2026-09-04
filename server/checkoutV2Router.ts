@@ -188,10 +188,13 @@ async function resolveKwkBenefits(input: z.infer<typeof quoteInputSchema>): Prom
 
 export const checkoutV2Router = router({
   /**
-   * Read-only commercial quote. It never creates an order, reserves stock,
+   * Side-effect-free commercial quote. It never creates an order, reserves stock,
    * consumes a code, writes a ledger entry, or initiates a payment.
+   *
+   * It is intentionally a POST mutation: the quote may contain E-Mail, telephone
+   * number and a customer-entered code. These values must not travel in a URL.
    */
-  quote: publicProcedure.input(quoteInputSchema).query(async ({ input }) => {
+  quote: publicProcedure.input(quoteInputSchema).mutation(async ({ input }) => {
     assertCheckoutV2CommerceStaging();
     const db = await getDb();
     if (!db) throw new Error("Datenbank nicht verfügbar");
