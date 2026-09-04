@@ -1,7 +1,7 @@
 # Checkout V2 – Review-, Release- und Rückfallstatus
 
-**Stand:** 4. September 2026
-**Status:** Technischer Entwurf. Nicht mergen, nicht deployen, nicht für reale Aufträge, Zahlungen oder Lagerbewegungen verwenden.
+**Stand:** 5. September 2026
+**Status:** Quell- und Contract-Reviewbasis vollständig geprüft. Weiterhin nicht mergen, nicht deployen und nicht für reale Aufträge, Zahlungen oder Lagerbewegungen verwenden.
 
 ## Zweck
 
@@ -13,8 +13,8 @@ Dieses Dokument verbindet die getrennten Backend- und Frontend-Arbeiten für Che
 
 | Komponente | Repository und Branch | Commit | Draft-PR | Status |
 |---|---|---|---|---|
-| Serverseitiger Quote-/Abschlussvertrag | `research369/369-research-backend` · `feat/checkout-v2-commerce-contract` | `dc144834495f8898eed9881eb9a28452cea28109` | [#12](https://github.com/research369/369-research-backend/pull/12) | Offen, Draft, kein Merge |
-| Checkout-V2-Oberfläche | `research369/369-research-frontend` · `feat/checkout-v2-commerce-ui` | `0a24fa8facc30459cc49bcbaf3af08077fe62b1d` | [#13](https://github.com/research369/369-research-frontend/pull/13) | Offen, Draft, kein Merge |
+| Serverseitiger Quote-/Abschlussvertrag | `research369/369-research-backend` · `feat/checkout-v2-commerce-contract` | `aaa5dcb193fa8b9ab20cb44b48242ae96cdac1df` | [#12](https://github.com/research369/369-research-backend/pull/12) | Offen, Draft, kein Merge |
+| Checkout-V2-Oberfläche | `research369/369-research-frontend` · `feat/checkout-v2-commerce-ui` | `954a565e61b2c6016cff004f828f1e14976d879f` | [#13](https://github.com/research369/369-research-frontend/pull/13) | Offen, Draft, kein Merge |
 | Bestehender Backend-Main | `research369/369-research-backend` · `main` | `3edffa35ff11c1d4c5b6b6fcc79c758a0b680e84` | — | Unverändert |
 | Bestehender Frontend-Main | `research369/369-research-frontend` · `main` | `610c4080eb8473337eda439789656eb12d271581` | — | Unverändert |
 
@@ -51,7 +51,8 @@ Beide Feature-Branches wurden zusätzlich in unabhängigen privaten Spiegelrepos
 | Checkout-V2-Vertragstests | 31/31 lokal bestanden; feste Testdaten, keine Datenbankverbindung. |
 | Backend-Typecheck | Keine Diagnosen in den Checkout-V2- und geänderten Kern-Dateien; bekannte Alt-Diagnosen außerhalb dieses Umfangs bleiben getrennt. |
 | Frontend-Typecheck und Produktionsbuild | Bestanden im isolierten Feature-Branch. |
-| GitHub Contract CI | Reine Teststrecke; kein Railway-, Staging-, WaWi-, Payment- oder E-Mail-Schritt. |
+| Backend-GitHub-Contract-CI | Zwei erfolgreiche Läufe für `aaa5dcb`: [Lauf 33930035240](https://github.com/research369/369-research-backend/actions/runs/33930035240) und [Lauf 33930032127](https://github.com/research369/369-research-backend/actions/runs/33930032127). Reine Teststrecke; kein Railway-, Staging-, WaWi-, Payment- oder E-Mail-Schritt. |
+| Frontend-GitHub-Contract-CI | Zwei erfolgreiche Läufe für `954a565`: [Lauf 33930238840](https://github.com/research369/369-research-frontend/actions/runs/33930238840) und [Lauf 33930235241](https://github.com/research369/369-research-frontend/actions/runs/33930235241). Transporttest, Typecheck, Build ohne API-Basis und statische Deploy-Sperrprüfung. |
 | Staging Workflow | Manuell, branchgebunden und ohne vollständige separate Zielkonfiguration nicht ausführbar. |
 
 ## Absolute Sperren vor Merge oder Deploy
