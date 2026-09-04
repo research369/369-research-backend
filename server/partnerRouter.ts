@@ -39,7 +39,7 @@ function verifyPartnerToken(token: string): { partnerId: number } | null {
   }
 }
 
-async function getPartnerFromRequest(req: Request) {
+export async function getPartnerFromRequest(req: Request) {
   // Check Authorization header (Bearer token)
   const authHeader = req.headers.authorization;
   let token: string | undefined;

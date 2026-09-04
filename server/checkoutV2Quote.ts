@@ -11,6 +11,12 @@ import {
   isNasalDiySetEligible,
   NASAL_DIY_SET_COMPONENTS,
 } from "./nasalDiySetConfig.js";
+import {
+  calculateCheckoutV2AutomaticGiftLines,
+  isCheckoutV2NonVial,
+  type CheckoutV2GiftLine,
+  type CheckoutV2Promotion2for3,
+} from "./checkoutV2AutomaticBenefits.js";
 
 /**
  * Checkout V2 accepts only a customer's selection. It never accepts a
@@ -20,6 +26,8 @@ import {
  */
 export type CheckoutV2CatalogArticle = KwkCatalogArticle & {
   stock?: number | null;
+  category?: string | null;
+  categories?: unknown;
 };
 
 export type CheckoutV2Selection = {
@@ -33,7 +41,7 @@ export type CheckoutV2Selection = {
 
 export type CheckoutV2Delivery = {
   country: string;
-  deliveryType: "home" | "packstation";
+  deliveryType: "home" | "packstation" | "postfiliale";
 };
 
 export type CheckoutV2Promotion =
@@ -42,6 +50,8 @@ export type CheckoutV2Promotion =
 
 export type CheckoutV2Benefits = {
   promotion?: CheckoutV2Promotion;
+  /** Existing authenticated partner self-order; resolved only server-side from the partner session. */
+  partnerSelf?: { partnerNumber: string; partnerCode: string; discountPercent: number; requestedCredit: number; availableCredit: number };
   kwkReferralCode?: string;
   kwkReferralPercent?: number;
   kwkCredit?: { requested: number; available: number };
@@ -61,13 +71,16 @@ export type CheckoutV2QuoteLine = {
   quantity: number;
   unitPrice: number;
   lineTotal: number;
+  type: "peptide" | "accessory";
+  category?: string | null;
+  categories?: unknown;
   isPlugPlay: boolean;
   isNasalDiySet: boolean;
   isNasalSpray: boolean;
 };
 
 export type CheckoutV2DiscountLine = {
-  source: "promotion_code" | "partner_code" | "kwk_referral" | "kwk_credit";
+  source: "promotion_code" | "partner_code" | "partner_self_discount" | "partner_credit" | "kwk_referral" | "kwk_credit";
   label: string;
   amount: number;
   code?: string;
@@ -76,12 +89,13 @@ export type CheckoutV2DiscountLine = {
 
 export type CheckoutV2Quote = {
   lines: CheckoutV2QuoteLine[];
+  giftLines: CheckoutV2GiftLine[];
   subtotal: number;
   shipping: number;
   discount: number;
   total: number;
   coldChainRequired: boolean;
-  deliveryType: "home" | "packstation";
+  deliveryType: "home" | "packstation" | "postfiliale";
   discountLines: CheckoutV2DiscountLine[];
 };
 
@@ -169,16 +183,28 @@ function resolveLine(selection: CheckoutV2Selection, catalog: CheckoutV2CatalogA
     isNasalDiySet: selection.isNasalDiySet,
   }, catalog);
 
-  return {
+  const categoryInput = {
     shopProductId: selection.shopProductId.trim(),
     name: article.name,
     dosage: selection.dosage?.trim() || undefined,
     quantity: selection.quantity,
     unitPrice,
-    lineTotal: roundMoney(unitPrice * selection.quantity),
+    type: "peptide" as const,
+    category: article.category,
+    categories: article.categories,
     isPlugPlay: selection.isPlugPlay === true,
     isNasalDiySet: selection.isNasalDiySet === true,
     isNasalSpray: selection.isNasalSpray === true,
+  };
+  const isNonVial = isCheckoutV2NonVial(categoryInput);
+  const categoryValues = [article.category, ...(Array.isArray(article.categories) ? article.categories.filter((entry): entry is string => typeof entry === "string") : [])]
+    .filter((entry): entry is string => typeof entry === "string")
+    .map((entry) => entry.trim().toLowerCase());
+  return {
+    ...categoryInput,
+    lineTotal: roundMoney(unitPrice * selection.quantity),
+    type: isNonVial ? "accessory" : "peptide",
+    isNasalSpray: selection.isNasalSpray === true || categoryValues.includes("nasensprays"),
   };
 }
 
@@ -199,9 +225,14 @@ function resolveDiscount(input: {
 }): { discount: number; total: number; discountLines: CheckoutV2DiscountLine[] } {
   const { lines, subtotal, shipping, benefits } = input;
   const promotion = benefits.promotion;
-  const hasPartner = promotion?.kind === "partner";
+  const hasPartnerCode = promotion?.kind === "partner";
+  const hasPartnerSelf = Boolean(benefits.partnerSelf?.partnerNumber);
+  const hasPartner = hasPartnerCode || hasPartnerSelf;
   const hasReferral = Boolean(benefits.kwkReferralCode?.trim());
   const hasKwkCredit = Boolean(benefits.kwkCredit && benefits.kwkCredit.requested > 0);
+  if (hasPartnerCode && hasPartnerSelf) {
+    throw new CheckoutV2QuoteError("PARTNER_ROUTE_AMBIGUOUS", "Bitte verwende entweder einen Partnervorteil oder eine Partner-Eigenbestellung.");
+  }
   if (hasPartner && (hasReferral || hasKwkCredit)) {
     throw new CheckoutV2QuoteError("KWK_PARTNER_EXCLUDED", "Partner- und Empfehlungswege können nicht kombiniert werden.");
   }
@@ -226,14 +257,31 @@ function resolveDiscount(input: {
   }
 
   const postPromotionValue = roundMoney(Math.max(0, subtotal - promotionDiscount));
+  let partnerSelfDiscount = 0;
+  let partnerCreditDiscount = 0;
+  if (benefits.partnerSelf) {
+    const percentage = Math.max(0, Math.min(100, Number(benefits.partnerSelf.discountPercent) || 0));
+    partnerSelfDiscount = roundMoney(postPromotionValue * percentage / 100);
+    if (partnerSelfDiscount > 0) {
+      discountLines.push({ source: "partner_self_discount", label: "Partnervorteil", amount: partnerSelfDiscount, code: benefits.partnerSelf.partnerCode, percentage });
+    }
+    const requested = roundMoney(Math.max(0, benefits.partnerSelf.requestedCredit));
+    const available = roundMoney(Math.max(0, benefits.partnerSelf.availableCredit));
+    // This reproduces the current partner checkout: credit can settle the remaining checkout total, including shipping.
+    partnerCreditDiscount = roundMoney(Math.min(requested, available, Math.max(0, postPromotionValue - partnerSelfDiscount + shipping)));
+    if (partnerCreditDiscount > 0) {
+      discountLines.push({ source: "partner_credit", label: "Partnerguthaben", amount: partnerCreditDiscount });
+    }
+  }
+  const postPartnerValue = roundMoney(Math.max(0, postPromotionValue - partnerSelfDiscount));
   let referralDiscount = 0;
   if (hasReferral) {
     const percentage = Math.max(0, Math.min(100, Number(benefits.kwkReferralPercent ?? 10)));
-    referralDiscount = roundMoney(postPromotionValue * percentage / 100);
+    referralDiscount = roundMoney(postPartnerValue * percentage / 100);
     if (referralDiscount > 0) discountLines.push({ source: "kwk_referral", label: "Empfehlungsvorteil", amount: referralDiscount, code: benefits.kwkReferralCode?.trim().toUpperCase(), percentage });
   }
 
-  const creditEligibleValue = roundMoney(Math.max(0, postPromotionValue - referralDiscount));
+  const creditEligibleValue = roundMoney(Math.max(0, postPartnerValue - referralDiscount));
   let creditDiscount = 0;
   if (hasKwkCredit && benefits.kwkCredit) {
     const requested = roundMoney(Math.max(0, benefits.kwkCredit.requested));
@@ -242,8 +290,43 @@ function resolveDiscount(input: {
     if (creditDiscount > 0) discountLines.push({ source: "kwk_credit", label: "Guthaben", amount: creditDiscount });
   }
 
-  const discount = roundMoney(promotionDiscount + referralDiscount + creditDiscount);
+  const discount = roundMoney(promotionDiscount + partnerSelfDiscount + partnerCreditDiscount + referralDiscount + creditDiscount);
   return { discount, total: roundMoney(subtotal - discount + shipping), discountLines };
+}
+
+function assertAggregateAvailability(input: {
+  lines: CheckoutV2QuoteLine[];
+  giftLines: CheckoutV2GiftLine[];
+  catalog: CheckoutV2CatalogArticle[];
+}): void {
+  const needs = new Map<string, { shopProductId: string; dosage?: string; quantity: number; requireVisible: boolean }>();
+  const add = (line: { shopProductId: string; dosage?: string; quantity: number }, requireVisible: boolean) => {
+    const key = `${normalizeId(line.shopProductId)}::${normalizeDosage(line.dosage)}`;
+    const existing = needs.get(key);
+    if (existing) {
+      existing.quantity += line.quantity;
+      existing.requireVisible = existing.requireVisible || requireVisible;
+      return;
+    }
+    needs.set(key, { ...line, quantity: line.quantity, requireVisible });
+  };
+  input.lines.forEach((line) => add(line, true));
+  input.giftLines.forEach((line) => add(line, line.source !== "free_bac_water"));
+
+  for (const need of needs.values()) {
+    const matching = input.catalog.filter((article) => article.isActive === 1
+      && (!need.requireVisible || article.shopVisible === 1)
+      && matchesSelectionArticle({ shopProductId: need.shopProductId, dosage: need.dosage, quantity: need.quantity }, article));
+    const available = matching.reduce((sum, article) => sum + Math.max(0, Number(article.stock ?? 0)), 0);
+    if (available < need.quantity) {
+      throw new CheckoutV2QuoteError(
+        need.requireVisible ? "PRODUCT_OUT_OF_STOCK" : "GIFT_OUT_OF_STOCK",
+        need.requireVisible
+          ? "Ein Produkt ist in der gewünschten Menge nicht mehr verfügbar."
+          : "Eine erforderliche Gratisbeigabe ist derzeit nicht verfügbar.",
+      );
+    }
+  }
 }
 
 export function calculateCheckoutV2Quote(input: {
@@ -252,6 +335,7 @@ export function calculateCheckoutV2Quote(input: {
   /** Compatibility input. New callers use `benefits`. */
   benefit?: CheckoutV2Benefit;
   benefits?: CheckoutV2Benefits;
+  promotion2for3?: CheckoutV2Promotion2for3;
   catalog: CheckoutV2CatalogArticle[];
 }): CheckoutV2Quote {
   if (!Array.isArray(input.selections) || input.selections.length === 0) {
@@ -263,11 +347,18 @@ export function calculateCheckoutV2Quote(input: {
   const lines = input.selections.map((selection) => resolveLine(selection, input.catalog));
   assertNasalKitAvailability(input.selections, input.catalog);
   const coldChainRequired = lines.some(requiresColdChainShipping);
-  if (input.delivery.deliveryType === "packstation" && coldChainRequired) {
-    throw new CheckoutV2QuoteError("PACKSTATION_NOT_AVAILABLE", "Für diese Bestellung ist eine Hausadresse erforderlich.");
+  if ((input.delivery.deliveryType === "packstation" || input.delivery.deliveryType === "postfiliale") && coldChainRequired) {
+    throw new CheckoutV2QuoteError("PICKUP_POINT_NOT_AVAILABLE", "Für diese Bestellung ist eine Hausadresse erforderlich.");
   }
 
   const benefits = normalizeBenefits(input.benefit, input.benefits);
+  const bacWater = input.catalog.find((article) => article.isActive === 1 && normalizeId(article.shopProductId || "") === "bac-wasser-3ml");
+  const giftLines = calculateCheckoutV2AutomaticGiftLines({
+    lines,
+    promotion2for3: input.promotion2for3 || { enabled: false, mode: "all", products: [] },
+    freeBacWaterProduct: bacWater ? { name: bacWater.name, dosage: "3ml" } : null,
+  });
+  assertAggregateAvailability({ lines, giftLines, catalog: input.catalog });
   const shipping = calculateAuthoritativeShipping({
     country,
     items: lines,
@@ -277,6 +368,7 @@ export function calculateCheckoutV2Quote(input: {
   const discount = resolveDiscount({ lines, subtotal, shipping, benefits });
   return {
     lines,
+    giftLines,
     subtotal,
     shipping,
     discount: discount.discount,

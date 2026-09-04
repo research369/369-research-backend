@@ -16,7 +16,19 @@ const catalog: CheckoutV2CatalogArticle[] = [
     variants: [{ dosage: "10 mg", price: 62 }],
     isActive: 1,
     shopVisible: 1,
-    stock: 5,
+    stock: 12,
+  },
+  {
+    sku: "BAC-3ML",
+    shopProductId: "bac-wasser-3ml",
+    name: "BAC Wasser 3ml",
+    sellingPrice: "5.00",
+    salePrice: null,
+    variants: [{ dosage: "3ml", price: 5 }],
+    isActive: 1,
+    shopVisible: 1,
+    stock: 20,
+    category: "Zubehör",
   },
   {
     sku: "SEMAX-SELANK-10MG",
@@ -150,7 +162,7 @@ test("Checkout V2 rejects Packstation when cold-chain delivery is required", () 
       delivery: { country: "Deutschland", deliveryType: "packstation" },
       catalog,
     }),
-    (error: unknown) => error instanceof CheckoutV2QuoteError && error.code === "PACKSTATION_NOT_AVAILABLE",
+    (error: unknown) => error instanceof CheckoutV2QuoteError && error.code === "PICKUP_POINT_NOT_AVAILABLE",
   );
 });
 
@@ -174,7 +186,78 @@ test("Checkout V2 refuses a DIY nasal kit when its tracked BAC component is insu
 
 test("Checkout V2 rejects unavailable quantities before any order can be created", () => {
   assert.throws(
-    () => quote({ shopProductId: "adamax", dosage: "10 mg", quantity: 6 }),
+    () => quote({ shopProductId: "adamax", dosage: "10 mg", quantity: 13 }),
     (error: unknown) => error instanceof CheckoutV2QuoteError && error.code === "PRODUCT_OUT_OF_STOCK",
+  );
+});
+
+test("Checkout V2 aggregates paid and 2-for-3 quantities before stock approval", () => {
+  const tightCatalog = catalog.map((article) => article.shopProductId === "adamax" ? { ...article, stock: 5 } : article);
+  assert.throws(
+    () => calculateCheckoutV2Quote({
+      selections: [{ shopProductId: "adamax", dosage: "10 mg", quantity: 4 }],
+      delivery: { country: "Deutschland", deliveryType: "home" },
+      promotion2for3: { enabled: true, mode: "all", products: [] },
+      catalog: tightCatalog,
+    }),
+    (error: unknown) => error instanceof CheckoutV2QuoteError && error.code === "PRODUCT_OUT_OF_STOCK",
+  );
+});
+
+test("Checkout V2 refuses a quote when a required Gratis-BAC item is out of stock", () => {
+  const tightCatalog = catalog.map((article) => article.shopProductId === "bac-wasser-3ml" ? { ...article, stock: 1 } : article);
+  assert.throws(
+    () => calculateCheckoutV2Quote({
+      selections: [{ shopProductId: "adamax", dosage: "10 mg", quantity: 2 }],
+      delivery: { country: "Deutschland", deliveryType: "home" },
+      catalog: tightCatalog,
+    }),
+    (error: unknown) => error instanceof CheckoutV2QuoteError && error.code === "GIFT_OUT_OF_STOCK",
+  );
+});
+
+test("Checkout V2 rejects Postfiliale when cold-chain delivery is required", () => {
+  assert.throws(
+    () => calculateCheckoutV2Quote({
+      selections: [{ shopProductId: "ready-nasal", dosage: "10 mg", quantity: 1, isNasalSpray: true }],
+      delivery: { country: "Deutschland", deliveryType: "postfiliale" },
+      catalog,
+    }),
+    (error: unknown) => error instanceof CheckoutV2QuoteError && error.code === "PICKUP_POINT_NOT_AVAILABLE",
+  );
+});
+
+test("Checkout V2 derives partner self-discount and credit only from server-provided session values", () => {
+  const result = calculateCheckoutV2Quote({
+    selections: [{ shopProductId: "adamax", dosage: "10 mg", quantity: 1 }],
+    delivery: { country: "Deutschland", deliveryType: "home" },
+    benefits: {
+      partnerSelf: {
+        partnerNumber: "P-1001",
+        partnerCode: "PARTNER1001",
+        discountPercent: 10,
+        requestedCredit: 20,
+        availableCredit: 12,
+      },
+    },
+    catalog,
+  });
+  assert.equal(result.discountLines.find((line) => line.source === "partner_self_discount")?.amount, 6.2);
+  assert.equal(result.discountLines.find((line) => line.source === "partner_credit")?.amount, 12);
+  assert.equal(result.total, 51.8);
+});
+
+test("Checkout V2 refuses to combine partner self-order and KWK referral", () => {
+  assert.throws(
+    () => calculateCheckoutV2Quote({
+      selections: [{ shopProductId: "adamax", dosage: "10 mg", quantity: 1 }],
+      delivery: { country: "Deutschland", deliveryType: "home" },
+      benefits: {
+        partnerSelf: { partnerNumber: "P-1001", partnerCode: "PARTNER1001", discountPercent: 10, requestedCredit: 0, availableCredit: 0 },
+        kwkReferralCode: "FREUND",
+      },
+      catalog,
+    }),
+    (error: unknown) => error instanceof CheckoutV2QuoteError && error.code === "KWK_PARTNER_EXCLUDED",
   );
 });
