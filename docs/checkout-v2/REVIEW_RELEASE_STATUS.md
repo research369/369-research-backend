@@ -11,14 +11,14 @@ Dieses Dokument verbindet die getrennten Backend- und Frontend-Arbeiten für Che
 
 ## Geschützte GitHub-Reviewbasis
 
-| Komponente | Repository und Branch | Commit | Draft-PR | Status |
+| Komponente | Repository und Branch | Letzter funktionaler Vertragsstand | Draft-PR | Status |
 |---|---|---|---|---|
 | Serverseitiger Quote-/Abschlussvertrag | `research369/369-research-backend` · `feat/checkout-v2-commerce-contract` | `aaa5dcb193fa8b9ab20cb44b48242ae96cdac1df` | [#12](https://github.com/research369/369-research-backend/pull/12) | Offen, Draft, kein Merge |
 | Checkout-V2-Oberfläche | `research369/369-research-frontend` · `feat/checkout-v2-commerce-ui` | `954a565e61b2c6016cff004f828f1e14976d879f` | [#13](https://github.com/research369/369-research-frontend/pull/13) | Offen, Draft, kein Merge |
 | Bestehender Backend-Main | `research369/369-research-backend` · `main` | `3edffa35ff11c1d4c5b6b6fcc79c758a0b680e84` | — | Unverändert |
 | Bestehender Frontend-Main | `research369/369-research-frontend` · `main` | `610c4080eb8473337eda439789656eb12d271581` | — | Unverändert |
 
-Beide Feature-Branches wurden zusätzlich in unabhängigen privaten Spiegelrepositorys mit identischen Commit-Referenzen gesichert.
+Beide Feature-Branches wurden zusätzlich in unabhängigen privaten Spiegelrepositorys mit identischen Commit-Referenzen gesichert. Die Tabelle benennt den letzten **funktionalen** Vertragsstand; nachfolgende reine Statusdokumentation verändert weder Checkout-Code noch Commerce-Verhalten und kann daher einen neueren Branch-Zeiger erzeugen.
 
 ## Vertragsumfang
 
