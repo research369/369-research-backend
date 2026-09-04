@@ -6,6 +6,7 @@ import { getDb } from "./db.js";
 import { articles, orders, partners, promoCodes } from "../drizzle/schema.js";
 import { getPool } from "./db.js";
 import { computeBalanceFromLedger, isKwkEnabled, KWK_DISCOUNT_PERCENT } from "./kwkService.js";
+import { normalizeKwkPhone } from "./kwkCheckoutPricing.js";
 import { verifyKwkToken } from "./kwkAuth.js";
 import {
   calculateCheckoutV2Quote,
@@ -137,7 +138,7 @@ async function resolveKwkBenefits(input: z.infer<typeof quoteInputSchema>): Prom
   if (!pool) throw new Error("Datenbank nicht verfügbar");
   if (input.kwkReferralCode) {
     const customerEmail = input.customer?.email?.trim().toLowerCase();
-    const customerPhone = input.customer?.phone?.replace(/[^0-9]/g, "").replace(/^00/, "").replace(/^0/, "49");
+    const customerPhone = normalizeKwkPhone(input.customer?.phone || "");
     if (!customerEmail || !customerPhone) {
       error("KWK_CUSTOMER_IDENTITY_REQUIRED", "Bitte gib E-Mail-Adresse und Telefonnummer ein, damit wir den Empfehlungsvorteil prüfen können.");
     }
@@ -150,9 +151,28 @@ async function resolveKwkBenefits(input: z.infer<typeof quoteInputSchema>): Prom
       error("KWK_REFERRAL_INVALID", "Dieser Empfehlungslink ist nicht verfügbar.");
     }
     const referralEmail = String(referral.email || "").trim().toLowerCase();
-    const referralPhone = String(referral.phone || "").replace(/[^0-9]/g, "").replace(/^00/, "").replace(/^0/, "49");
+    const referralPhone = normalizeKwkPhone(String(referral.phone || ""));
     if (customerEmail === referralEmail || (referralPhone && customerPhone === referralPhone)) {
       error("KWK_SELF_REFERRAL_NOT_ALLOWED", "Dieser Empfehlungsvorteil ist für diese Bestellung nicht verfügbar.");
+    }
+    const previousOrders = await pool.query(
+      `SELECT id FROM orders WHERE LOWER(TRIM(email)) = $1 OR
+        CASE
+          WHEN regexp_replace(phone, '[^0-9]', '', 'g') LIKE '0049%'
+            THEN '49' || regexp_replace(SUBSTRING(regexp_replace(phone, '[^0-9]', '', 'g') FROM 5), '^0+', '')
+          WHEN regexp_replace(phone, '[^0-9]', '', 'g') LIKE '490%'
+            THEN '49' || SUBSTRING(regexp_replace(phone, '[^0-9]', '', 'g') FROM 4)
+          WHEN regexp_replace(phone, '[^0-9]', '', 'g') LIKE '49%'
+            THEN regexp_replace(phone, '[^0-9]', '', 'g')
+          WHEN regexp_replace(phone, '[^0-9]', '', 'g') LIKE '0%'
+            THEN '49' || regexp_replace(regexp_replace(phone, '[^0-9]', '', 'g'), '^0+', '')
+          ELSE regexp_replace(phone, '[^0-9]', '', 'g')
+        END = $2
+       LIMIT 1`,
+      [customerEmail, customerPhone],
+    );
+    if (previousOrders.rows.length > 0) {
+      error("KWK_NEW_CUSTOMER_ONLY", "Dieser Empfehlungsvorteil gilt nur für die erste Bestellung.");
     }
     output.kwkReferralCode = input.kwkReferralCode.trim().toUpperCase();
     output.kwkReferralPercent = KWK_DISCOUNT_PERCENT;

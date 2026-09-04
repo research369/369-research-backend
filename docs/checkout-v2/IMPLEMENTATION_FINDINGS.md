@@ -30,9 +30,10 @@
 - Plug&Play- und Nasenspray-Kitaufschlag;
 - BAC-Wasser-Verfügbarkeit pro Nasenspray-Kit;
 - Lieferland, Versand und Kühlketten-/Packstationsausschluss;
-- Aktionscode, Partner- oder Empfehlungs-/Guthabenvorteile mit klarer Ausschlussregel.
+- Aktionscode, Partner- oder Empfehlungs-/Guthabenvorteile mit klarer Ausschlussregel;
+- beim Empfehlungsweg dieselbe E-Mail-/Telefon-Normalisierung, Selbstwerbungs- und Neukundenprüfung wie im führenden Bestellabschluss.
 
-Er erstellt weder eine Bestellung noch eine Zahlungsanforderung, reserviert keinen Bestand, verbraucht keinen Code und bucht kein Guthaben.
+Er erstellt weder eine Bestellung noch eine Zahlungsanforderung, reserviert keinen Bestand, verbraucht keinen Code und bucht kein Guthaben. Die finale Neubewertung bleibt beim späteren Bestellabschluss verbindlich, damit parallele Checkoutversuche keinen Vorteil doppelt erhalten.
 
 ## Sichere Verfügbarkeit
 
