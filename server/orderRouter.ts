@@ -146,7 +146,11 @@ export type CreateOrderInput = z.infer<typeof createOrderSchema>;
  * Canonical WaWi persistence path. Callers must pass values already resolved by
  * the server; public storefront requests continue to enter through `order.create`.
  */
-export async function createOrderFromTrustedInput(input: CreateOrderInput, ctx: Context) {
+export async function createOrderFromTrustedInput(
+  input: CreateOrderInput,
+  ctx: Context,
+  options: { suppressExternalNotifications?: boolean } = {},
+) {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
@@ -1262,26 +1266,30 @@ export async function createOrderFromTrustedInput(input: CreateOrderInput, ctx: 
       console.log(`[Orders] New order: ${orderId} – ${input.total.toFixed(2)} EUR – ${input.customer.firstName} ${input.customer.lastName} – ${itemList}`);
 
       // The shared CRM service sends, archives and protects the confirmation with
-      // a Resend idempotency key. Do not add a second order-router log entry here.
-      try {
-        const emailSent = await sendOrderConfirmationEmail({
-          orderId: orderId,
-          storeKey: input.storeKey,
-          externalOrderReference,
-          customer: input.customer,
-          items: input.items.map(i => ({ ...i, dosage: i.dosage || null, variant: i.variant || null })),
-          subtotal: input.subtotal,
-          discount: input.discount,
-          discountCode: input.discountCode,
-          shipping: input.shipping,
-          total: input.total,
-          paymentMethod: input.paymentMethod,
-        });
-        if (!emailSent) {
-          console.warn(`[Orders] Confirmation email was not accepted for ${orderId}; failure is stored in the CRM communication record`);
+      // a Resend idempotency key. Commerce-Staging must not contact real recipients.
+      if (!options.suppressExternalNotifications) {
+        try {
+          const emailSent = await sendOrderConfirmationEmail({
+            orderId: orderId,
+            storeKey: input.storeKey,
+            externalOrderReference,
+            customer: input.customer,
+            items: input.items.map(i => ({ ...i, dosage: i.dosage || null, variant: i.variant || null })),
+            subtotal: input.subtotal,
+            discount: input.discount,
+            discountCode: input.discountCode,
+            shipping: input.shipping,
+            total: input.total,
+            paymentMethod: input.paymentMethod,
+          });
+          if (!emailSent) {
+            console.warn(`[Orders] Confirmation email was not accepted for ${orderId}; failure is stored in the CRM communication record`);
+          }
+        } catch (err) {
+          console.warn("[Orders] Failed to send confirmation email:", err);
         }
-      } catch (err) {
-        console.warn("[Orders] Failed to send confirmation email:", err);
+      } else {
+        console.info(`[Orders] Checkout V2 Commerce-Staging: confirmation email suppressed for ${orderId}`);
       }
 
       // Admin-Benachrichtigung deaktiviert:
@@ -1314,7 +1322,10 @@ export async function createOrderFromTrustedInput(input: CreateOrderInput, ctx: 
 /** Only the Checkout V2 server route may persist an order with this source key. */
 export async function createOrderForCheckoutV2(input: CreateOrderInput, ctx: Context) {
   const parsed = createOrderSchema.parse({ ...input, storeKey: "checkout-v2" });
-  return createOrderFromTrustedInput(parsed, ctx);
+  // This adapter is reachable only behind the explicit Commerce-Staging gate.
+  // The mode is server-owned and cannot be set by a checkout browser request.
+  const suppressExternalNotifications = process.env.CHECKOUT_V2_TEST_MODE === "true";
+  return createOrderFromTrustedInput(parsed, ctx, { suppressExternalNotifications });
 }
 
 export const orderRouter = router({

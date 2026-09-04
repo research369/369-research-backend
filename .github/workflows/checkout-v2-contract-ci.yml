@@ -11,7 +11,10 @@ on:
       - 'server/checkoutV2Quote.ts'
       - 'server/checkoutV2Router.ts'
       - 'server/checkoutV2Quote.test.ts'
+      - 'server/checkoutV2AutomaticBenefits.ts'
+      - 'server/checkoutV2AutomaticBenefits.test.ts'
       - 'server/checkoutV2Router.test.ts'
+      - 'server/orderRouter.ts'
       - 'server/kwkCheckoutPricing.ts'
       - 'server/kwkCheckoutPricing.test.ts'
       - 'server/nasalDiySetConfig.ts'
@@ -55,6 +58,7 @@ jobs:
         run: |
           ./node_modules/.bin/tsx --test \
             server/checkoutV2Quote.test.ts \
+            server/checkoutV2AutomaticBenefits.test.ts \
             server/checkoutV2Router.test.ts \
             server/kwkCheckoutPricing.test.ts
 
@@ -63,5 +67,7 @@ jobs:
         run: |
           grep -q 'CHECKOUT_V2_COMMERCE_STAGING' server/checkoutV2Router.ts
           grep -q 'FEATURE_CHECKOUT_V2_ENABLED' server/checkoutV2Router.ts
+          grep -q 'CHECKOUT_V2_TEST_MODE' server/orderRouter.ts
+          grep -q 'suppressExternalNotifications' server/orderRouter.ts
           grep -q 'mutation(async' server/checkoutV2Router.ts
           ! grep -q 'quote: publicProcedure.input(quoteInputSchema).query' server/checkoutV2Router.ts

@@ -22,6 +22,7 @@ Der Checkout-V2-Abschluss ist als serverseitiger Adapter vor dem bestehenden WaW
 | Aggregierter Bestand | Bestanden | Bezahlte und Gratispositionen derselben Variante werden vor WaWi-Abzug zusammengeführt. |
 | Idempotenz | Bestanden | Checkout V2 benötigt einen stabilen Abschluss-Schlüssel; die WaWi-Transaktion verwendet eine dedizierte Advisory-Lock-Grenze. |
 | Fail-closed | Bestanden | Quote und Abschluss sind ohne beide expliziten Commerce-Staging-Flags vor jedem Datenbankzugriff gesperrt. |
+| Externe Kommunikation im Test | Bestanden | Bei `CHECKOUT_V2_TEST_MODE=true` unterdrückt ausschließlich der serverseitige Checkout-V2-Adapter Bestätigungs-E-Mails; der Altcheckout bleibt unverändert. |
 | Backend-Vertragstests | **31/31 bestanden** | Rein lokal, feste Testdaten, keine Datenbankverbindung. |
 | Frontend-Typecheck und Produktionsbuild | Bestanden | Die neue Route, Abschlussmutation und Lieferarten kompilieren im Feature-Branch. |
 
@@ -31,7 +32,7 @@ Der vollständige Backend-Typecheck enthält weiterhin bekannte Diagnosen außer
 
 ## Noch gesperrte Schritte
 
-Der Abschlussvertrag bleibt bis zum separaten Commerce-Staging vollständig gesperrt. Vor einer technischen Freigabe fehlen weiterhin eine eigene Testdatenbank, ein separates Backend-Service-Deployment, eine eigene Commerce-Staging-URL und ein rein testbarer Payment-Adapter. Es dürfen keine Produktionsdatenbank, Bankdaten, Zahlungsprovider-Credentials, DHL-Zugänge oder echten Kunden-/Bestelldaten in diese Umgebung übernommen werden.
+Der Abschlussvertrag bleibt bis zum separaten Commerce-Staging vollständig gesperrt. Vor einer technischen Freigabe fehlen weiterhin eine eigene Testdatenbank, ein separates Backend-Service-Deployment, eine eigene Commerce-Staging-URL und ein rein testbarer Payment-Adapter. Es dürfen keine Produktionsdatenbank, Bankdaten, Zahlungsprovider-Credentials, DHL-Zugänge oder echten Kunden-/Bestelldaten in diese Umgebung übernommen werden. In Commerce-Staging muss `CHECKOUT_V2_TEST_MODE=true` gesetzt sein; dadurch sind ausgehende Bestätigungs-E-Mails im neuen Abschlussweg serverseitig unterdrückt.
 
 ## Rückfall
 
