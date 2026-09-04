@@ -15,6 +15,14 @@ import { shopSettings } from "../drizzle/schema.js";
 const WHATSAPP_CHANNEL_CONFIG_KEY = "whatsapp_channel_config";
 const PACKING_AUTOMATION_CONFIG_KEY = "packing_automation_config";
 
+const shipmentLabelOverrideConfigSchema = z.object({
+  enabled: z.boolean(),
+  allowedRoles: z.array(z.enum(["admin"])).min(1),
+  allowedWarningCodes: z.array(z.enum(["zip_city_mismatch", "provider_unavailable"])).min(1),
+  requireServerConfirmedPackingPhoto: z.boolean(),
+  requireCompletePackingChecklist: z.boolean(),
+});
+
 const whatsappChannelConfigSchema = z.object({
   enabled: z.boolean(),
   channelUrl: z.string().url(),
@@ -41,6 +49,7 @@ const packingAutomationConfigSchema = z.object({
   requestBrowserPrint: z.boolean(),
   sendShippingEmail: z.boolean(),
   openWhatsAppAfterLabel: z.boolean(),
+  manualLabelOverride: shipmentLabelOverrideConfigSchema,
 });
 type PackingAutomationConfig = z.infer<typeof packingAutomationConfigSchema>;
 

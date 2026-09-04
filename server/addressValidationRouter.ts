@@ -4,6 +4,7 @@ import { router, adminProcedure, publicProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
 import { addressValidationRecords, orders } from "../drizzle/schema.js";
 import { persistAddressValidation, validateGermanAddress } from "./addressValidationService.js";
+import { canOverrideShipmentWarning, getShipmentLabelOverrideConfig } from "./shipmentLabelOverrideConfig.js";
 
 const addressSchema = z.object({
   street: z.string(),
@@ -73,6 +74,12 @@ export const addressValidationRouter = router({
     const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1);
     if (!order) throw new Error(`Bestellung ${input.orderId} nicht gefunden`);
 
+    const overrideConfig = await getShipmentLabelOverrideConfig();
+    const userRole = (ctx as any).user?.role as string | undefined;
+    if (overrideConfig.requireServerConfirmedPackingPhoto && !order.packingPhotoUrl) {
+      throw new Error("DHL-Label-Override nicht möglich: Das serverseitig gespeicherte Pflicht-Packfoto fehlt.");
+    }
+
     const address = {
       street: order.street || "",
       houseNumber: order.houseNumber || "",
@@ -82,6 +89,10 @@ export const addressValidationRouter = router({
       deliveryType: ((order as any).deliveryType === "packstation" ? "packstation" : "home") as "home" | "packstation",
     };
     const result = await validateGermanAddress(address);
+    const warningCodes = result.warnings.map((warning) => warning.code);
+    if (!canOverrideShipmentWarning(overrideConfig, userRole, warningCodes)) {
+      throw new Error("Dieser Prüfhinweis darf nicht per DHL-Label-Override freigegeben werden. Bitte Lieferadresse oder Pflichtangaben korrigieren.");
+    }
     const confirmedBy = (ctx as any).user?.name || (ctx as any).user?.username || "Master-Admin";
     await persistAddressValidation({
       input: address,
@@ -92,7 +103,15 @@ export const addressValidationRouter = router({
       overrideConfirmed: true,
       confirmedBy,
     });
-    return { ...result, overrideConfirmed: true, overrideConfirmedBy: confirmedBy };
+    return {
+      ...result,
+      overrideConfirmed: true,
+      overrideConfirmedBy: confirmedBy,
+      overrideConfig: {
+        requireCompletePackingChecklist: overrideConfig.requireCompletePackingChecklist,
+        allowedWarningCodes: overrideConfig.allowedWarningCodes,
+      },
+    };
   }),
 
   recordsForCustomer: adminProcedure.input(z.object({ customerId: z.number() })).query(async ({ input }) => {

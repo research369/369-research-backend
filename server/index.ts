@@ -29,6 +29,7 @@ import { ensureAddressValidationSchema } from "./addressValidationSchema.js";
 import { ensureCustomerDossierSchema } from "./customerDossierSchema.js";
 import { ensureQrCampaignSchema } from "./qrCampaignSchema.js";
 import { ensureDiscountProvenanceSchema } from "./discountProvenanceSchema.js";
+import { ensureShipmentLabelOverrideConfig } from "./shipmentLabelOverrideConfig.js";
 import { qrRedirectRouter } from "./qrRedirectRouter.js";
 import { ensurePeps4petsCheckoutSchema, isPeps4petsCheckoutSchemaReady } from "./peps4petsCheckoutSchema.js";
 
@@ -260,6 +261,13 @@ async function start() {
 
   // Peps4pets: isolated storefront metadata, a separate visible reference and
   // evidence-bound retry protection. Existing 369 order contracts stay unchanged.
+  try {
+    await ensureShipmentLabelOverrideConfig();
+    console.log("[Packing] Manuelle DHL-Label-Override-Konfiguration bereit");
+  } catch (err) {
+    console.error("[Packing] Label-Override-Konfiguration fehlgeschlagen:", err);
+  }
+
   try {
     await ensurePeps4petsCheckoutSchema();
     console.log("[Server] Peps4pets checkout schema ready");
