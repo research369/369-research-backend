@@ -25,6 +25,7 @@ import { communicationTemplateRouter } from "./communicationTemplateRouter.js";
 import { addressValidationRouter } from "./addressValidationRouter.js";
 import { customerDossierRouter } from "./customerDossierRouter.js";
 import { qrCampaignRouter } from "./qrCampaignRouter.js";
+import { checkoutV2Router } from "./checkoutV2Router.js";
 
 export const appRouter = router({
   order: orderRouter,
@@ -49,6 +50,7 @@ export const appRouter = router({
   addressValidation: addressValidationRouter,
   customerDossier: customerDossierRouter,
   qrCampaign: qrCampaignRouter,
+  checkoutV2: checkoutV2Router,
 });
 
 export type AppRouter = typeof appRouter;
