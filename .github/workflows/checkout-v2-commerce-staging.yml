@@ -1,0 +1,106 @@
+name: Checkout V2 Commerce Staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Type COMMERCE_STAGING_ONLY to permit a deploy to the isolated Commerce-Staging environment'
+        required: true
+        type: string
+      backend_ref:
+        description: 'Backend feature branch or commit to test and deploy'
+        required: true
+        default: 'feat/checkout-v2-commerce-contract'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checkout-v2-commerce-staging
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  test_contract:
+    name: Test checkout contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check explicit staging confirmation
+        shell: bash
+        run: |
+          test "${{ inputs.confirmation }}" = "COMMERCE_STAGING_ONLY" || {
+            echo "This workflow is restricted to the isolated Commerce-Staging environment."
+            exit 1
+          }
+
+      - name: Check out selected backend revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.backend_ref }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Enable pnpm
+        shell: bash
+        run: corepack enable
+
+      - name: Install locked dependencies
+        shell: bash
+        run: pnpm install --frozen-lockfile
+
+      - name: Run isolated Checkout V2 contract tests
+        shell: bash
+        run: |
+          ./node_modules/.bin/tsx --test \
+            server/checkoutV2Quote.test.ts \
+            server/checkoutV2Router.test.ts \
+            server/kwkCheckoutPricing.test.ts
+
+      - name: Verify the new quote endpoint remains feature-gated
+        shell: bash
+        run: |
+          ! grep -q 'quote: publicProcedure.input(quoteInputSchema).query' server/checkoutV2Router.ts
+          grep -q 'CHECKOUT_V2_COMMERCE_STAGING' server/checkoutV2Router.ts
+          grep -q 'FEATURE_CHECKOUT_V2_ENABLED' server/checkoutV2Router.ts
+
+  deploy_commerce_staging:
+    name: Deploy isolated backend staging
+    needs: test_contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: checkout-v2-commerce-staging
+    if: ${{ inputs.confirmation == 'COMMERCE_STAGING_ONLY' }}
+    container: ghcr.io/railwayapp/cli:latest
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_COMMERCE_STAGING_TOKEN }}
+      RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_COMMERCE_STAGING_PROJECT_ID }}
+      RAILWAY_ENVIRONMENT: ${{ vars.RAILWAY_COMMERCE_STAGING_ENVIRONMENT }}
+      RAILWAY_SERVICE: ${{ vars.RAILWAY_COMMERCE_STAGING_SERVICE }}
+    steps:
+      - name: Check out selected backend revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.backend_ref }}
+          persist-credentials: false
+
+      - name: Reject incomplete staging configuration
+        shell: bash
+        run: |
+          test -n "$RAILWAY_TOKEN" || { echo "Missing environment secret RAILWAY_COMMERCE_STAGING_TOKEN"; exit 1; }
+          test -n "$RAILWAY_PROJECT_ID" || { echo "Missing environment variable RAILWAY_COMMERCE_STAGING_PROJECT_ID"; exit 1; }
+          test -n "$RAILWAY_ENVIRONMENT" || { echo "Missing environment variable RAILWAY_COMMERCE_STAGING_ENVIRONMENT"; exit 1; }
+          test -n "$RAILWAY_SERVICE" || { echo "Missing environment variable RAILWAY_COMMERCE_STAGING_SERVICE"; exit 1; }
+          test "$RAILWAY_ENVIRONMENT" != "production" || { echo "Production environment is forbidden."; exit 1; }
+
+      - name: Deploy only the explicitly named staging service
+        shell: bash
+        run: railway up --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT" --service "$RAILWAY_SERVICE" --ci
