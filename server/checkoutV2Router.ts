@@ -1,3 +1,4 @@
+import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { and, eq } from "drizzle-orm";
 import { router, publicProcedure } from "./trpc.js";
@@ -13,6 +14,15 @@ import {
   type CheckoutV2CatalogArticle,
   type CheckoutV2Promotion,
 } from "./checkoutV2Quote.js";
+
+function assertCheckoutV2CommerceStaging(): void {
+  if (process.env.CHECKOUT_V2_COMMERCE_STAGING !== "true" || process.env.FEATURE_CHECKOUT_V2_ENABLED !== "true") {
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message: "Checkout V2 ist in dieser Umgebung nicht verfügbar.",
+    });
+  }
+}
 
 const selectionSchema = z.object({
   shopProductId: z.string().min(1).max(160),
@@ -162,6 +172,7 @@ export const checkoutV2Router = router({
    * consumes a code, writes a ledger entry, or initiates a payment.
    */
   quote: publicProcedure.input(quoteInputSchema).query(async ({ input }) => {
+    assertCheckoutV2CommerceStaging();
     const db = await getDb();
     if (!db) throw new Error("Datenbank nicht verfügbar");
     const catalog = await db.select({

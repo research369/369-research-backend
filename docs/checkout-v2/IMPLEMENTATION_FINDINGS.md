@@ -34,6 +34,10 @@
 
 Er erstellt weder eine Bestellung noch eine Zahlungsanforderung, reserviert keinen Bestand, verbraucht keinen Code und bucht kein Guthaben.
 
+## Sichere Verfügbarkeit
+
+Die öffentliche Route `checkoutV2.quote` ist standardmäßig geschlossen. Sie lässt sich nur öffnen, wenn in einer ausdrücklich getrennten Commerce-Staging-Umgebung **beide** Variablen `CHECKOUT_V2_COMMERCE_STAGING=true` und `FEATURE_CHECKOUT_V2_ENABLED=true` gesetzt sind. Auf Live- und gewöhnlichen Staging-Umgebungen antwortet sie vorher mit `FORBIDDEN` und greift nicht auf die Datenbank zu.
+
 ## Lokale Tests
 
-Die lokalen Tests `server/checkoutV2Quote.test.ts` und `server/kwkCheckoutPricing.test.ts` bestehen zusammen mit **17 von 17** Fällen. Sie enthalten keine Datenbankverbindung und keine produktive Mutation.
+Die lokalen Tests `server/checkoutV2Quote.test.ts`, `server/checkoutV2Router.test.ts` und `server/kwkCheckoutPricing.test.ts` bestehen zusammen mit **18 von 18** Fällen. Sie enthalten keine Datenbankverbindung und keine produktive Mutation.
