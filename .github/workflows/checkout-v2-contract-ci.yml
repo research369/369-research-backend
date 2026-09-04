@@ -1,0 +1,67 @@
+name: Checkout V2 Contract CI
+
+on:
+  push:
+    branches:
+      - 'feat/checkout-v2-*'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'server/checkoutV2Quote.ts'
+      - 'server/checkoutV2Router.ts'
+      - 'server/checkoutV2Quote.test.ts'
+      - 'server/checkoutV2Router.test.ts'
+      - 'server/kwkCheckoutPricing.ts'
+      - 'server/kwkCheckoutPricing.test.ts'
+      - 'server/nasalDiySetConfig.ts'
+      - 'server/addressValidationService.ts'
+      - 'drizzle/schema.ts'
+      - '.github/workflows/checkout-v2-contract-ci.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checkout-v2-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: Run isolated Checkout V2 contract tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out revision
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Enable pnpm
+        shell: bash
+        run: corepack enable
+
+      - name: Install locked dependencies without lifecycle scripts
+        shell: bash
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Run pure Checkout V2 contract tests
+        shell: bash
+        run: |
+          ./node_modules/.bin/tsx --test \
+            server/checkoutV2Quote.test.ts \
+            server/checkoutV2Router.test.ts \
+            server/kwkCheckoutPricing.test.ts
+
+      - name: Assert default-closed staging gate
+        shell: bash
+        run: |
+          grep -q 'CHECKOUT_V2_COMMERCE_STAGING' server/checkoutV2Router.ts
+          grep -q 'FEATURE_CHECKOUT_V2_ENABLED' server/checkoutV2Router.ts
+          grep -q 'mutation(async' server/checkoutV2Router.ts
+          ! grep -q 'quote: publicProcedure.input(quoteInputSchema).query' server/checkoutV2Router.ts
