@@ -26,7 +26,7 @@
 
 `server/checkoutV2Quote.ts` ist absichtlich zustandslos. Er führt ausschließlich folgende Prüfungen aus:
 
-- Produktreferenz, Stärke, Variante, führender Preis und verfügbare Menge;
+- Produktreferenz, Stärke, Variante, führender Preis, Shop-Sichtbarkeit und verfügbare Menge;
 - Plug&Play- und Nasenspray-Kitaufschlag;
 - BAC-Wasser-Verfügbarkeit pro Nasenspray-Kit;
 - Lieferland, Versand und Kühlketten-/Packstationsausschluss;
@@ -41,4 +41,4 @@ Die öffentliche Route `checkoutV2.quote` ist standardmäßig geschlossen. Sie l
 
 ## Lokale Tests
 
-Die lokalen Tests `server/checkoutV2Quote.test.ts`, `server/checkoutV2Router.test.ts` und `server/kwkCheckoutPricing.test.ts` bestehen zusammen mit **18 von 18** Fällen. Sie enthalten keine Datenbankverbindung und keine produktive Mutation.
+Die lokalen Tests `server/checkoutV2Quote.test.ts`, `server/checkoutV2Router.test.ts` und `server/kwkCheckoutPricing.test.ts` bestehen zusammen mit **19 von 19** Fällen. Sie enthalten keine Datenbankverbindung und keine produktive Mutation.

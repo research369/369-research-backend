@@ -70,6 +70,18 @@ test("Checkout V2 ignores client price and resolves the current catalog price", 
   assert.equal(result.total, 70);
 });
 
+test("Checkout V2 refuses active articles hidden from the shop", () => {
+  const hiddenCatalog = catalog.map((article) => article.shopProductId === "adamax" ? { ...article, shopVisible: 0 } : article);
+  assert.throws(
+    () => calculateCheckoutV2Quote({
+      selections: [{ shopProductId: "adamax", dosage: "10 mg", quantity: 1 }],
+      delivery: { country: "Deutschland", deliveryType: "home" },
+      catalog: hiddenCatalog,
+    }),
+    (error: unknown) => error instanceof CheckoutV2QuoteError && error.code === "PRODUCT_NOT_AVAILABLE",
+  );
+});
+
 test("Checkout V2 calculates restricted promotion and its shipping rule from server metadata", () => {
   const result = quote(
     { shopProductId: "adamax", dosage: "10 mg", quantity: 1 },

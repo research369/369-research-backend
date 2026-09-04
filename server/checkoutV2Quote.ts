@@ -116,11 +116,10 @@ function findCanonicalArticle(selection: CheckoutV2Selection, catalog: CheckoutV
   const productId = normalizeId(selection.shopProductId);
   if (!productId) throw new CheckoutV2QuoteError("PRODUCT_REFERENCE_REQUIRED", "Ein Produkt konnte nicht eindeutig zugeordnet werden.");
 
-  const family = catalog.filter((article) => article.isActive === 1 && (
+  const family = catalog.filter((article) => article.isActive === 1 && article.shopVisible === 1 && (
     normalizeId(article.shopProductId || "") === productId || normalizeId(article.sku) === productId
   ));
-  const canonical = family.find((article) => article.shopVisible === 1 && Array.isArray(article.variants) && article.variants.length > 0)
-    ?? family.find((article) => article.shopVisible === 1)
+  const canonical = family.find((article) => Array.isArray(article.variants) && article.variants.length > 0)
     ?? family[0];
   if (!canonical) throw new CheckoutV2QuoteError("PRODUCT_NOT_AVAILABLE", "Ein Produkt ist nicht mehr verfügbar.");
   return canonical;
@@ -136,7 +135,7 @@ function validateSelection(selection: CheckoutV2Selection): void {
 }
 
 function assertAvailability(selection: CheckoutV2Selection, catalog: CheckoutV2CatalogArticle[]): void {
-  const matching = catalog.filter((article) => article.isActive === 1 && matchesSelectionArticle(selection, article));
+  const matching = catalog.filter((article) => article.isActive === 1 && article.shopVisible === 1 && matchesSelectionArticle(selection, article));
   if (matching.length === 0) throw new CheckoutV2QuoteError("PRODUCT_NOT_AVAILABLE", "Ein Produkt ist nicht mehr verfügbar.");
   const available = matching.reduce((sum, article) => sum + Math.max(0, Number(article.stock ?? 0)), 0);
   if (available < selection.quantity) {
