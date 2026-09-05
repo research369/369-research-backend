@@ -11,6 +11,7 @@ export const NASAL_DIY_SET_SURCHARGE = 7;
 
 export const NASAL_DIY_SET_ELIGIBLE_PRODUCT_IDS = new Set([
   "semax",
+  "semax-selank",
   "selank",
   "adamax",
   "oxytocin",

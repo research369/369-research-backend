@@ -6,7 +6,7 @@
 
 import { z } from "zod";
 import { eq, desc, inArray, and, or } from "drizzle-orm";
-import { router, publicProcedure, adminProcedure } from "./trpc.js";
+import { router, publicProcedure, adminProcedure, type Context } from "./trpc.js";
 import { getDb, getPool } from "./db.js";
 import { orders, orderItems, articles, stockHistory, customers, customerCommunications, promoCodes } from "../drizzle/schema.js";
 import { getIncomingPayments, matchPaymentToOrder, intelligentMatch, type MatchResult } from "./bunqService.js";
@@ -59,8 +59,9 @@ const discountBreakdownEntrySchema = z.object({
 const createOrderSchema = z.object({
   orderId: z.string().optional(), // now generated server-side via DB sequence
   // Zusätzliche Shopquelle. Ohne Angabe bleibt die bestehende 369-Research-Logik unverändert.
-  storeKey: z.enum(["369research", "peps4pets"]).optional().default("369research"),
-  // Nur Peps4pets verwendet diesen evidenzgebundenen Schlüssel. Die kanonische
+  // `checkout-v2` ist ausschließlich für den serverseitigen V2-Abschluss reserviert.
+  storeKey: z.enum(["369research", "peps4pets", "checkout-v2"]).optional().default("369research"),
+  // Peps4pets und Checkout V2 verwenden einen evidenzgebundenen Schlüssel. Die kanonische
   // WaWi-Nummer bleibt unabhängig davon weiterhin der interne Primärvertrag.
   checkoutIdempotencyKey: z.string().trim().min(12).max(128).optional(),
   items: z.array(z.object({
@@ -75,7 +76,7 @@ const createOrderSchema = z.object({
     // DIY-Set: Vial plus BAC Wasser, Flasche, Aufziehspritze und Kanüle (+7 €).
     isNasalDiySet: z.boolean().optional(),
     isPlugPlay: z.boolean().optional(),   // Plug&Play Patrone (+15€ Aufpreis)
-    isFreeGift: z.boolean().optional(),   // Gratis-Position (kein Bestandsabzug)
+    isFreeGift: z.boolean().optional(),   // Servergenerierte Gratisposition; Bestand wird ebenfalls geprüft und gebucht.
   })),
   customer: z.object({
     firstName: z.string(),
@@ -139,11 +140,17 @@ const updateStatusSchema = z.object({
   internalNote: z.string().optional(),
 });
 
-export const orderRouter = router({
-  // PUBLIC: Create order from checkout (no auth required)
-  create: publicProcedure
-    .input(createOrderSchema)
-        .mutation(async ({ input, ctx }) => {
+export type CreateOrderInput = z.infer<typeof createOrderSchema>;
+
+/**
+ * Canonical WaWi persistence path. Callers must pass values already resolved by
+ * the server; public storefront requests continue to enter through `order.create`.
+ */
+export async function createOrderFromTrustedInput(
+  input: CreateOrderInput,
+  ctx: Context,
+  options: { suppressExternalNotifications?: boolean } = {},
+) {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
@@ -433,45 +440,46 @@ export const orderRouter = router({
       };
 
       const isPeps4petsOrder = input.storeKey === "peps4pets";
-      const checkoutIdempotencyKey = isPeps4petsOrder ? input.checkoutIdempotencyKey : undefined;
-      if (isPeps4petsOrder && !checkoutIdempotencyKey) {
-        throw new Error("Peps4pets-Bestellungen benötigen einen stabilen Checkout-Schlüssel");
+      const usesCheckoutIdempotency = input.storeKey === "peps4pets" || input.storeKey === "checkout-v2";
+      const checkoutIdempotencyKey = usesCheckoutIdempotency ? input.checkoutIdempotencyKey : undefined;
+      if (usesCheckoutIdempotency && !checkoutIdempotencyKey) {
+        throw new Error("Checkout-Bestellungen benötigen einen stabilen Abschluss-Schlüssel");
       }
 
-      const existingP4pResponse = (existingOrder: typeof orders.$inferSelect) => ({
+      const existingCheckoutResponse = (existingOrder: typeof orders.$inferSelect) => ({
         success: true,
         orderId: existingOrder.orderId,
         externalOrderReference: existingOrder.externalOrderReference || undefined,
       });
 
-      let p4pLockClient: any = null;
-      if (isPeps4petsOrder && checkoutIdempotencyKey) {
+      let checkoutLockClient: any = null;
+      if (usesCheckoutIdempotency && checkoutIdempotencyKey) {
         const [existingBeforeLock] = await db.select().from(orders)
           .where(eq(orders.checkoutIdempotencyKey, checkoutIdempotencyKey)).limit(1);
-        if (existingBeforeLock) return existingP4pResponse(existingBeforeLock);
+        if (existingBeforeLock) return existingCheckoutResponse(existingBeforeLock);
 
         const pool = await getPool();
         if (!pool) throw new Error("Datenbank nicht verfügbar");
         const lockClient = await pool.connect();
         const lockResult = await lockClient.query(
           "SELECT pg_try_advisory_lock(hashtext($1)) AS locked",
-          [`peps4pets-checkout:${checkoutIdempotencyKey}`],
+          [`${input.storeKey}-checkout:${checkoutIdempotencyKey}`],
         );
         if (!lockResult.rows[0]?.locked) {
           lockClient.release();
           const [existingWhileLocked] = await db.select().from(orders)
             .where(eq(orders.checkoutIdempotencyKey, checkoutIdempotencyKey)).limit(1);
-          if (existingWhileLocked) return existingP4pResponse(existingWhileLocked);
+          if (existingWhileLocked) return existingCheckoutResponse(existingWhileLocked);
           throw new Error("Deine Bestellung wird bereits verarbeitet. Bitte warte einen Moment und versuche es erneut.");
         }
-        p4pLockClient = lockClient;
+        checkoutLockClient = lockClient;
       }
 
       try {
-      if (isPeps4petsOrder && checkoutIdempotencyKey) {
+      if (usesCheckoutIdempotency && checkoutIdempotencyKey) {
         const [existingAfterLock] = await db.select().from(orders)
           .where(eq(orders.checkoutIdempotencyKey, checkoutIdempotencyKey)).limit(1);
-        if (existingAfterLock) return existingP4pResponse(existingAfterLock);
+        if (existingAfterLock) return existingCheckoutResponse(existingAfterLock);
       }
 
       // ── Generate sequential canonical WaWi order ID from DB sequence ──
@@ -553,7 +561,7 @@ export const orderRouter = router({
       }
 
       // ── Idempotency check: if order already exists, skip re-processing ──
-      const existingOrder = isPeps4petsOrder && checkoutIdempotencyKey
+      const existingOrder = usesCheckoutIdempotency && checkoutIdempotencyKey
         ? await db.select().from(orders).where(eq(orders.checkoutIdempotencyKey, checkoutIdempotencyKey)).limit(1)
         : await db.select().from(orders).where(eq(orders.orderId, orderId)).limit(1);
       if (existingOrder.length > 0) {
@@ -561,7 +569,7 @@ export const orderRouter = router({
         if (parseFloat(existingOrder[0].creditUsed || "0") > 0) {
           await redeemPartnerCreditForOrder(orderId);
         }
-        return isPeps4petsOrder ? existingP4pResponse(existingOrder[0]) : { success: true, orderId: orderId };
+        return usesCheckoutIdempotency ? existingCheckoutResponse(existingOrder[0]) : { success: true, orderId: orderId };
       }
 
       // Stock check, stock movement, order persistence, order items and customer link
@@ -645,7 +653,7 @@ export const orderRouter = router({
       const outOfStockItems: string[] = [];
 
       // Smart Substitution: prüfen ob Feature aktiv ist
-      const substitutionActive = await isSubstitutionEnabled();
+      const substitutionActive = input.storeKey === "checkout-v2" ? false : await isSubstitutionEnabled();
 
       // Helper: find articles matching a shop item by shopProductId + dosage
       // Fallback: wenn keine shopProductId, suche nach Name + Dosage (für manuelle WaWi-Bestellungen)
@@ -683,13 +691,35 @@ export const orderRouter = router({
         });
       };
 
+      // Checkout V2 merges paid and server-generated gift lines that consume the
+      // same inventory variant. This closes the historical per-line stock gap.
+      const stockRelevantItems = (() => {
+        if (input.storeKey !== "checkout-v2") return input.items;
+        const grouped = new Map<string, { item: (typeof input.items)[number]; quantity: number; giftOnly: boolean }>();
+        for (const item of input.items) {
+          const key = `${(item.shopProductId || item.name).trim().toLowerCase()}::${(item.dosage || "").trim().toLowerCase()}`;
+          const current = grouped.get(key);
+          if (current) {
+            current.quantity += item.quantity;
+            current.giftOnly = current.giftOnly && item.isFreeGift === true;
+          } else {
+            grouped.set(key, { item, quantity: item.quantity, giftOnly: item.isFreeGift === true });
+          }
+        }
+        return Array.from(grouped.values()).map(({ item, quantity, giftOnly }) => ({ ...item, quantity, isFreeGift: giftOnly }));
+      })();
+
       // Map: item-Index → SubstitutionResult (für späteren Bestandsabzug)
       const substitutionMap = new Map<number, import('./substitutionService.js').SubstitutionResult>();
 
-      for (let itemIdx = 0; itemIdx < input.items.length; itemIdx++) {
-        const item = input.items[itemIdx];
-        if (item.type !== 'peptide') continue;
+      for (let itemIdx = 0; itemIdx < stockRelevantItems.length; itemIdx++) {
+        const item = stockRelevantItems[itemIdx];
+        if (item.type !== 'peptide' && item.isFreeGift !== true) continue;
         const matchingArticles = findMatchingArticles(item, allArticlesForCheck);
+        if (matchingArticles.length === 0 && input.storeKey === "checkout-v2") {
+          outOfStockItems.push(`${item.name}${item.dosage ? ` (${item.dosage})` : ""} (nicht im aktiven Warenbestand gefunden)`);
+          continue;
+        }
         if (matchingArticles.length > 0) {
           const totalStock = matchingArticles.reduce((sum, a) => sum + (a.stock ?? 0), 0);
           if (totalStock < item.quantity) {
@@ -763,9 +793,9 @@ export const orderRouter = router({
 
       // ── Stock deduction: reduce stock for all ordered peptide items ──
       // Bei Substitution: Bestand der Ersatz-Varianten abziehen, nicht der bestellten Variante
-      for (let itemIdx = 0; itemIdx < input.items.length; itemIdx++) {
-        const item = input.items[itemIdx];
-        if (item.type !== 'peptide') continue;
+      for (let itemIdx = 0; itemIdx < stockRelevantItems.length; itemIdx++) {
+        const item = stockRelevantItems[itemIdx];
+        if (item.type !== 'peptide' && item.isFreeGift !== true) continue;
 
         const sub = substitutionMap.get(itemIdx);
         if (sub && sub.possible) {
@@ -1236,26 +1266,30 @@ export const orderRouter = router({
       console.log(`[Orders] New order: ${orderId} – ${input.total.toFixed(2)} EUR – ${input.customer.firstName} ${input.customer.lastName} – ${itemList}`);
 
       // The shared CRM service sends, archives and protects the confirmation with
-      // a Resend idempotency key. Do not add a second order-router log entry here.
-      try {
-        const emailSent = await sendOrderConfirmationEmail({
-          orderId: orderId,
-          storeKey: input.storeKey,
-          externalOrderReference,
-          customer: input.customer,
-          items: input.items.map(i => ({ ...i, dosage: i.dosage || null, variant: i.variant || null })),
-          subtotal: input.subtotal,
-          discount: input.discount,
-          discountCode: input.discountCode,
-          shipping: input.shipping,
-          total: input.total,
-          paymentMethod: input.paymentMethod,
-        });
-        if (!emailSent) {
-          console.warn(`[Orders] Confirmation email was not accepted for ${orderId}; failure is stored in the CRM communication record`);
+      // a Resend idempotency key. Commerce-Staging must not contact real recipients.
+      if (!options.suppressExternalNotifications) {
+        try {
+          const emailSent = await sendOrderConfirmationEmail({
+            orderId: orderId,
+            storeKey: input.storeKey,
+            externalOrderReference,
+            customer: input.customer,
+            items: input.items.map(i => ({ ...i, dosage: i.dosage || null, variant: i.variant || null })),
+            subtotal: input.subtotal,
+            discount: input.discount,
+            discountCode: input.discountCode,
+            shipping: input.shipping,
+            total: input.total,
+            paymentMethod: input.paymentMethod,
+          });
+          if (!emailSent) {
+            console.warn(`[Orders] Confirmation email was not accepted for ${orderId}; failure is stored in the CRM communication record`);
+          }
+        } catch (err) {
+          console.warn("[Orders] Failed to send confirmation email:", err);
         }
-      } catch (err) {
-        console.warn("[Orders] Failed to send confirmation email:", err);
+      } else {
+        console.info(`[Orders] Checkout V2 Commerce-Staging: confirmation email suppressed for ${orderId}`);
       }
 
       // Admin-Benachrichtigung deaktiviert:
@@ -1275,17 +1309,38 @@ export const orderRouter = router({
         total: input.total,
       };
       } finally {
-        if (p4pLockClient) {
+        if (checkoutLockClient) {
           try {
-            await p4pLockClient.query("SELECT pg_advisory_unlock(hashtext($1))", [`peps4pets-checkout:${checkoutIdempotencyKey}`]);
+            await checkoutLockClient.query("SELECT pg_advisory_unlock(hashtext($1))", [`${input.storeKey}-checkout:${checkoutIdempotencyKey}`]);
           } finally {
-            p4pLockClient.release();
+            checkoutLockClient.release();
           }
         }
+            }
+}
+
+/** Only the Checkout V2 server route may persist an order with this source key. */
+export async function createOrderForCheckoutV2(input: CreateOrderInput, ctx: Context) {
+  const parsed = createOrderSchema.parse({ ...input, storeKey: "checkout-v2" });
+  // This adapter is reachable only behind the explicit Commerce-Staging gate.
+  // The mode is server-owned and cannot be set by a checkout browser request.
+  const suppressExternalNotifications = process.env.CHECKOUT_V2_TEST_MODE === "true";
+  return createOrderFromTrustedInput(parsed, ctx, { suppressExternalNotifications });
+}
+
+export const orderRouter = router({
+  // PUBLIC: Historical checkout route. Checkout V2 uses the server-only adapter above.
+  create: publicProcedure
+    .input(createOrderSchema)
+    .mutation(({ input, ctx }) => {
+      if (input.storeKey === "checkout-v2") {
+        throw new Error("Checkout V2 muss über den serverseitigen Abschlussvertrag verarbeitet werden");
       }
+      return createOrderFromTrustedInput(input, ctx);
     }),
 
   // ADMIN: List all orders with items
+
   list: adminProcedure
     .input(z.object({
       status: z.enum(["alle", "offen", "bezahlt", "gepackt", "versendet", "zugestellt", "abgeholt", "storniert"]).optional(),
