@@ -62,8 +62,10 @@ jobs:
         run: |
           ./node_modules/.bin/tsx --test \
             server/checkoutV2Quote.test.ts \
+            server/checkoutV2AutomaticBenefits.test.ts \
             server/checkoutV2Router.test.ts \
-            server/kwkCheckoutPricing.test.ts
+            server/kwkCheckoutPricing.test.ts \
+            server/backupService.test.ts
 
       - name: Verify the new quote endpoint remains feature-gated
         shell: bash
@@ -71,6 +73,7 @@ jobs:
           ! grep -q 'quote: publicProcedure.input(quoteInputSchema).query' server/checkoutV2Router.ts
           grep -q 'CHECKOUT_V2_COMMERCE_STAGING' server/checkoutV2Router.ts
           grep -q 'FEATURE_CHECKOUT_V2_ENABLED' server/checkoutV2Router.ts
+          grep -q 'isBackupSchedulerDisabledForCommerceStaging' server/backupService.ts
 
   deploy_commerce_staging:
     name: Deploy isolated backend staging
