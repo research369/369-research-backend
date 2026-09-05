@@ -17,6 +17,8 @@ on:
       - 'server/orderRouter.ts'
       - 'server/kwkCheckoutPricing.ts'
       - 'server/kwkCheckoutPricing.test.ts'
+      - 'server/backupService.ts'
+      - 'server/backupService.test.ts'
       - 'server/nasalDiySetConfig.ts'
       - 'server/addressValidationService.ts'
       - 'drizzle/schema.ts'
@@ -60,7 +62,8 @@ jobs:
             server/checkoutV2Quote.test.ts \
             server/checkoutV2AutomaticBenefits.test.ts \
             server/checkoutV2Router.test.ts \
-            server/kwkCheckoutPricing.test.ts
+            server/kwkCheckoutPricing.test.ts \
+            server/backupService.test.ts
 
       - name: Assert default-closed staging gate
         shell: bash
@@ -69,5 +72,6 @@ jobs:
           grep -q 'FEATURE_CHECKOUT_V2_ENABLED' server/checkoutV2Router.ts
           grep -q 'CHECKOUT_V2_TEST_MODE' server/orderRouter.ts
           grep -q 'suppressExternalNotifications' server/orderRouter.ts
+          grep -q 'isBackupSchedulerDisabledForCommerceStaging' server/backupService.ts
           grep -q 'mutation(async' server/checkoutV2Router.ts
           ! grep -q 'quote: publicProcedure.input(quoteInputSchema).query' server/checkoutV2Router.ts

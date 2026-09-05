@@ -192,7 +192,16 @@ Dieser Backup wird täglich um 03:00 Uhr UTC automatisch erstellt.
  * Startet den täglichen Backup-Cron-Job.
  * Läuft täglich um 03:00 Uhr UTC.
  */
+export function isBackupSchedulerDisabledForCommerceStaging(): boolean {
+  return process.env.CHECKOUT_V2_COMMERCE_STAGING === "true";
+}
+
 export function startBackupScheduler(): void {
+  if (isBackupSchedulerDisabledForCommerceStaging()) {
+    console.log("[Backup] Commerce-Staging erkannt – Backup-Scheduler bleibt deaktiviert");
+    return;
+  }
+
   console.log("[Backup] Backup-Scheduler gestartet – täglich um 03:00 Uhr UTC");
 
   const scheduleNextBackup = () => {
