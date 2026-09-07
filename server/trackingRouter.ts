@@ -281,6 +281,9 @@ trackingRouter.get("/api/internal/pepgpt/order-status", async (req: Request, res
       return;
     }
     const tracking = order.trackingNumber ? await fetchDhlTracking(order.trackingNumber) : null;
+    const relevantDate = order.shippedAt || order.orderDate;
+    const ageDays = relevantDate ? Math.max(0, Math.floor((Date.now() - new Date(relevantDate).getTime()) / 86400000)) : null;
+    const shipmentRecency = ageDays !== null && ageDays > 45 ? "older" : "current";
     res.json({
       success: true,
       order: {
@@ -288,6 +291,8 @@ trackingRouter.get("/api/internal/pepgpt/order-status", async (req: Request, res
         status: order.status,
         orderDate: order.orderDate,
         shippedAt: order.shippedAt,
+        shipmentRecency,
+        ageDays,
         tracking: tracking ? {
           number: order.trackingNumber,
           url: `https://www.dhl.de/de/privatkunden/pakete-empfangen/verfolgen.html?piececode=${encodeURIComponent(order.trackingNumber!)}`,
