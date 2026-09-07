@@ -26,6 +26,7 @@ import { withStoreSourceMarker } from "./storeSource.js";
 import {
   calculateAuthoritativeKwkOrder,
   calculateAuthoritativeShipping,
+  calculateAutomaticGlobalDiscount,
   calculatePromoDiscount,
   requiresColdChainShipping,
   normalizeKwkPhone,
@@ -35,6 +36,7 @@ import {
   type PromoDefinition,
 } from "./kwkCheckoutPricing.js";
 import { verifyKwkToken } from "./kwkAuth.js";
+import { getActiveGlobalAutomaticDiscountFromDb } from "./globalAutomaticDiscountConfig.js";
 
 // Die WaWi-Liste benötigt nur die Information, ob ein Label vorliegt. Die großen
 // Base64-/Legacy-Labeldaten bleiben ausschließlich für den gezielten, geschützten Abruf.
@@ -52,6 +54,7 @@ const discountBreakdownEntrySchema = z.object({
     "partner_credit",
     "kwk_referral",
     "kwk_credit",
+    "automatic_global_percent",
     "manual_global_percent",
     "manual_global_amount",
     "manual_line_percent",
@@ -162,8 +165,20 @@ export const orderRouter = router({
       const hasKwkRequest = Boolean(input.kwkCode?.trim())
         || requestedKwkCredit > 0
         || (input.kwkDiscount || 0) > 0;
+      const configuredGlobalDiscount = await getActiveGlobalAutomaticDiscountFromDb();
+      // Falls die Kombination mit Aktionscodes deaktiviert wurde, bleibt ein
+      // gültiger Aktionscode bewusst allein maßgeblich. Diese Entscheidung wird
+      // aus der DB getroffen; der Browser kann die Konfiguration nicht setzen.
+      const activeGlobalDiscount = configuredGlobalDiscount
+        && (configuredGlobalDiscount.stackWithPromotionCodes || !input.discountCode?.trim())
+        ? configuredGlobalDiscount
+        : null;
 
-      if (hasKwkRequest) {
+      // Für jede Bestellung mit aktivem Dauerrabatt werden Artikelpreise und
+      // Warenwert zwingend aus dem aktuellen Katalog rekonstruiert. Dadurch ist
+      // der Rabattbetrag nie vom Browser abhängig. Der bisherige KWK-Schutz
+      // verwendet denselben Pfad weiter unverändert.
+      if (hasKwkRequest || activeGlobalDiscount) {
         const catalog = await db.select({
           sku: articles.sku,
           shopProductId: articles.shopProductId,
@@ -179,6 +194,19 @@ export const orderRouter = router({
           price: resolveAuthoritativeItemPrice(item, catalog),
         }));
         input.subtotal = roundMoney(input.items.reduce((sum, item) => sum + item.price * item.quantity, 0));
+      }
+
+      const automaticGlobalDiscountAmount = activeGlobalDiscount
+        ? calculateAutomaticGlobalDiscount(input.subtotal, activeGlobalDiscount.percentage)
+        : 0;
+      const submittedAutomaticGlobalDiscount = roundMoney((input.discountBreakdown || [])
+        .filter((entry) => entry.source === "automatic_global_percent")
+        .reduce((sum, entry) => sum + entry.amount, 0));
+      if (activeGlobalDiscount && Math.abs(submittedAutomaticGlobalDiscount - automaticGlobalDiscountAmount) > 0.02) {
+        throw new Error("DAUERRABATT_NICHT_AKTUELL: Bitte den Warenkorb aktualisieren und erneut bestellen.");
+      }
+      if (!activeGlobalDiscount && submittedAutomaticGlobalDiscount > 0) {
+        throw new Error("DAUERRABATT_NICHT_AKTIV: Bitte den Warenkorb aktualisieren und erneut bestellen.");
       }
 
         // Kühlpflichtige Artikel dürfen niemals mit der normalen DHL-Gebühr
@@ -303,6 +331,7 @@ export const orderRouter = router({
           subtotal: input.subtotal,
           items: input.items,
           promo: promoDefinition,
+          precedingProductDiscount: automaticGlobalDiscountAmount,
         });
         input.shipping = calculateAuthoritativeShipping({
           country: input.customer.country,
@@ -313,6 +342,7 @@ export const orderRouter = router({
         const authoritative = calculateAuthoritativeKwkOrder({
           subtotal: input.subtotal,
           shipping: input.shipping,
+          globalDiscount: automaticGlobalDiscountAmount,
           promoDiscount,
           kwkCreditUsed: requestedKwkCredit,
           applyReferralDiscount: Boolean(kwkReferralAccount),
@@ -335,13 +365,24 @@ export const orderRouter = router({
         throw new Error("Ungültige Rabatt-, Versand- oder Gesamtberechnung");
       }
       const authoritativeKwkCredit = roundMoney(input.kwkCreditUsed || 0);
+      // Die globale Aktion wird nie aus dem Browser übernommen. Ihre Zeile wird
+      // aus der aktiven DB-Konfiguration neu aufgebaut und ist damit in jeder
+      // Bestellung sauber von Aktionscodes, Partnern und Guthaben getrennt.
       const submittedDiscountBreakdown = (input.discountBreakdown || [])
-        .filter((entry) => entry.amount > 0)
+        .filter((entry) => entry.amount > 0 && entry.source !== "automatic_global_percent")
         .map((entry) => ({
           ...entry,
           amount: roundMoney(entry.amount),
           percentage: entry.percentage === undefined ? undefined : roundMoney(entry.percentage),
         }));
+      if (automaticGlobalDiscountAmount > 0 && activeGlobalDiscount) {
+        submittedDiscountBreakdown.unshift({
+          source: "automatic_global_percent" as const,
+          label: activeGlobalDiscount.labelDe,
+          amount: automaticGlobalDiscountAmount,
+          percentage: activeGlobalDiscount.percentage,
+        });
+      }
       const submittedDiscountBreakdownTotal = roundMoney(
         submittedDiscountBreakdown.reduce((sum, entry) => sum + entry.amount, 0),
       );

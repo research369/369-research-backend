@@ -158,21 +158,39 @@ function productMatchesRestriction(productId: string, restriction: string): bool
     || restriction.startsWith(`${productId}-`);
 }
 
+export function calculateAutomaticGlobalDiscount(subtotal: number, percentage: number): number {
+  const normalizedSubtotal = roundMoney(Math.max(0, subtotal));
+  return roundMoney(Math.min(
+    normalizedSubtotal,
+    normalizedSubtotal * Math.max(0, Math.min(100, percentage)) / 100,
+  ));
+}
+
+/**
+ * Rabattreihenfolge für den Shop: Warenwert -> globaler Dauerrabatt -> Aktionscode.
+ * Ein eingeschränkter Code wird dabei auf seinen verbleibenden, global rabattierten
+ * Warenwert angewendet. Versand und Gratispositionen bleiben außen vor.
+ */
 export function calculatePromoDiscount(input: {
   subtotal: number;
   items: KwkCheckoutItem[];
   promo?: PromoDefinition | null;
+  precedingProductDiscount?: number;
 }): number {
   if (!input.promo) return 0;
+  const subtotal = roundMoney(Math.max(0, input.subtotal));
+  const precedingProductDiscount = roundMoney(Math.max(0, Math.min(subtotal, input.precedingProductDiscount || 0)));
+  const remainingFactor = subtotal > 0 ? (subtotal - precedingProductDiscount) / subtotal : 0;
   const { restrict } = parsePromoMetadata(input.promo.description);
-  const eligibleSubtotal = restrict.length === 0
-    ? input.subtotal
+  const rawEligibleSubtotal = restrict.length === 0
+    ? subtotal
     : input.items.reduce((sum, item) => {
       const productId = (item.shopProductId || "").toLowerCase().trim();
       const eligible = productId.length > 0
         && restrict.some((restriction) => productMatchesRestriction(productId, restriction.toLowerCase().trim()));
       return eligible ? sum + item.price * item.quantity : sum;
     }, 0);
+  const eligibleSubtotal = roundMoney(rawEligibleSubtotal * remainingFactor);
 
   if (input.promo.discountType === "fixed") {
     return roundMoney(Math.min(Math.max(0, input.promo.fixedAmount), eligibleSubtotal));
@@ -183,10 +201,12 @@ export function calculatePromoDiscount(input: {
 export function calculateAuthoritativeKwkOrder(input: {
   subtotal: number;
   shipping: number;
+  globalDiscount?: number;
   promoDiscount: number;
   kwkCreditUsed: number;
   applyReferralDiscount: boolean;
 }): {
+  globalDiscount: number;
   promoDiscount: number;
   kwkDiscount: number;
   kwkCreditUsed: number;
@@ -195,16 +215,19 @@ export function calculateAuthoritativeKwkOrder(input: {
 } {
   const subtotal = roundMoney(input.subtotal);
   const shipping = roundMoney(input.shipping);
-  const promoDiscount = roundMoney(Math.max(0, Math.min(input.promoDiscount, subtotal)));
-  const remainingProductValue = roundMoney(Math.max(0, subtotal - promoDiscount));
+  const globalDiscount = roundMoney(Math.max(0, Math.min(input.globalDiscount || 0, subtotal)));
+  const maxPromoDiscount = roundMoney(Math.max(0, subtotal - globalDiscount));
+  const promoDiscount = roundMoney(Math.max(0, Math.min(input.promoDiscount, maxPromoDiscount)));
+  const remainingProductValue = roundMoney(Math.max(0, subtotal - globalDiscount - promoDiscount));
   const kwkDiscount = input.applyReferralDiscount
     ? roundMoney(remainingProductValue * KWK_DISCOUNT_PERCENT / 100)
     : 0;
   const productValueAfterDiscounts = roundMoney(Math.max(0, remainingProductValue - kwkDiscount));
   const kwkCreditUsed = roundMoney(Math.max(0, Math.min(input.kwkCreditUsed, productValueAfterDiscounts)));
-  const totalDiscount = roundMoney(promoDiscount + kwkDiscount + kwkCreditUsed);
+  const totalDiscount = roundMoney(globalDiscount + promoDiscount + kwkDiscount + kwkCreditUsed);
 
   return {
+    globalDiscount,
     promoDiscount,
     kwkDiscount,
     kwkCreditUsed,

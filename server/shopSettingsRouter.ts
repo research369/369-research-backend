@@ -17,6 +17,13 @@ import {
   toPublicBankTransferPresentation,
   upsertBankTransferPaymentInstructionsConfig,
 } from "./paymentInstructionsConfig.js";
+import {
+  defaultGlobalAutomaticDiscountConfig,
+  getActiveGlobalAutomaticDiscount,
+  getGlobalAutomaticDiscountConfig,
+  globalAutomaticDiscountConfigSchema,
+  upsertGlobalAutomaticDiscountConfig,
+} from "./globalAutomaticDiscountConfig.js";
 
 const WHATSAPP_CHANNEL_CONFIG_KEY = "whatsapp_channel_config";
 const PACKING_AUTOMATION_CONFIG_KEY = "packing_automation_config";
@@ -198,6 +205,46 @@ export const shopSettingsRouter = router({
 
       console.log(`[ShopSettings] Shop ${input.open ? "OPENED" : "CLOSED (Out of Stock)"}`);
       return { success: true, shopOpen: input.open };
+    }),
+
+  // ─── PUBLIC: Globale Dauerrabatt-Aktion ───────────────────────
+  // Liefert ausschließlich den aktuell gültigen Wert für die Preis- und Checkoutanzeige.
+  getGlobalAutomaticDiscount: publicProcedure
+    .query(async () => ({
+      discount: getActiveGlobalAutomaticDiscount(await getGlobalAutomaticDiscountConfig()),
+    })),
+
+  // ─── ADMIN: Globale Dauerrabatt-Aktion ─────────────────────────
+  getGlobalAutomaticDiscountAdmin: adminProcedure
+    .query(async () => ({
+      config: await getGlobalAutomaticDiscountConfig(),
+    })),
+
+  setGlobalAutomaticDiscount: adminProcedure
+    .input(globalAutomaticDiscountConfigSchema.pick({
+      enabled: true,
+      percentage: true,
+      expiresAt: true,
+      stackWithPromotionCodes: true,
+    }))
+    .mutation(async ({ input }) => {
+      if (input.enabled) {
+        if (!input.expiresAt) {
+          throw new Error("Für einen aktiven Dauerrabatt ist ein Endzeitpunkt erforderlich");
+        }
+        if (new Date(input.expiresAt).getTime() <= Date.now()) {
+          throw new Error("Der Endzeitpunkt muss in der Zukunft liegen");
+        }
+      }
+
+      const current = await getGlobalAutomaticDiscountConfig();
+      const config = {
+        ...defaultGlobalAutomaticDiscountConfig,
+        ...current,
+        ...input,
+      };
+      await upsertGlobalAutomaticDiscountConfig(config);
+      return { config, discount: getActiveGlobalAutomaticDiscount(config) };
     }),
 
   // ─── ADMIN: Get all settings ──────────────────────────────────
