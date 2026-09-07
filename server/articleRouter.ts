@@ -14,6 +14,8 @@ type PublicShopVariant = {
   stock: number;
   inStock: boolean;
   articleId: number;
+  /** Reale Lager-SKU der Variantenzeile für Warenkorb- und Checkout-Schutz. */
+  sku: string;
   hidden?: boolean;
 };
 
@@ -156,12 +158,13 @@ function getPublicShopVariants(
   article: {
     id: number;
     name: string;
+    sku: string;
     stock: number;
     sellingPrice: string | null;
     shopProductId?: string | null;
     variants: unknown;
   },
-  inventoryArticles: Array<{ id: number; stock: number; shopProductId: string | null }> = [],
+  inventoryArticles: Array<{ id: number; sku: string; stock: number; shopProductId: string | null }> = [],
 ): PublicShopVariant[] {
   const configured = Array.isArray(article.variants) ? article.variants : [];
   const fromConfigured = configured.flatMap((raw): PublicShopVariant[] => {
@@ -193,6 +196,7 @@ function getPublicShopVariants(
       stock,
       inStock: !explicitlyHidden && stock > 0,
       articleId: inventoryArticle?.id ?? article.id,
+      sku: inventoryArticle?.sku ?? article.sku,
       ...(explicitlyHidden ? { hidden: true } : {}),
     }];
   });
@@ -209,6 +213,7 @@ function getPublicShopVariants(
     stock: article.stock,
     inStock: article.stock > 0,
     articleId: article.id,
+    sku: article.sku,
   }];
 }
 
@@ -247,6 +252,7 @@ export const articleRouter = router({
 
     const allArticles = await db.select({
       id: articles.id,
+      sku: articles.sku,
       shopProductId: articles.shopProductId,
       stock: articles.stock,
       name: articles.name,
@@ -290,6 +296,7 @@ export const articleRouter = router({
           inStock: variant.inStock,
           stock: variant.stock,
           name: `${canonical.name} (${variant.dosage})`,
+          inventorySku: variant.sku,
         }));
       }
 
@@ -303,14 +310,16 @@ export const articleRouter = router({
             inStock: (article.stock ?? 0) > 0,
             stock: article.stock ?? 0,
             name: article.name,
+            inventorySku: article.sku,
           }];
         }
         return variants.map(variant => ({
           shopProductId: article.shopProductId!,
           inStock: variant.inStock,
           stock: variant.stock,
-          name: `${article.name} (${variant.dosage})`,
-        }));
+            name: `${article.name} (${variant.dosage})`,
+            inventorySku: variant.sku,
+          }));
       });
     });
   }),
@@ -853,6 +862,7 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
     // Variantenbestände werden jedoch immer an ihren echten Lagerzeilen gelesen.
     const inventoryArticles = await db.select({
       id: articles.id,
+      sku: articles.sku,
       stock: articles.stock,
       shopProductId: articles.shopProductId,
     }).from(articles);
