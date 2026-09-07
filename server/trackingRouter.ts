@@ -55,7 +55,9 @@ function normalizeCustomerName(value: string): string {
 
 function hasPepGptBridgeAccess(req: Request): boolean {
   const key = process.env.PEPGPT_COMMERCE_BRIDGE_KEY || "";
-  return Boolean(key) && req.get("x-pepgpt-commerce-key") === key;
+  const authorization = req.get("authorization") || "";
+  const provided = req.get("x-pepgpt-commerce-key") || authorization.replace(/^Bearer\s+/i, "");
+  return Boolean(key) && provided === key;
 }
 
 // ─── Typen ────────────────────────────────────────────────────────────────────
