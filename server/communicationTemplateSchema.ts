@@ -147,9 +147,6 @@ const SETTINGS: Array<[string, string]> = [
   ["communication_plug_and_play_url", "https://www.369research.eu/plug-and-play"],
   ["communication_whatsapp_channel_url", "https://whatsapp.com/channel/0029VbCjCg73rZZbFb5d8A11"],
   ["communication_support_email", "support@369research.eu"],
-  ["communication_payment_iban", "DE81 3701 9000 1011 3936 89"],
-  ["communication_payment_bic", "BUNQDE82"],
-  ["communication_payment_recipient", "369 Research"],
 ];
 
 /**

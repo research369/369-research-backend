@@ -3,6 +3,7 @@ import { z } from "zod";
 import { router, adminProcedure } from "./trpc.js";
 import { getDb, getPool } from "./db.js";
 import { communicationTemplates, customers, orderItems, orders, shopSettings } from "../drizzle/schema.js";
+import { getReleasedBankTransferInstructions } from "./paymentInstructionsConfig.js";
 
 const channelSchema = z.enum(["email", "whatsapp"]);
 const languageSchema = z.enum(["de", "en"]);
@@ -79,11 +80,14 @@ async function buildVariables(input: { customerId?: number; orderId?: string }):
   const carrier = order?.trackingCarrier || "DHL";
   const trackingNumber = order?.trackingNumber || "";
   const orderItemsText = items.map((item) => `• ${item.quantity}× ${item.name}${item.dosage ? ` (${item.dosage})` : ""}`).join("\n");
-  const paymentDetails = [
-    settings.communication_payment_iban ? `IBAN: ${settings.communication_payment_iban}` : "",
-    settings.communication_payment_bic ? `BIC: ${settings.communication_payment_bic}` : "",
-    settings.communication_payment_recipient ? `Empfänger: ${settings.communication_payment_recipient}` : "",
-  ].filter(Boolean).join("\n");
+  const releasedPaymentInstructions = await getReleasedBankTransferInstructions();
+  const paymentDetails = releasedPaymentInstructions?.accounts.map((account) => [
+    account.labelDe,
+    `Empfänger: ${account.accountHolder}`,
+    `IBAN: ${account.iban}`,
+    `BIC / SWIFT: ${account.bic}`,
+    account.bankAddress ? `Bankadresse: ${account.bankAddress}` : "",
+  ].filter(Boolean).join("\n")).join("\n\n") || "";
 
   return {
     firstName,
