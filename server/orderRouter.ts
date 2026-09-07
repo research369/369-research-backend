@@ -11,6 +11,7 @@ import { getDb, getPool } from "./db.js";
 import { orders, orderItems, articles, stockHistory, customers, customerCommunications, promoCodes } from "../drizzle/schema.js";
 import { getIncomingPayments, matchPaymentToOrder, intelligentMatch, type MatchResult } from "./bunqService.js";
 import { sendOrderConfirmationEmail, sendShippingNotificationEmail, sendAdminOrderNotification, sendPackingNotificationEmail } from "./emailService.js";
+import { getReleasedBankTransferInstructions } from "./paymentInstructionsConfig.js";
 import { isSubstitutionEnabled, resolveSubstitution, extractDosageMg, isSubstitutionEligible } from "./substitutionService.js";
 // KWK-Modul: statischer Import (sicherer als dynamischer Import)
 import { isKwkEnabled, hashAddress, calculateKwkCommission, calculateKwkCommissionBase } from "./kwkService.js";
@@ -1263,9 +1264,14 @@ export const orderRouter = router({
       // Eine zusätzliche interne Mail wäre redundant und führt zu 4 Mails pro Bestellung.
       // sendAdminOrderNotification wurde hier entfernt.
 
+      const paymentInstructions = input.paymentMethod === "bunq" || input.paymentMethod === "SEPA" || input.paymentMethod === "wise"
+        ? await getReleasedBankTransferInstructions()
+        : null;
+
       return {
         success: true,
         orderId,
+        paymentInstructions,
         externalOrderReference: externalOrderReference || undefined,
         subtotal: input.subtotal,
         discount: input.discount,

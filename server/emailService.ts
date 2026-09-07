@@ -5,6 +5,7 @@
 
 import { generateSKUFromName } from "./articleCodes.js";
 import { sendAndArchiveAutomaticOrderEmail } from "./crmCommunicationService.js";
+import { getReleasedBankTransferInstructions } from "./paymentInstructionsConfig.js";
 
 const RESEND_API_URL = "https://api.resend.com/emails";
 
@@ -75,24 +76,18 @@ function buildShippingResearchResourcesHtml(): string {
     </div>`;
 }
 
-function getBankDetails(method: string): string {
-  if (method === "wise") {
-    return `
-      <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">Bank</td><td style="padding:8px 12px;font-size:14px;font-weight:600;">Wise (TransferWise)</td></tr>
-      <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">IBAN</td><td style="padding:8px 12px;font-size:14px;font-weight:600;">BE35 9675 0012 9437</td></tr>
-      <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">BIC/Swift</td><td style="padding:8px 12px;font-size:14px;font-weight:600;">TRWIBEB1XXX</td></tr>
-      <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">Adresse</td><td style="padding:8px 12px;font-size:14px;">Wise, Rue du Trône 100, Brussels, Belgium</td></tr>
-    `;
-  }
-  // Standard: SEPA / Bunq / Kreditkarte
-  return `
-    <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">Bank</td><td style="padding:8px 12px;font-size:14px;font-weight:600;">Bunq B.V.</td></tr>
-    <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">IBAN</td><td style="padding:8px 12px;font-size:14px;font-weight:600;">DE81 3701 9000 1011 3936 89</td></tr>
-    <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">BIC</td><td style="padding:8px 12px;font-size:14px;font-weight:600;">BUNQDE82</td></tr>
-  `;
+function buildBankDetailsHtml(instructions: Awaited<ReturnType<typeof getReleasedBankTransferInstructions>>): string {
+  if (!instructions?.accounts.length) return "";
+  return instructions.accounts.map((account) => `
+    <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">Bankverbindung</td><td style="padding:8px 12px;font-size:14px;font-weight:600;">${escapeHtml(account.labelDe)}</td></tr>
+    <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">Empfänger</td><td style="padding:8px 12px;font-size:14px;font-weight:600;">${escapeHtml(account.accountHolder)}</td></tr>
+    <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">IBAN</td><td style="padding:8px 12px;font-size:14px;font-weight:600;">${escapeHtml(account.iban)}</td></tr>
+    <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">BIC / SWIFT</td><td style="padding:8px 12px;font-size:14px;font-weight:600;">${escapeHtml(account.bic)}</td></tr>
+    ${account.bankAddress ? `<tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">Bankadresse</td><td style="padding:8px 12px;font-size:14px;">${escapeHtml(account.bankAddress)}</td></tr>` : ""}
+  `).join("<tr><td colspan=\"2\" style=\"border-top:1px solid #dbeafe;\"></td></tr>");
 }
 
-function buildOrderConfirmationHtml(data: OrderEmailData): string {
+function buildOrderConfirmationHtml(data: OrderEmailData, bankDetailsHtml: string): string {
   const itemRows = data.items.map(item => {
     const sku = generateSKUFromName(item.name, item.dosage || item.variant);
     return `
@@ -166,7 +161,7 @@ function buildOrderConfirmationHtml(data: OrderEmailData): string {
       <h3 style="font-size:16px;color:#1e40af;margin:0 0 12px;">Zahlungsinformationen</h3>
       <table style="width:100%;border-collapse:collapse;">
         <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">Zahlungsart</td><td style="padding:8px 12px;font-size:14px;font-weight:600;">${getPaymentMethodLabel(data.paymentMethod)}</td></tr>
-        ${getBankDetails(data.paymentMethod)}
+        ${bankDetailsHtml}
         <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">Empfänger</td><td style="padding:8px 12px;font-size:14px;font-weight:600;">369 Research</td></tr>
         <tr style="background:#dbeafe;">
           <td style="padding:12px;color:#1e40af;font-size:14px;font-weight:600;">Verwendungszweck</td>
@@ -226,31 +221,39 @@ function escapeHtml(value: string): string {
   return value.replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[character] || character));
 }
 
-function buildPeps4petsOrderConfirmationHtml(data: OrderEmailData, customerReference: string): string {
+function buildPeps4petsOrderConfirmationHtml(data: OrderEmailData, customerReference: string, bankDetailsHtml: string): string {
   const itemRows = data.items.map((item) => `
     <tr><td style="padding:12px 0;border-bottom:1px solid #dce9df;color:#143d32;font-size:14px;">${escapeHtml(item.name)}${item.variant ? ` · ${escapeHtml(item.variant)}` : ""}</td><td style="padding:12px 8px;border-bottom:1px solid #dce9df;text-align:center;color:#486259;font-size:14px;">${item.quantity}×</td><td style="padding:12px 0;border-bottom:1px solid #dce9df;text-align:right;color:#143d32;font-weight:700;font-size:14px;">${(item.price * item.quantity).toFixed(2)} €</td></tr>`).join("");
 
-  return `<!doctype html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head><body style="margin:0;background:#f4f7f3;color:#143d32;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;"><main style="max-width:640px;margin:0 auto;padding:32px 18px;"><section style="background:#fff;border:1px solid #d9e4dc;border-radius:24px;overflow:hidden;"><header style="padding:28px 32px;background:#143d32;color:#fff;"><p style="margin:0 0 10px;font-size:11px;letter-spacing:1.5px;color:#cfe0d1;">PEPS4PETS · VETERINÄRWISSENSCHAFTLICHE FORSCHUNG</p><h1 style="margin:0;font-size:28px;line-height:1.2;">Deine Bestellung ist eingegangen.</h1></header><div style="padding:30px 32px;"><p style="margin:0 0 22px;color:#486259;line-height:1.6;">Vielen Dank für deine Bestellung, ${escapeHtml(data.customer.firstName)}.</p><div style="padding:18px 20px;border-radius:16px;background:#f1f6f1;margin-bottom:24px;"><p style="margin:0 0 8px;font-size:11px;letter-spacing:1px;color:#486259;">BESTELLREFERENZ</p><p style="margin:0;font-size:22px;font-weight:800;letter-spacing:.5px;color:#143d32;">${escapeHtml(customerReference)}</p></div><table style="width:100%;border-collapse:collapse;margin-bottom:20px;"><thead><tr><th style="padding:0 0 8px;text-align:left;font-size:11px;letter-spacing:1px;color:#789087;">ARTIKEL</th><th style="padding:0 8px 8px;text-align:center;font-size:11px;letter-spacing:1px;color:#789087;">MENGE</th><th style="padding:0 0 8px;text-align:right;font-size:11px;letter-spacing:1px;color:#789087;">PREIS</th></tr></thead><tbody>${itemRows}</tbody></table><div style="padding-top:14px;border-top:1px solid #dce9df;text-align:right;"><span style="color:#486259;font-size:14px;">Gesamtbetrag&nbsp;&nbsp;</span><strong style="font-size:22px;color:#143d32;">${data.total.toFixed(2)} €</strong></div></div><div style="padding:26px 32px;background:#edf5ee;border-top:1px solid #d9e4dc;"><h2 style="margin:0 0 10px;font-size:18px;color:#143d32;">Zahlungsdetails</h2><p style="margin:0 0 14px;color:#486259;line-height:1.55;">Zahlungsart: <strong>${escapeHtml(getPaymentMethodLabel(data.paymentMethod))}</strong></p><table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #d9e4dc;border-radius:12px;overflow:hidden;"><tbody>${getBankDetails(data.paymentMethod)}<tr><td style="padding:10px 12px;color:#789087;font-size:13px;border-top:1px solid #d9e4dc;">Empfänger</td><td style="padding:10px 12px;color:#143d32;font-weight:700;font-size:13px;border-top:1px solid #d9e4dc;">369 Research</td></tr><tr><td style="padding:12px;color:#143d32;font-size:13px;font-weight:700;background:#dcecdf;">Verwendungszweck</td><td style="padding:12px;color:#143d32;font-size:16px;font-weight:800;background:#dcecdf;">${escapeHtml(customerReference)}</td></tr></tbody></table><p style="margin:14px 0 0;color:#486259;font-size:13px;line-height:1.55;">Bitte übernimm Gesamtbetrag und Verwendungszweck exakt. Nach erfolgreicher Zuordnung bereiten wir deine Bestellung weiter vor.</p></div><footer style="padding:20px 32px;text-align:center;color:#789087;font-size:12px;line-height:1.5;">Fragen zu deiner Bestellung? <a href="mailto:support@peps4pets.de" style="color:#143d32;font-weight:700;">support@peps4pets.de</a><br>Peps4pets · Ausschließlich für veterinärwissenschaftliche Forschungszwecke.</footer></section></main></body></html>`;
+  return `<!doctype html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head><body style="margin:0;background:#f4f7f3;color:#143d32;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;"><main style="max-width:640px;margin:0 auto;padding:32px 18px;"><section style="background:#fff;border:1px solid #d9e4dc;border-radius:24px;overflow:hidden;"><header style="padding:28px 32px;background:#143d32;color:#fff;"><p style="margin:0 0 10px;font-size:11px;letter-spacing:1.5px;color:#cfe0d1;">PEPS4PETS · VETERINÄRWISSENSCHAFTLICHE FORSCHUNG</p><h1 style="margin:0;font-size:28px;line-height:1.2;">Deine Bestellung ist eingegangen.</h1></header><div style="padding:30px 32px;"><p style="margin:0 0 22px;color:#486259;line-height:1.6;">Vielen Dank für deine Bestellung, ${escapeHtml(data.customer.firstName)}.</p><div style="padding:18px 20px;border-radius:16px;background:#f1f6f1;margin-bottom:24px;"><p style="margin:0 0 8px;font-size:11px;letter-spacing:1px;color:#486259;">BESTELLREFERENZ</p><p style="margin:0;font-size:22px;font-weight:800;letter-spacing:.5px;color:#143d32;">${escapeHtml(customerReference)}</p></div><table style="width:100%;border-collapse:collapse;margin-bottom:20px;"><thead><tr><th style="padding:0 0 8px;text-align:left;font-size:11px;letter-spacing:1px;color:#789087;">ARTIKEL</th><th style="padding:0 8px 8px;text-align:center;font-size:11px;letter-spacing:1px;color:#789087;">MENGE</th><th style="padding:0 0 8px;text-align:right;font-size:11px;letter-spacing:1px;color:#789087;">PREIS</th></tr></thead><tbody>${itemRows}</tbody></table><div style="padding-top:14px;border-top:1px solid #dce9df;text-align:right;"><span style="color:#486259;font-size:14px;">Gesamtbetrag&nbsp;&nbsp;</span><strong style="font-size:22px;color:#143d32;">${data.total.toFixed(2)} €</strong></div></div><div style="padding:26px 32px;background:#edf5ee;border-top:1px solid #d9e4dc;"><h2 style="margin:0 0 10px;font-size:18px;color:#143d32;">Zahlungsdetails</h2><p style="margin:0 0 14px;color:#486259;line-height:1.55;">Zahlungsart: <strong>${escapeHtml(getPaymentMethodLabel(data.paymentMethod))}</strong></p><table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #d9e4dc;border-radius:12px;overflow:hidden;"><tbody>${bankDetailsHtml}<tr><td style="padding:10px 12px;color:#789087;font-size:13px;border-top:1px solid #d9e4dc;">Empfänger</td><td style="padding:10px 12px;color:#143d32;font-weight:700;font-size:13px;border-top:1px solid #d9e4dc;">369 Research</td></tr><tr><td style="padding:12px;color:#143d32;font-size:13px;font-weight:700;background:#dcecdf;">Verwendungszweck</td><td style="padding:12px;color:#143d32;font-size:16px;font-weight:800;background:#dcecdf;">${escapeHtml(customerReference)}</td></tr></tbody></table><p style="margin:14px 0 0;color:#486259;font-size:13px;line-height:1.55;">Bitte übernimm Gesamtbetrag und Verwendungszweck exakt. Nach erfolgreicher Zuordnung bereiten wir deine Bestellung weiter vor.</p></div><footer style="padding:20px 32px;text-align:center;color:#789087;font-size:12px;line-height:1.5;">Fragen zu deiner Bestellung? <a href="mailto:support@peps4pets.de" style="color:#143d32;font-weight:700;">support@peps4pets.de</a><br>Peps4pets · Ausschließlich für veterinärwissenschaftliche Forschungszwecke.</footer></section></main></body></html>`;
 }
 
-export function getOrderConfirmationPresentation(data: OrderEmailData): {
+export async function getOrderConfirmationPresentation(data: OrderEmailData): Promise<{
   subject: string;
   html: string;
   profile?: typeof PEPS4PETS_EMAIL_PROFILE;
-} | null {
+} | null> {
   const isPeps4petsOrder = data.storeKey === "peps4pets";
+  let bankDetailsHtml = "";
+  if (["bunq", "SEPA", "wise"].includes(data.paymentMethod)) {
+    try {
+      bankDetailsHtml = buildBankDetailsHtml(await getReleasedBankTransferInstructions());
+    } catch (error) {
+      console.warn("[Email] Zahlungsinstruktionen konnten nicht geladen werden:", error);
+    }
+  }
   const customerReference = isPeps4petsOrder ? data.externalOrderReference : data.orderId;
   if (isPeps4petsOrder && !customerReference) return null;
 
   return isPeps4petsOrder
     ? {
         subject: `Bestellbestätigung ${customerReference} – Peps4pets`,
-        html: buildPeps4petsOrderConfirmationHtml(data, customerReference!),
+        html: buildPeps4petsOrderConfirmationHtml(data, customerReference!, bankDetailsHtml),
         profile: PEPS4PETS_EMAIL_PROFILE,
       }
     : {
         subject: `Bestellbestätigung ${data.orderId} – 369 Research`,
-        html: buildOrderConfirmationHtml(data),
+        html: buildOrderConfirmationHtml(data, bankDetailsHtml),
       };
 }
 
@@ -261,7 +264,7 @@ export async function sendOrderConfirmationEmail(data: OrderEmailData): Promise<
     return false;
   }
 
-  const presentation = getOrderConfirmationPresentation(data);
+  const presentation = await getOrderConfirmationPresentation(data);
   if (!presentation) {
     console.warn(`[Email] Peps4pets confirmation skipped: missing external reference for ${data.orderId}`);
     return false;

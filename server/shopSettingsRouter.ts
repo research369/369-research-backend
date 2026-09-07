@@ -11,6 +11,12 @@ import { eq } from "drizzle-orm";
 import { router, publicProcedure, adminProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
 import { shopSettings } from "../drizzle/schema.js";
+import {
+  bankTransferPaymentInstructionsSchema,
+  getBankTransferPaymentInstructionsConfig,
+  toPublicBankTransferPresentation,
+  upsertBankTransferPaymentInstructionsConfig,
+} from "./paymentInstructionsConfig.js";
 
 const WHATSAPP_CHANNEL_CONFIG_KEY = "whatsapp_channel_config";
 const PACKING_AUTOMATION_CONFIG_KEY = "packing_automation_config";
@@ -72,6 +78,23 @@ function parsePackingAutomationConfig(value: string | undefined): PackingAutomat
 }
 
 export const shopSettingsRouter = router({
+  // Kontodaten werden niemals über diesen öffentlichen Checkout-Vertrag geliefert.
+  // Nach erfolgreicher Bestellung werden sie ausschließlich in der Antwort von order.create freigegeben.
+  getBankTransferPresentation: publicProcedure
+    .query(async () => ({
+      presentation: toPublicBankTransferPresentation(await getBankTransferPaymentInstructionsConfig()),
+    })),
+
+  getBankTransferPaymentInstructions: adminProcedure
+    .query(async () => ({ config: await getBankTransferPaymentInstructionsConfig() })),
+
+  setBankTransferPaymentInstructions: adminProcedure
+    .input(bankTransferPaymentInstructionsSchema)
+    .mutation(async ({ input }) => ({
+      success: true,
+      config: await upsertBankTransferPaymentInstructionsConfig(input),
+    })),
+
   // ─── PUBLIC: WhatsApp channel conversion configuration ────────
   getWhatsAppChannelConfig: publicProcedure
     .query(async () => {

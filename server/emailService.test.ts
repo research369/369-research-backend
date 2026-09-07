@@ -23,8 +23,8 @@ const baseOrder = {
   paymentMethod: "wise",
 };
 
-test("Peps4pets-Bestellmail nutzt P4P-Referenz mit vorläufigem Coreversand-Absenderprofil", () => {
-  const presentation = getOrderConfirmationPresentation({
+test("Peps4pets-Bestellmail nutzt P4P-Referenz mit vorläufigem Coreversand-Absenderprofil", async () => {
+  const presentation = await getOrderConfirmationPresentation({
     ...baseOrder,
     storeKey: "peps4pets",
     externalOrderReference: "P4P-1101",
@@ -40,8 +40,8 @@ test("Peps4pets-Bestellmail nutzt P4P-Referenz mit vorläufigem Coreversand-Abse
   assert.doesNotMatch(presentation.html, /369-10607/);
 });
 
-test("bestehende 369-Bestellmail bleibt auf kanonischer Referenz und ohne P4P-Profil", () => {
-  const presentation = getOrderConfirmationPresentation(baseOrder);
+test("bestehende 369-Bestellmail bleibt auf kanonischer Referenz und ohne P4P-Profil", async () => {
+  const presentation = await getOrderConfirmationPresentation(baseOrder);
 
   assert.ok(presentation);
   assert.equal(presentation.subject, "Bestellbestätigung 369-10607 – 369 Research");
@@ -49,6 +49,6 @@ test("bestehende 369-Bestellmail bleibt auf kanonischer Referenz und ohne P4P-Pr
   assert.match(presentation.html, /369-10607/);
 });
 
-test("eine P4P-Bestellmail ohne externe Referenz wird nicht vorbereitet", () => {
-  assert.equal(getOrderConfirmationPresentation({ ...baseOrder, storeKey: "peps4pets" }), null);
+test("eine P4P-Bestellmail ohne externe Referenz wird nicht vorbereitet", async () => {
+  assert.equal(await getOrderConfirmationPresentation({ ...baseOrder, storeKey: "peps4pets" }), null);
 });
