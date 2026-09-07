@@ -13,6 +13,7 @@ import { ENV } from "./env.js";
 import { appRouter } from "./routers.js";
 import { getUserFromRequest, handleLogin, handleLogout, handleMe, seedAdminUser } from "./auth.js";
 import { getPool } from "./db.js";
+import { checkDatabaseReadiness } from "./databaseReadiness.js";
 import type { Context } from "./trpc.js";
 import { startBackupScheduler } from "./backupService.js";
 import { dhlExpressRouter } from "./dhlExpressRouter.js";
@@ -58,7 +59,8 @@ app.use(resendWebhookRouter);
 
 app.use(express.json({ limit: "50mb" }));
 
-// Health check
+// Liveness: Der Prozess ist erreichbar. Für Produkt- und Checkout-Verfügbarkeit
+// muss zusätzlich `/health/ready` verwendet werden.
 app.get("/health", (_req, res) => {
   res.json({
     status: "ok",
@@ -66,6 +68,25 @@ app.get("/health", (_req, res) => {
     version: "1.2.0-kwk",
     fix: "paid-status-filter",
     peps4petsCheckoutSchema: isPeps4petsCheckoutSchemaReady() ? "ready" : "pending",
+  });
+});
+
+// Readiness: Stellt sicher, dass die produktive Datenquelle tatsächlich lesbar ist.
+// Keine Daten werden geschrieben oder verändert.
+app.get("/health/ready", async (_req, res) => {
+  const database = await checkDatabaseReadiness();
+  if (!database.ready) {
+    return res.status(503).json({
+      status: "unavailable",
+      database: "unavailable",
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  return res.json({
+    status: "ok",
+    database: "ready",
+    timestamp: new Date().toISOString(),
   });
 });
 
