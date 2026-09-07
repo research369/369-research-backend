@@ -5,7 +5,7 @@
  */
 
 import { z } from "zod";
-import { eq, desc, inArray, and, or } from "drizzle-orm";
+import { eq, desc, inArray, and, or, getTableColumns } from "drizzle-orm";
 import { router, publicProcedure, adminProcedure } from "./trpc.js";
 import { getDb, getPool } from "./db.js";
 import { orders, orderItems, articles, stockHistory, customers, customerCommunications, promoCodes } from "../drizzle/schema.js";
@@ -35,6 +35,14 @@ import {
   type PromoDefinition,
 } from "./kwkCheckoutPricing.js";
 import { verifyKwkToken } from "./kwkAuth.js";
+
+// Die WaWi-Liste benötigt nur die Information, ob ein Label vorliegt. Die großen
+// Base64-/Legacy-Labeldaten bleiben ausschließlich für den gezielten, geschützten Abruf.
+const {
+  shippingLabelContent: _shippingLabelContent,
+  shippingLabelUrl: _shippingLabelUrl,
+  ...orderListColumns
+} = getTableColumns(orders);
 
 // Zod schemas
 const discountBreakdownEntrySchema = z.object({
@@ -1314,8 +1322,8 @@ export const orderRouter = router({
       }
 
       const filteredOrders = conditions.length > 0
-        ? await db.select().from(orders).where(and(...conditions)).orderBy(desc(orders.orderDate))
-        : await db.select().from(orders).orderBy(desc(orders.orderDate));
+        ? await db.select(orderListColumns).from(orders).where(and(...conditions)).orderBy(desc(orders.orderDate))
+        : await db.select(orderListColumns).from(orders).orderBy(desc(orders.orderDate));
 
       // Get items for all returned orders in a single query
       const orderIds = filteredOrders.map(o => o.orderId);
@@ -1326,9 +1334,13 @@ export const orderRouter = router({
         );
       }
 
-      // Combine
+      // Combine. Die Datenbankabfrage schließt große Labeldaten vollständig aus.
+      // Für vorhandene DHL-Labels wird nur eine kurze, geschützte Abrufroute geliefert.
       const result = filteredOrders.map(o => ({
         ...o,
+        shippingLabelUrl: o.trackingNumber || o.trackingCarrier === "DHL"
+          ? `/api/shipping/dhl/label/${encodeURIComponent(o.orderId)}`
+          : null,
         subtotal: parseFloat(o.subtotal),
         discount: parseFloat(o.discount),
         discountBreakdown: o.discountBreakdown || [],
