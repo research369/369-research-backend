@@ -1,0 +1,160 @@
+name: Checkout V2 Commerce Staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Type COMMERCE_STAGING_ONLY to permit a deploy to the isolated Commerce-Staging environment'
+        required: true
+        type: string
+      backend_sha:
+        description: 'Full immutable SHA from feat/checkout-v2-commerce-contract to test and deploy'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checkout-v2-commerce-staging
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '22'
+  CHECKOUT_V2_SOURCE_BRANCH: 'feat/checkout-v2-commerce-contract'
+  CHECKOUT_V2_COMMERCE_STAGING_PROJECT_ID: '1b7e8df2-c4a6-4e30-9df0-101df7cfeae4'
+  CHECKOUT_V2_COMMERCE_STAGING_ENVIRONMENT: 'commerce-staging'
+  CHECKOUT_V2_COMMERCE_STAGING_SERVICE: 'checkout-v2-commerce-staging-backend'
+
+jobs:
+  test_contract:
+    name: Test pinned checkout contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      backend_sha: ${{ steps.pin.outputs.backend_sha }}
+    env:
+      EXPECTED_BACKEND_SHA: ${{ inputs.backend_sha }}
+    steps:
+      - name: Check explicit staging confirmation and immutable SHA format
+        shell: bash
+        run: |
+          test "${{ inputs.confirmation }}" = "COMMERCE_STAGING_ONLY" || {
+            echo "This workflow is restricted to the isolated Commerce-Staging environment."
+            exit 1
+          }
+          [[ "$EXPECTED_BACKEND_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "backend_sha must be a 40-character lowercase Git SHA."
+            exit 1
+          }
+
+      - name: Check out pinned backend revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.backend_sha }}
+          fetch-depth: 0
+
+      - name: Prove pinned revision belongs to the isolated Checkout V2 branch
+        id: pin
+        shell: bash
+        run: |
+          actual_sha="$(git rev-parse HEAD)"
+          test "$actual_sha" = "$EXPECTED_BACKEND_SHA" || {
+            echo "Checked out revision does not equal backend_sha."
+            exit 1
+          }
+          git fetch --no-tags origin "$CHECKOUT_V2_SOURCE_BRANCH"
+          git merge-base --is-ancestor "$actual_sha" "origin/$CHECKOUT_V2_SOURCE_BRANCH" || {
+            echo "backend_sha is not contained in the isolated Checkout V2 branch."
+            exit 1
+          }
+          printf 'backend_sha=%s\n' "$actual_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Enable pnpm
+        shell: bash
+        run: corepack enable
+
+      - name: Install locked dependencies without lifecycle scripts
+        shell: bash
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Run isolated Checkout V2 contract tests
+        shell: bash
+        run: |
+          ./node_modules/.bin/tsx --test \
+            server/checkoutV2Quote.test.ts \
+            server/checkoutV2AutomaticBenefits.test.ts \
+            server/checkoutV2Router.test.ts \
+            server/kwkCheckoutPricing.test.ts \
+            server/backupService.test.ts
+
+      - name: Verify Checkout V2 remains fail-closed and side-effect-safe
+        shell: bash
+        run: |
+          ! grep -q 'quote: publicProcedure.input(quoteInputSchema).query' server/checkoutV2Router.ts
+          grep -q 'CHECKOUT_V2_COMMERCE_STAGING' server/checkoutV2Router.ts
+          grep -q 'FEATURE_CHECKOUT_V2_ENABLED' server/checkoutV2Router.ts
+          grep -q 'CHECKOUT_V2_TEST_MODE' server/checkoutV2Router.ts
+          grep -q 'isBackupSchedulerDisabledForCommerceStaging' server/backupService.ts
+
+  deploy_commerce_staging:
+    name: Deploy pinned revision to isolated backend staging
+    needs: test_contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: checkout-v2-commerce-staging
+    if: ${{ inputs.confirmation == 'COMMERCE_STAGING_ONLY' }}
+    container: ghcr.io/railwayapp/cli:latest
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_COMMERCE_STAGING_TOKEN }}
+      RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_COMMERCE_STAGING_PROJECT_ID }}
+      RAILWAY_ENVIRONMENT: ${{ vars.RAILWAY_COMMERCE_STAGING_ENVIRONMENT }}
+      RAILWAY_SERVICE: ${{ vars.RAILWAY_COMMERCE_STAGING_SERVICE }}
+      EXPECTED_BACKEND_SHA: ${{ needs.test_contract.outputs.backend_sha }}
+    steps:
+      - name: Check out the contract-tested pinned revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.test_contract.outputs.backend_sha }}
+          fetch-depth: 0
+
+      - name: Prove deploy source is the tested isolated Checkout V2 revision
+        shell: bash
+        run: |
+          actual_sha="$(git rev-parse HEAD)"
+          test "$actual_sha" = "$EXPECTED_BACKEND_SHA" || {
+            echo "Deploy source does not equal the contract-tested revision."
+            exit 1
+          }
+          git fetch --no-tags origin "$CHECKOUT_V2_SOURCE_BRANCH"
+          git merge-base --is-ancestor "$actual_sha" "origin/$CHECKOUT_V2_SOURCE_BRANCH" || {
+            echo "Deploy source is not contained in the isolated Checkout V2 branch."
+            exit 1
+          }
+
+      - name: Reject incomplete or non-isolated staging configuration
+        shell: bash
+        run: |
+          test -n "$RAILWAY_TOKEN" || { echo "Missing environment secret RAILWAY_COMMERCE_STAGING_TOKEN"; exit 1; }
+          test "$RAILWAY_PROJECT_ID" = "$CHECKOUT_V2_COMMERCE_STAGING_PROJECT_ID" || {
+            echo "Unexpected Railway project is forbidden."
+            exit 1
+          }
+          test "$RAILWAY_ENVIRONMENT" = "$CHECKOUT_V2_COMMERCE_STAGING_ENVIRONMENT" || {
+            echo "Unexpected Railway environment is forbidden."
+            exit 1
+          }
+          test "$RAILWAY_SERVICE" = "$CHECKOUT_V2_COMMERCE_STAGING_SERVICE" || {
+            echo "Unexpected Railway service is forbidden."
+            exit 1
+          }
+
+      - name: Deploy only the pinned revision to the named isolated staging service
+        shell: bash
+        run: railway up --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT" --service "$RAILWAY_SERVICE" --ci
