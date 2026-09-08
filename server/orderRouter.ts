@@ -165,13 +165,6 @@ export const orderRouter = router({
 
       const qrAttribution = await resolveQrAttribution(input.qrAttributionToken);
 
-      // Nicht der Browsermarker, sondern ausschließlich der vom Server geprüfte
-      // WaWi-JWT-Kontext entscheidet über den internen Verkaufsweg. Damit bleibt
-      // der öffentliche Checkout streng, während ein geöffnetes WaWi-Fenster nie
-      // wegen eines alten Frontend-Bundles oder einer veralteten Preisvorschau
-      // an einem Dauerrabattbetrag scheitern kann.
-      const isAuthenticatedWawiManualSale = Boolean(ctx.user);
-
       const requestedKwkCredit = roundMoney(input.kwkCreditUsed || 0);
       const hasKwkRequest = Boolean(input.kwkCode?.trim())
         || requestedKwkCredit > 0
@@ -213,16 +206,10 @@ export const orderRouter = router({
       const submittedAutomaticGlobalDiscount = roundMoney((input.discountBreakdown || [])
         .filter((entry) => entry.source === "automatic_global_percent")
         .reduce((sum, entry) => sum + entry.amount, 0));
-      // Shop-Bestellungen bleiben strikt gegen veraltete Browserpreise geschützt.
-      // Für eine authentifizierte WaWi-Bestellung ist dagegen der Server allein
-      // maßgeblich: Die interne Eingabemaske darf nie einen Verkauf blockieren,
-      // weil ihre Anzeige einen zuvor gültigen Dauerrabattbetrag enthält.
-      if (!isAuthenticatedWawiManualSale && activeGlobalDiscount && Math.abs(submittedAutomaticGlobalDiscount - automaticGlobalDiscountAmount) > 0.02) {
-        throw new Error("DAUERRABATT_NICHT_AKTUELL: Bitte den Warenkorb aktualisieren und erneut bestellen.");
-      }
-      if (!isAuthenticatedWawiManualSale && !activeGlobalDiscount && submittedAutomaticGlobalDiscount > 0) {
-        throw new Error("DAUERRABATT_NICHT_AKTIV: Bitte den Warenkorb aktualisieren und erneut bestellen.");
-      }
+      // Der automatische Dauerrabatt ist immer serverautoritativ. Eine alte
+      // Browser- oder WaWi-Preisvorschau darf keinen Verkauf blockieren; der
+      // mitgesendete Betrag wird ausschließlich dazu genutzt, die übrigen
+      // bewusst gewährten Rabattanteile unverändert zu isolieren.
 
         // Kühlpflichtige Artikel dürfen niemals mit der normalen DHL-Gebühr
         // durchrutschen. Ein bereits gewährter Gratisversand (0 €) bleibt dabei
@@ -371,11 +358,12 @@ export const orderRouter = router({
         input.total = authoritative.total;
       }
 
-      // WaWi-Manuell: Den zentralen Dauerrabatt nach der vollständigen
+      // Für alle Bestellkanäle: Den zentralen Dauerrabatt nach der vollständigen
       // serverseitigen Preis- und Versandermittlung verbindlich einsetzen.
-      // Alle anderen, vom Mitarbeiter bewusst gesetzten Rabattquellen bleiben
+      // Alle übrigen strukturierten und manuell gewährten Rabattanteile bleiben
       // erhalten; ein eventuell mitgesendeter automatischer Betrag wird ersetzt.
-      if (isAuthenticatedWawiManualSale && !hasKwkRequest) {
+      // KWK besitzt bereits eine eigene vollständige Autoritätsberechnung.
+      if (!hasKwkRequest) {
         const authoritativeWawiPricing = calculateAuthoritativeWawiManualOrder({
           subtotal: input.subtotal,
           shipping: input.shipping,
