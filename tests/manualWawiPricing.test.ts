@@ -63,3 +63,24 @@ test("manuelle Nachlässe werden zusammen mit dem Dauerrabatt am Warenwert gedec
 });
 
 console.log("Alle WaWi-Dauerrabatt-Preisregressionstests bestanden.");
+
+test("ein manuell vorgegebener WaWi-Warenwert bleibt die unveränderte Basis für den Dauerrabatt", () => {
+  const result = calculateAuthoritativeWawiManualOrder({
+    // Beispiel: manuell bepreiste Mehrfachpositionen. Die Funktion erhält
+    // ausschließlich die bestätigte WaWi-Summe, nicht einen Katalogpreis.
+    subtotal: 751.8,
+    shipping: 0,
+    submittedDiscount: 0,
+    submittedAutomaticGlobalDiscount: 0,
+    authoritativeAutomaticGlobalDiscount: 150.36,
+  });
+
+  assert.deepEqual(result, {
+    manualDiscount: 0,
+    automaticGlobalDiscount: 150.36,
+    totalDiscount: 150.36,
+    total: 601.44,
+  });
+});
+
+console.log("Manuelle Preisbasis bleibt bei aktivem Dauerrabatt unverändert.");

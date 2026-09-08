@@ -178,11 +178,20 @@ export const orderRouter = router({
         ? configuredGlobalDiscount
         : null;
 
-      // Für jede Bestellung mit aktivem Dauerrabatt werden Artikelpreise und
-      // Warenwert zwingend aus dem aktuellen Katalog rekonstruiert. Dadurch ist
-      // der Rabattbetrag nie vom Browser abhängig. Der bisherige KWK-Schutz
-      // verwendet denselben Pfad weiter unverändert.
-      if (hasKwkRequest || activeGlobalDiscount) {
+      // Im öffentlichen Shop werden Preise für KWK und den aktiven Dauerrabatt
+      // zwingend aus dem aktuellen Katalog rekonstruiert. Eine WaWi-Anlage ist
+      // dagegen ein bewusst manuell bepreister Geschäftsprozess: Preis und Menge
+      // dieser Positionen dürfen dort niemals durch den Katalogpreis überschrieben
+      // werden. Der Marker allein genügt aus Sicherheitsgründen nicht; er benötigt
+      // zwingend eine gültige WaWi-Sitzung. So kann ein öffentlicher Request nie
+      // manuelle Preise erzwingen und eine fehlende Sitzung nie still zu einer
+      // Preisüberschreibung führen.
+      const isRequestedWawiManualSale = input.orderSource === "wawi_manual";
+      if (isRequestedWawiManualSale && !ctx.user) {
+        throw new Error("WAWI_ANMELDUNG_ERFORDERLICH: Bitte erneut anmelden, bevor ein manueller Verkauf angelegt wird.");
+      }
+      const isAuthenticatedWawiManualSale = isRequestedWawiManualSale && Boolean(ctx.user);
+      if (!isAuthenticatedWawiManualSale && (hasKwkRequest || activeGlobalDiscount)) {
         const catalog = await db.select({
           sku: articles.sku,
           shopProductId: articles.shopProductId,
