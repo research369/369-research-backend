@@ -165,10 +165,12 @@ export const orderRouter = router({
 
       const qrAttribution = await resolveQrAttribution(input.qrAttributionToken);
 
-      const isAuthenticatedWawiManualSale = input.orderSource === "wawi_manual";
-      if (isAuthenticatedWawiManualSale && !ctx.user) {
-        throw new Error("WaWi-Verkauf erfordert eine authentifizierte Sitzung");
-      }
+      // Nicht der Browsermarker, sondern ausschließlich der vom Server geprüfte
+      // WaWi-JWT-Kontext entscheidet über den internen Verkaufsweg. Damit bleibt
+      // der öffentliche Checkout streng, während ein geöffnetes WaWi-Fenster nie
+      // wegen eines alten Frontend-Bundles oder einer veralteten Preisvorschau
+      // an einem Dauerrabattbetrag scheitern kann.
+      const isAuthenticatedWawiManualSale = Boolean(ctx.user);
 
       const requestedKwkCredit = roundMoney(input.kwkCreditUsed || 0);
       const hasKwkRequest = Boolean(input.kwkCode?.trim())
