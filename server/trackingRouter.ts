@@ -53,6 +53,13 @@ function normalizeCustomerName(value: string): string {
     .replace(/\s+/g, " ");
 }
 
+function normalizeCustomerPhone(value: string): string {
+  const digits = value.replace(/[^0-9]/g, "");
+  if (digits.startsWith("00")) return digits.slice(2);
+  if (digits.startsWith("0")) return "49" + digits.slice(1);
+  return digits;
+}
+
 function hasPepGptBridgeAccess(req: Request): boolean {
   const key = process.env.PEPGPT_COMMERCE_BRIDGE_KEY || "";
   const authorization = req.get("authorization") || "";
@@ -255,8 +262,9 @@ trackingRouter.get("/api/internal/pepgpt/order-status", async (req: Request, res
   }
   const orderId = typeof req.query.orderId === "string" ? req.query.orderId.trim().slice(0, 64) : "";
   const customerName = typeof req.query.customerName === "string" ? req.query.customerName.trim().slice(0, 160) : "";
-  if (!orderId || !customerName) {
-    res.status(400).json({ success: false, error: "Bestellnummer und vollständiger Name erforderlich" });
+  const customerPhone = typeof req.query.customerPhone === "string" ? req.query.customerPhone.trim().slice(0, 40) : "";
+  if (!orderId || (!customerName && !customerPhone)) {
+    res.status(400).json({ success: false, error: "Bestellnummer und vollständiger Name oder verifizierte Telefonnummer erforderlich" });
     return;
   }
   try {
@@ -270,6 +278,7 @@ trackingRouter.get("/api/internal/pepgpt/order-status", async (req: Request, res
         orderId: orders.orderId,
         firstName: orders.firstName,
         lastName: orders.lastName,
+        phone: orders.phone,
         status: orders.status,
         orderDate: orders.orderDate,
         shippedAt: orders.shippedAt,
@@ -278,7 +287,11 @@ trackingRouter.get("/api/internal/pepgpt/order-status", async (req: Request, res
       .from(orders)
       .where(eq(orders.orderId, orderId))
       .limit(1);
-    if (!order || normalizeCustomerName(`${order.firstName || ""} ${order.lastName || ""}`) !== normalizeCustomerName(customerName)) {
+    const nameMatches = Boolean(customerName)
+      && normalizeCustomerName(`${order?.firstName || ""} ${order?.lastName || ""}`) === normalizeCustomerName(customerName);
+    const phoneMatches = Boolean(customerPhone)
+      && normalizeCustomerPhone(order?.phone || "") === normalizeCustomerPhone(customerPhone);
+    if (!order || (!nameMatches && !phoneMatches)) {
       res.status(404).json({ success: false, error: "Bestellung nicht gefunden" });
       return;
     }
