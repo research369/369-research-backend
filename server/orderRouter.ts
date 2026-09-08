@@ -37,6 +37,7 @@ import {
 } from "./kwkCheckoutPricing.js";
 import { verifyKwkToken } from "./kwkAuth.js";
 import { getActiveGlobalAutomaticDiscountFromDb } from "./globalAutomaticDiscountConfig.js";
+import { calculateAuthoritativeWawiManualOrder } from "./manualWawiPricing.js";
 
 // Die WaWi-Liste benötigt nur die Information, ob ein Label vorliegt. Die großen
 // Base64-/Legacy-Labeldaten bleiben ausschließlich für den gezielten, geschützten Abruf.
@@ -70,6 +71,9 @@ const discountBreakdownEntrySchema = z.object({
 
 const createOrderSchema = z.object({
   orderId: z.string().optional(), // now generated server-side via DB sequence
+  // Der öffentliche Shop bleibt der Standard. Der WaWi-Herkunftsmarker wird
+  // ausschließlich für eine bereits authentifizierte interne Sitzung akzeptiert.
+  orderSource: z.enum(["shop", "wawi_manual"]).optional().default("shop"),
   // Zusätzliche Shopquelle. Ohne Angabe bleibt die bestehende 369-Research-Logik unverändert.
   storeKey: z.enum(["369research", "peps4pets"]).optional().default("369research"),
   // Nur Peps4pets verwendet diesen evidenzgebundenen Schlüssel. Die kanonische
@@ -161,6 +165,11 @@ export const orderRouter = router({
 
       const qrAttribution = await resolveQrAttribution(input.qrAttributionToken);
 
+      const isAuthenticatedWawiManualSale = input.orderSource === "wawi_manual";
+      if (isAuthenticatedWawiManualSale && !ctx.user) {
+        throw new Error("WaWi-Verkauf erfordert eine authentifizierte Sitzung");
+      }
+
       const requestedKwkCredit = roundMoney(input.kwkCreditUsed || 0);
       const hasKwkRequest = Boolean(input.kwkCode?.trim())
         || requestedKwkCredit > 0
@@ -202,10 +211,14 @@ export const orderRouter = router({
       const submittedAutomaticGlobalDiscount = roundMoney((input.discountBreakdown || [])
         .filter((entry) => entry.source === "automatic_global_percent")
         .reduce((sum, entry) => sum + entry.amount, 0));
-      if (activeGlobalDiscount && Math.abs(submittedAutomaticGlobalDiscount - automaticGlobalDiscountAmount) > 0.02) {
+      // Shop-Bestellungen bleiben strikt gegen veraltete Browserpreise geschützt.
+      // Für eine authentifizierte WaWi-Bestellung ist dagegen der Server allein
+      // maßgeblich: Die interne Eingabemaske darf nie einen Verkauf blockieren,
+      // weil ihre Anzeige einen zuvor gültigen Dauerrabattbetrag enthält.
+      if (!isAuthenticatedWawiManualSale && activeGlobalDiscount && Math.abs(submittedAutomaticGlobalDiscount - automaticGlobalDiscountAmount) > 0.02) {
         throw new Error("DAUERRABATT_NICHT_AKTUELL: Bitte den Warenkorb aktualisieren und erneut bestellen.");
       }
-      if (!activeGlobalDiscount && submittedAutomaticGlobalDiscount > 0) {
+      if (!isAuthenticatedWawiManualSale && !activeGlobalDiscount && submittedAutomaticGlobalDiscount > 0) {
         throw new Error("DAUERRABATT_NICHT_AKTIV: Bitte den Warenkorb aktualisieren und erneut bestellen.");
       }
 
@@ -354,6 +367,22 @@ export const orderRouter = router({
         input.kwkCreditUsed = authoritative.kwkCreditUsed;
         input.discount = authoritative.totalDiscount;
         input.total = authoritative.total;
+      }
+
+      // WaWi-Manuell: Den zentralen Dauerrabatt nach der vollständigen
+      // serverseitigen Preis- und Versandermittlung verbindlich einsetzen.
+      // Alle anderen, vom Mitarbeiter bewusst gesetzten Rabattquellen bleiben
+      // erhalten; ein eventuell mitgesendeter automatischer Betrag wird ersetzt.
+      if (isAuthenticatedWawiManualSale && !hasKwkRequest) {
+        const authoritativeWawiPricing = calculateAuthoritativeWawiManualOrder({
+          subtotal: input.subtotal,
+          shipping: input.shipping,
+          submittedDiscount: input.discount,
+          submittedAutomaticGlobalDiscount,
+          authoritativeAutomaticGlobalDiscount: automaticGlobalDiscountAmount,
+        });
+        input.discount = authoritativeWawiPricing.totalDiscount;
+        input.total = authoritativeWawiPricing.total;
       }
 
       const expectedTotal = roundMoney(input.subtotal - input.discount + input.shipping);
