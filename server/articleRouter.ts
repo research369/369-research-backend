@@ -217,6 +217,24 @@ function getPublicShopVariants(
   }];
 }
 
+const articleVariantSchema = z.object({
+  sku: z.string().min(1).optional(),
+  name: z.string().min(1).optional(),
+  label: z.string().min(1).optional(),
+  dosage: z.string().min(1).optional(),
+  price: z.number().min(0).max(9999).optional(),
+  inventoryArticleId: z.number().int().positive().optional(),
+  isActive: z.boolean().optional(),
+  hidden: z.boolean().optional(),
+}).superRefine((variant, context) => {
+  if (!variant.dosage && !variant.label && !variant.name) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Jede Variante benötigt mindestens dosage, label oder name.",
+    });
+  }
+});
+
 const articleSchema = z.object({
   sku: z.string().min(1),
   name: z.string().min(1),
@@ -242,6 +260,9 @@ const articleSchema = z.object({
   shortDescription: z.string().nullable().optional(),
   categories: z.array(z.string()).nullable().optional(),
   beautyData: z.record(z.unknown()).nullable().optional(),
+  // Kanonische Variantenkonfiguration einer Produktfamilie. Jeder Bestand wird
+  // ausschließlich über die referenzierte operative Lagerzeile geführt.
+  variants: z.array(articleVariantSchema).nullable().optional(),
 });
 
 export const articleRouter = router({
@@ -499,6 +520,7 @@ export const articleRouter = router({
       if (data.description !== undefined) updateData.description = data.description || null;
       if (data.categories !== undefined) updateData.categories = data.categories && data.categories.length > 0 ? data.categories : null;
       if (data.beautyData !== undefined) updateData.beautyData = data.beautyData || null;
+      if (data.variants !== undefined) updateData.variants = data.variants || null;
 
       if (Object.keys(updateData).length === 0) return { success: true };
       await db.update(articles).set(updateData).where(eq(articles.id, id));
