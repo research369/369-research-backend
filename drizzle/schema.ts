@@ -96,6 +96,33 @@ export type Article = typeof articles.$inferSelect;
 export type InsertArticle = typeof articles.$inferInsert;
 
 /**
+ * Article channel eligibility – explicit publication control for a concrete
+ * article, delivery channel, market and locale. The operational article and
+ * its shop visibility remain the source of truth; this table only governs
+ * whether a channel may publish the item.
+ */
+export const articleChannelEligibility = pgTable("article_channel_eligibility", {
+  id: serial("id").primaryKey(),
+  articleId: integer("article_id").notNull().references(() => articles.id, { onDelete: "cascade" }),
+  channel: varchar("channel", { length: 50 }).notNull(),
+  market: varchar("market", { length: 8 }).notNull().default("DE"),
+  locale: varchar("locale", { length: 10 }).notNull().default("de"),
+  status: varchar("status", { length: 20 }).notNull().default("review_required"),
+  blockedReason: text("blocked_reason"),
+  reviewedBy: varchar("reviewed_by", { length: 100 }),
+  reviewedAt: timestamp("reviewed_at"),
+  validFrom: timestamp("valid_from"),
+  validUntil: timestamp("valid_until"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [
+  index("idx_article_channel_eligibility_lookup").on(table.channel, table.market, table.locale, table.status),
+  index("idx_article_channel_eligibility_article").on(table.articleId),
+]);
+export type ArticleChannelEligibility = typeof articleChannelEligibility.$inferSelect;
+export type InsertArticleChannelEligibility = typeof articleChannelEligibility.$inferInsert;
+
+/**
  * Stock history – tracks all stock changes
  */
 export const stockHistory = pgTable("stock_history", {
