@@ -29,7 +29,7 @@
 import { Router, type Request, type Response } from "express";
 import { ENV } from "./env.js";
 import { createDhlShipmentDE, createDhlShipmentEU, validateConsignee, normalizeCountryToAlpha3, type DhlConsignee } from "./dhlService.js";
-import { getDhlProfiles, getActiveProfile, type DhlProfileKey } from "./dhlProfiles.js";
+import { getDhlProfiles, getActiveProfile, suggestProfile, type DhlProfileKey } from "./dhlProfiles.js";
 import { getDb } from "./db.js";
 import { orders } from "../drizzle/schema.js";
 import { eq, and, isNull } from "drizzle-orm";
@@ -80,6 +80,99 @@ dhlExpressRouter.get(
       productCode:   ENV.dhlProductCodeDe,
     });
   }
+);
+
+// ─── GET /api/shipping/dhl/availability/:country ──────────────────────────────
+// Prüft ausschließlich anhand der zentralen Profilkonfiguration, ob ein Zielland
+// aktuell automatisiert über DHL gelabelt werden kann. Kein DHL-Call.
+const alpha3ToAlpha2: Record<string, string> = {
+  DEU: "DE", AUT: "AT", CHE: "CH", FRA: "FR", NLD: "NL", BEL: "BE", LUX: "LU",
+  POL: "PL", CZE: "CZ", SVK: "SK", HUN: "HU", ROU: "RO", BGR: "BG", HRV: "HR",
+  SVN: "SI", ITA: "IT", ESP: "ES", PRT: "PT", GRC: "GR", CYP: "CY", MLT: "MT",
+  IRL: "IE", FIN: "FI", SWE: "SE", DNK: "DK", EST: "EE", LVA: "LV", LTU: "LT",
+  NOR: "NO", ISL: "IS", LIE: "LI",
+};
+
+dhlExpressRouter.get(
+  "/api/shipping/dhl/availability/:country",
+  requireWawiAdmin,
+  (req: Request, res: Response) => {
+    const rawCountry = String(req.params.country ?? "").trim();
+    const country = alpha3ToAlpha2[normalizeCountryToAlpha3(rawCountry)] ?? rawCountry.toUpperCase();
+    const profiles = getDhlProfiles();
+    const availableProfiles = (Object.entries(profiles) as Array<[DhlProfileKey, (typeof profiles)[DhlProfileKey]]>)
+      .filter(([, profile]) => profile.active && profile.countries.includes(country))
+      .map(([key]) => key);
+    const suggestedProfile = suggestProfile(country);
+    const suggested = suggestedProfile ? profiles[suggestedProfile] : null;
+
+    res.json({
+      success: true,
+      country,
+      autoLabelAvailable: availableProfiles.length > 0,
+      availableProfiles,
+      suggestedProfile,
+      reason: availableProfiles.length > 0
+        ? null
+        : suggested && !suggested.active
+          ? suggested.inactiveReason ?? `DHL-Profil für ${country} ist nicht aktiv`
+          : `Kein aktives DHL-Profil für ${country} hinterlegt`,
+    });
+  },
+);
+
+// ─── GET /api/shipping/label/:orderId ─────────────────────────────────────────
+// Liefert ein gespeichertes DHL- oder extern hochgeladenes Label geschützt aus,
+// ohne große Labeldaten in die Bestellliste zu laden.
+dhlExpressRouter.get(
+  "/api/shipping/label/:orderId",
+  requireWawiAdmin,
+  async (req: Request, res: Response) => {
+    const orderId = String(req.params.orderId ?? "").trim();
+    if (!orderId) {
+      res.status(400).json({ success: false, error: "orderId fehlt" });
+      return;
+    }
+    const db = await getDb();
+    if (!db) {
+      res.status(503).json({ success: false, error: "Datenbank nicht verfügbar" });
+      return;
+    }
+    const [order] = await db
+      .select({
+        shippingLabelContent: (orders as any).shippingLabelContent,
+        shippingLabelUrl: (orders as any).shippingLabelUrl,
+        trackingCarrier: orders.trackingCarrier,
+      })
+      .from(orders)
+      .where(eq(orders.orderId, orderId))
+      .limit(1);
+    if (!order) {
+      res.status(404).json({ success: false, error: `Bestellung ${orderId} nicht gefunden` });
+      return;
+    }
+
+    const storedData = order.shippingLabelContent
+      ? `data:application/pdf;base64,${order.shippingLabelContent}`
+      : order.shippingLabelUrl;
+    const match = typeof storedData === "string" ? storedData.match(/^data:([^;,]+);base64,(.+)$/s) : null;
+    if (!match) {
+      res.status(404).json({ success: false, error: "Kein gespeichertes Label für diese Bestellung vorhanden" });
+      return;
+    }
+
+    const [, contentType, base64] = match;
+    const buffer = Buffer.from(base64, "base64");
+    const extension = contentType === "application/pdf" ? "pdf" : contentType.startsWith("image/") ? contentType.slice(6) : "bin";
+    const carrier = (order.trackingCarrier || "Versand").replace(/[^a-z0-9_-]/gi, "-");
+    res.set({
+      "Content-Type": contentType,
+      "Content-Disposition": `inline; filename="${carrier}-label-${orderId}.${extension}"`,
+      "Content-Length": String(buffer.length),
+      "Cache-Control": "private, no-cache",
+    });
+    res.send(buffer);
+  },
 );
 
 // ─── GET /api/shipping/dhl/label/:orderId ─────────────────────────────────────

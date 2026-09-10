@@ -46,6 +46,10 @@ const {
   shippingLabelUrl: _shippingLabelUrl,
   ...orderListColumns
 } = getTableColumns(orders);
+const orderListColumnsWithLabelPresence = {
+  ...orderListColumns,
+  hasShippingLabel: sql<boolean>`CASE WHEN ${orders.shippingLabelUrl} IS NOT NULL THEN TRUE ELSE FALSE END`.as("has_shipping_label"),
+};
 
 // Zod schemas
 const discountBreakdownEntrySchema = z.object({
@@ -1391,8 +1395,8 @@ export const orderRouter = router({
       }
 
       const filteredOrders = conditions.length > 0
-        ? await db.select(orderListColumns).from(orders).where(and(...conditions)).orderBy(desc(orders.orderDate))
-        : await db.select(orderListColumns).from(orders).orderBy(desc(orders.orderDate));
+        ? await db.select(orderListColumnsWithLabelPresence).from(orders).where(and(...conditions)).orderBy(desc(orders.orderDate))
+        : await db.select(orderListColumnsWithLabelPresence).from(orders).orderBy(desc(orders.orderDate));
 
       // Get items for all returned orders in a single query
       const orderIds = filteredOrders.map(o => o.orderId);
@@ -1407,8 +1411,10 @@ export const orderRouter = router({
       // Für vorhandene DHL-Labels wird nur eine kurze, geschützte Abrufroute geliefert.
       const result = filteredOrders.map(o => ({
         ...o,
-        shippingLabelUrl: o.trackingNumber || o.trackingCarrier === "DHL"
-          ? `/api/shipping/dhl/label/${encodeURIComponent(o.orderId)}`
+        // Labels werden ausschließlich über eine kurze, geschützte Abrufroute
+        // geliefert. Das gilt für DHL-PDFs und extern hochgeladene Labels gleich.
+        shippingLabelUrl: o.hasShippingLabel
+          ? `/api/shipping/label/${encodeURIComponent(o.orderId)}`
           : null,
         subtotal: parseFloat(o.subtotal),
         discount: parseFloat(o.discount),
