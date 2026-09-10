@@ -517,6 +517,23 @@ export type Order = typeof orders.$inferSelect;
 export type InsertOrder = typeof orders.$inferInsert;
 
 /**
+ * Immutable packing-photo evidence. The original order photo columns remain as
+ * a backwards-compatible pointer; this table preserves every later retake.
+ */
+export const packingPhotoHistory = pgTable("packing_photo_history", {
+  id: serial("id").primaryKey(),
+  orderId: varchar("order_id", { length: 32 }).notNull(),
+  photoData: text("photo_data").notNull(),
+  photoAt: timestamp("photo_at").defaultNow().notNull(),
+  source: varchar("source", { length: 16 }).notNull().default("retake"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (t) => ({
+  orderCreatedIdx: index("packing_photo_history_order_created_idx").on(t.orderId, t.createdAt),
+}));
+export type PackingPhotoHistory = typeof packingPhotoHistory.$inferSelect;
+export type InsertPackingPhotoHistory = typeof packingPhotoHistory.$inferInsert;
+
+/**
  * Order items – individual line items per order
  */
 export const orderItems = pgTable("order_items", {
