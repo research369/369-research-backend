@@ -85,20 +85,38 @@ packingPhotoRouter.post("/api/orders/:orderId/packing-photo", requirePackingAuth
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
-      await client.query(
-        `UPDATE orders
-         SET packing_photo_data = $1, packing_photo_url = $2, packing_photo_at = $3, updated_at = NOW()
-         WHERE order_id = $4`,
-        [photoData, photoUrl, photoAt, orderId],
+      const existingHistory = await client.query(
+        "SELECT 1 FROM packing_photo_history WHERE order_id = $1 LIMIT 1",
+        [orderId],
       );
-      await client.query(
-        `INSERT INTO packing_photo_history (order_id, photo_data, photo_at, source, created_at)
-         SELECT $1, $2, $3, 'initial', $3
-         WHERE NOT EXISTS (
-           SELECT 1 FROM packing_photo_history WHERE order_id = $1
-         )`,
-        [orderId, photoData, photoAt],
-      );
+      const hasHistory = (existingHistory.rowCount ?? 0) > 0;
+      if (hasHistory) {
+        // A retry after a disrupted response must never hide a prior proof.
+        // Preserve it as a new evidence record rather than rewriting history.
+        await client.query(
+          `INSERT INTO packing_photo_history (order_id, photo_data, photo_at, source, created_at)
+           VALUES ($1, $2, $3, 'retake', $3)`,
+          [orderId, photoData, photoAt],
+        );
+        await client.query(
+          `UPDATE orders
+           SET packing_photo_url = $1, packing_photo_at = $2, updated_at = NOW()
+           WHERE order_id = $3`,
+          [photoUrl, photoAt, orderId],
+        );
+      } else {
+        await client.query(
+          `UPDATE orders
+           SET packing_photo_data = $1, packing_photo_url = $2, packing_photo_at = $3, updated_at = NOW()
+           WHERE order_id = $4`,
+          [photoData, photoUrl, photoAt, orderId],
+        );
+        await client.query(
+          `INSERT INTO packing_photo_history (order_id, photo_data, photo_at, source, created_at)
+           VALUES ($1, $2, $3, 'initial', $3)`,
+          [orderId, photoData, photoAt],
+        );
+      }
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
