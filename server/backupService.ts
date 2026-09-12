@@ -23,10 +23,11 @@ const PAGE_SIZE = 10;
 const BACKUP_FORMAT = "369-research-postgres-json";
 const BACKUP_FORMAT_VERSION = 2;
 
-// E-Mail-Anhänge sind kein tragfähiges Langzeitarchiv für große Binärnachweise.
-// Der Export bleibt nur mit expliziter Betriebsfreigabe aktiv; die robuste
-// Standardsicherung erfolgt über die konfigurierte PostgreSQL-Volumesicherung.
-const EMAIL_ARCHIVE_EXPORT_ENABLED = process.env.DATABASE_BACKUP_EMAIL_EXPORT === "true";
+// Sicherheits-Notbremse: Der E-Mail-Export darf nicht mehr durch eine
+// Umgebungsvariable aktiviert werden. Große Binärnachweise dürfen niemals als
+// Serienanhang versandt werden; die Sicherung erfolgt ausschließlich über
+// Plattform-Snapshots und künftig über einen einzelnen Offsite-Dump.
+const EMAIL_ARCHIVE_EXPORT_ENABLED = false;
 
 interface BackupGroup {
   name: string;
