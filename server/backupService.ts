@@ -23,6 +23,11 @@ const PAGE_SIZE = 10;
 const BACKUP_FORMAT = "369-research-postgres-json";
 const BACKUP_FORMAT_VERSION = 2;
 
+// E-Mail-Anhänge sind kein tragfähiges Langzeitarchiv für große Binärnachweise.
+// Der Export bleibt nur mit expliziter Betriebsfreigabe aktiv; die robuste
+// Standardsicherung erfolgt über die konfigurierte PostgreSQL-Volumesicherung.
+const EMAIL_ARCHIVE_EXPORT_ENABLED = process.env.DATABASE_BACKUP_EMAIL_EXPORT === "true";
+
 interface BackupGroup {
   name: string;
   tables: string[];
@@ -237,6 +242,12 @@ export async function runDatabaseBackup(): Promise<BackupRunResult> {
   let totalRows = 0;
   let totalParts = 0;
 
+  if (!EMAIL_ARCHIVE_EXPORT_ENABLED) {
+    const message = "E-Mail-Archivexport ist deaktiviert; verwende die geplante PostgreSQL-Volumesicherung statt großer E-Mail-Anhänge";
+    console.warn(`[Backup] ${message}`);
+    return { success: false, parts: 0, rows: 0, errors: [message], durationSeconds: 0 };
+  }
+
   console.log("[Backup] Starte speichersicheren Datenbank-Backup...");
 
   try {
@@ -346,6 +357,11 @@ export async function runDatabaseBackup(): Promise<BackupRunResult> {
 
 /** Startet den täglichen Backup-Job um 03:00 Uhr UTC (05:00 Uhr MESZ). */
 export function startBackupScheduler(): void {
+  if (!EMAIL_ARCHIVE_EXPORT_ENABLED) {
+    console.log("[Backup] E-Mail-Archivscheduler deaktiviert – PostgreSQL-Volumesicherung ist der vorgesehene Betriebsweg");
+    return;
+  }
+
   console.log("[Backup] Backup-Scheduler gestartet – täglich um 03:00 Uhr UTC");
   const scheduleNextBackup = () => {
     const now = new Date();
