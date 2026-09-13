@@ -125,7 +125,7 @@ jobs:
           fetch-depth: 0
 
       - name: Prove deploy source is the tested isolated Checkout V2 revision
-        shell: bash
+        shell: sh
         run: |
           actual_sha="$(git rev-parse HEAD)"
           test "$actual_sha" = "$EXPECTED_BACKEND_SHA" || {
@@ -139,7 +139,7 @@ jobs:
           }
 
       - name: Reject incomplete or non-isolated staging configuration
-        shell: bash
+        shell: sh
         run: |
           test -n "$RAILWAY_TOKEN" || { echo "Missing environment secret RAILWAY_COMMERCE_STAGING_TOKEN"; exit 1; }
           test "$RAILWAY_PROJECT_ID" = "$CHECKOUT_V2_COMMERCE_STAGING_PROJECT_ID" || {
@@ -156,5 +156,5 @@ jobs:
           }
 
       - name: Deploy only the pinned revision to the named isolated staging service
-        shell: bash
+        shell: sh
         run: railway up --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT" --service "$RAILWAY_SERVICE" --ci
