@@ -99,7 +99,8 @@ jobs:
           ! grep -q 'quote: publicProcedure.input(quoteInputSchema).query' server/checkoutV2Router.ts
           grep -q 'CHECKOUT_V2_COMMERCE_STAGING' server/checkoutV2Router.ts
           grep -q 'FEATURE_CHECKOUT_V2_ENABLED' server/checkoutV2Router.ts
-          grep -q 'CHECKOUT_V2_TEST_MODE' server/checkoutV2Router.ts
+          grep -q 'CHECKOUT_V2_TEST_MODE' server/orderRouter.ts
+          grep -q 'suppressExternalNotifications' server/orderRouter.ts
           grep -q 'isBackupSchedulerDisabledForCommerceStaging' server/backupService.ts
 
   deploy_commerce_staging:
