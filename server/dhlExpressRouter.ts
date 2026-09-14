@@ -311,7 +311,9 @@ dhlExpressRouter.post(
       return;
     }
 
-    const requestedWeightG = Number(weightGrams ?? (order as any).weightGrams ?? activeProfile.maxWeightG);
+    // Ein fehlender Gewichtsdatensatz darf niemals das Profil-Maximum als Sendungsgewicht
+    // an DHL übergeben. Der bisherige produktive DHL-Standard beträgt 1.000 g.
+    const requestedWeightG = Number(weightGrams ?? (order as any).weightGrams ?? 1000);
     if (!Number.isFinite(requestedWeightG) || requestedWeightG <= 0) {
       res.status(422).json({ success: false, error: "Gewicht für die DHL-Sendung fehlt oder ist ungültig." });
       return;
