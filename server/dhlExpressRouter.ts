@@ -297,6 +297,33 @@ dhlExpressRouter.post(
       return;
     }
 
+    // Das gewählte Vertragsprodukt darf nur für sein tatsächlich hinterlegtes
+    // Zielland und innerhalb der serverseitigen Gewichtsgrenze verwendet werden.
+    // Die Prüfung bleibt bewusst im Backend, damit sie nicht über einen direkten
+    // API-Aufruf oder eine veraltete Browseransicht umgangen werden kann.
+    const rawDestinationCountry = String(order.country ?? (order as any).shippingCountry ?? "").trim();
+    const destinationCountry = alpha3ToAlpha2[normalizeCountryToAlpha3(rawDestinationCountry)] ?? rawDestinationCountry.toUpperCase();
+    if (!activeProfile.countries.includes(destinationCountry)) {
+      res.status(422).json({
+        success: false,
+        error: `Versandprofil \"${activeProfile.label}\" ist für das Zielland ${destinationCountry || "ohne Länderangabe"} nicht zulässig.`,
+      });
+      return;
+    }
+
+    const requestedWeightG = Number(weightGrams ?? (order as any).weightGrams ?? activeProfile.maxWeightG);
+    if (!Number.isFinite(requestedWeightG) || requestedWeightG <= 0) {
+      res.status(422).json({ success: false, error: "Gewicht für die DHL-Sendung fehlt oder ist ungültig." });
+      return;
+    }
+    if (requestedWeightG > activeProfile.maxWeightG) {
+      res.status(422).json({
+        success: false,
+        error: `${activeProfile.label} erlaubt maximal ${activeProfile.maxWeightG} g; angegeben sind ${requestedWeightG} g. Bitte DHL Paket Standard wählen.`,
+      });
+      return;
+    }
+
     // ── Adress-Validierung vor DHL-Call ──────────────────────────────────────
     // Normalisiere Land: "Deutschland", "Germany", "DEU", "de" → "DE"
     const normalizeCountry = (raw: string | null | undefined): string => {
@@ -331,6 +358,14 @@ dhlExpressRouter.post(
       email:         order.email ?? undefined,
       phone:         order.phone ?? undefined,
     };
+
+    if (profileKey === "DHL_DE_ECONOMY" && (isPackstation || isPostfiliale)) {
+      res.status(422).json({
+        success: false,
+        error: "DHL Kleinpaket ist nicht für Packstation- oder Postfilial-Adressen zulässig. Bitte DHL Paket Standard wählen.",
+      });
+      return;
+    }
 
     if (isPackstation || isPostfiliale) {
       // DHL-Abholort-Adressformat:
@@ -400,7 +435,7 @@ dhlExpressRouter.post(
     const shipmentInput = {
       orderId:       orderId.trim(),
       consignee,
-      weightGrams:   weightGrams ?? undefined,
+      weightGrams:   requestedWeightG,
       productCode:   activeProfile.product,
       billingNumber: activeProfile.billingNumber!,
     };
