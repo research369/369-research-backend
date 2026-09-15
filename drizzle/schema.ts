@@ -619,6 +619,37 @@ export type Partner = typeof partners.$inferSelect;
 export type InsertPartner = typeof partners.$inferInsert;
 
 /**
+ * Partner address requests – partner-submitted delivery-address changes.
+ * Requests are auditable and require an explicit admin review before the
+ * canonical partner delivery address is changed.
+ */
+export const partnerAddressRequests = pgTable("partner_address_requests", {
+  id: serial("id").primaryKey(),
+  partnerId: integer("partner_id").notNull(),
+  partnerNameSnapshot: varchar("partner_name_snapshot", { length: 200 }).notNull(),
+  partnerNumberSnapshot: varchar("partner_number_snapshot", { length: 50 }).notNull(),
+  partnerEmailSnapshot: varchar("partner_email_snapshot", { length: 320 }),
+  currentAddressJson: text("current_address_json").notNull().default("{}"),
+  requestedAddressJson: text("requested_address_json").notNull(),
+  requestFingerprint: varchar("request_fingerprint", { length: 128 }).notNull(),
+  status: varchar("status", { length: 24 }).notNull().default("open"),
+  notificationStatus: varchar("notification_status", { length: 24 }).notNull().default("pending"),
+  notificationError: text("notification_error"),
+  notificationSentAt: timestamp("notification_sent_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  reviewedAt: timestamp("reviewed_at"),
+  reviewedBy: varchar("reviewed_by", { length: 100 }),
+  reviewNote: text("review_note"),
+}, (t) => ({
+  partnerStatusIdx: index("partner_address_requests_partner_status_idx").on(t.partnerId, t.status, t.createdAt),
+  statusCreatedIdx: index("partner_address_requests_status_created_idx").on(t.status, t.createdAt),
+}));
+
+export type PartnerAddressRequest = typeof partnerAddressRequests.$inferSelect;
+export type InsertPartnerAddressRequest = typeof partnerAddressRequests.$inferInsert;
+
+/**
  * Partner transactions – tracks all credit movements
  * Types:
  * - "provision"  → commission earned from a referred order

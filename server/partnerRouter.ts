@@ -12,11 +12,12 @@
 
 import { z } from "zod";
 import { eq, desc, and, sql } from "drizzle-orm";
+import { createHash } from "node:crypto";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { router, publicProcedure, adminProcedure, middleware } from "./trpc.js";
-import { getDb } from "./db.js";
-import { partners, partnerTransactions, orders, orderItems, partnerCodeUsage, customers } from "../drizzle/schema.js";
+import { getDb, getPool } from "./db.js";
+import { partners, partnerAddressRequests, partnerTransactions, orders, orderItems, partnerCodeUsage, customers } from "../drizzle/schema.js";
 import { ENV } from "./env.js";
 import { bookPaidPartnerCommission, redeemPartnerCreditForOrder } from "./partnerCreditService.js";
 import type { Request } from "express";
@@ -82,6 +83,116 @@ const isPartner = middleware(async ({ ctx, next }) => {
 });
 
 const partnerProcedure = publicProcedure.use(isPartner);
+
+const partnerAddressInput = z.object({
+  street: z.string().trim().min(1).max(300),
+  houseNumber: z.string().trim().max(100).optional().default(""),
+  zip: z.string().trim().min(1).max(30),
+  city: z.string().trim().min(1).max(100),
+  country: z.string().trim().min(1).max(100),
+});
+
+type PartnerAddress = z.infer<typeof partnerAddressInput>;
+
+function normalisePartnerAddress(address: PartnerAddress) {
+  return {
+    street: address.street.trim(),
+    houseNumber: address.houseNumber.trim(),
+    zip: address.zip.trim(),
+    city: address.city.trim(),
+    country: address.country.trim(),
+  };
+}
+
+function addressFingerprint(address: Record<string, string>): string {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      street: address.street.trim().toLowerCase(),
+      houseNumber: address.houseNumber.trim().toLowerCase(),
+      zip: address.zip.trim().toLowerCase(),
+      city: address.city.trim().toLowerCase(),
+      country: address.country.trim().toLowerCase(),
+    }))
+    .digest("hex");
+}
+
+function serialisePartnerAddress(address: Record<string, string | null | undefined>): string {
+  return JSON.stringify({
+    street: address.street || "",
+    houseNumber: address.houseNumber || "",
+    zip: address.zip || "",
+    city: address.city || "",
+    country: address.country || "",
+  });
+}
+
+async function getPartnerAddressNotificationRecipients(): Promise<string[]> {
+  const pool = await getPool();
+  if (!pool) return [];
+  const result = await pool.query<{ value: string }>(
+    "SELECT value FROM shop_settings WHERE key = 'partner_address_request_notification_recipients' LIMIT 1"
+  );
+  const raw = result.rows[0]?.value || "";
+  return raw.split(/[;,\n]/).map((value) => value.trim()).filter((value) => z.string().email().safeParse(value).success);
+}
+
+async function isPartnerAddressNotificationEnabled(): Promise<boolean> {
+  const pool = await getPool();
+  if (!pool) return false;
+  const result = await pool.query<{ value: string }>(
+    "SELECT value FROM shop_settings WHERE key = 'partner_address_request_notification_enabled' LIMIT 1"
+  );
+  return result.rows[0]?.value !== "false";
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>'\"]/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", "\"": "&quot;",
+  }[character] || character));
+}
+
+async function sendPartnerAddressRequestNotification(request: {
+  id: number;
+  partnerName: string;
+  partnerNumber: string;
+  partnerEmail: string | null;
+  currentAddress: Record<string, string>;
+  requestedAddress: Record<string, string>;
+}): Promise<{ sent: boolean; error?: string }> {
+  if (!await isPartnerAddressNotificationEnabled()) return { sent: false, error: "Benachrichtigungen sind zentral deaktiviert" };
+  const recipients = await getPartnerAddressNotificationRecipients();
+  if (!ENV.resendApiKey || recipients.length === 0) {
+    return { sent: false, error: "Kein zentral konfigurierter Benachrichtigungsempfänger" };
+  }
+
+  const formatAddress = (address: Record<string, string>) =>
+    `${escapeHtml(address.street)} ${escapeHtml(address.houseNumber)}<br>${escapeHtml(address.zip)} ${escapeHtml(address.city)}<br>${escapeHtml(address.country)}`;
+  const html = `<!doctype html><html lang="de"><body style="font-family:Arial,sans-serif;color:#111827;line-height:1.5">
+    <h2>Partnerportal: Adressänderung prüfen</h2>
+    <p><strong>${escapeHtml(request.partnerName)}</strong> (${escapeHtml(request.partnerNumber)}) hat eine Lieferadressänderung beantragt.</p>
+    <table style="border-collapse:collapse"><tr><td style="padding:8px 20px 8px 0;vertical-align:top"><strong>Bisher</strong><br>${formatAddress(request.currentAddress)}</td><td style="padding:8px;vertical-align:top"><strong>Beantragt</strong><br>${formatAddress(request.requestedAddress)}</td></tr></table>
+    <p>Die Änderung ist in der WaWi unter <strong>Partner / Affiliates</strong> als offener Antrag sichtbar und muss dort ausdrücklich freigegeben oder abgelehnt werden.</p>
+    <p style="color:#6b7280;font-size:12px">Partner-E-Mail: ${escapeHtml(request.partnerEmail || "nicht hinterlegt")} · Antrag #${request.id}</p>
+  </body></html>`;
+
+  try {
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${ENV.resendApiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from: "369 Research <noreply@coreversand.de>",
+        reply_to: "support@369research.eu",
+        to: recipients,
+        subject: `Adressänderung prüfen: ${request.partnerName} (${request.partnerNumber})`,
+        html,
+      }),
+    });
+    if (!response.ok) return { sent: false, error: `Resend antwortete mit HTTP ${response.status}` };
+    return { sent: true };
+  } catch (error) {
+    return { sent: false, error: error instanceof Error ? error.message : "Unbekannter Versandfehler" };
+  }
+}
 
 export const partnerRouter = router({
   // ─── ADMIN: CRUD ───────────────────────────────────────────────
@@ -150,6 +261,73 @@ export const partnerRouter = router({
           adminNote: t.adminNote || null,
         })),
       };
+    }),
+
+  // Offene oder erledigte Partneradressanträge für die WaWi-Prüfung.
+  addressRequests: adminProcedure
+    .input(z.object({ status: z.enum(["open", "approved", "rejected", "all"]).optional() }).optional())
+    .query(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+      const query = db.select().from(partnerAddressRequests).orderBy(desc(partnerAddressRequests.createdAt));
+      const requests = input?.status && input.status !== "all"
+        ? await query.where(eq(partnerAddressRequests.status, input.status))
+        : await query;
+      return requests.map((request) => ({
+        ...request,
+        currentAddress: JSON.parse(request.currentAddressJson),
+        requestedAddress: JSON.parse(request.requestedAddressJson),
+      }));
+    }),
+
+  // Freigabe ist die einzige Stelle, an der die kanonische Partneradresse aus einem Portal-Antrag geändert wird.
+  reviewAddressRequest: adminProcedure
+    .input(z.object({
+      requestId: z.number().int().positive(),
+      decision: z.enum(["approve", "reject"]),
+      reviewNote: z.string().trim().max(2000).optional(),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      const pool = await getPool();
+      if (!pool) throw new Error("Database not available");
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const result = await client.query<{
+          id: number; partner_id: number; status: string; requested_address_json: string;
+        }>("SELECT id, partner_id, status, requested_address_json FROM partner_address_requests WHERE id = $1 FOR UPDATE", [input.requestId]);
+        const request = result.rows[0];
+        if (!request) throw new Error("Adressantrag nicht gefunden");
+        if (request.status !== "open") throw new Error("Dieser Adressantrag wurde bereits bearbeitet");
+
+        const reviewedBy = (ctx as any).user?.username || (ctx as any).user?.name || "admin";
+        const reviewNote = input.reviewNote || null;
+        if (input.decision === "approve") {
+          let address: PartnerAddress;
+          try {
+            address = normalisePartnerAddress(partnerAddressInput.parse(JSON.parse(request.requested_address_json)));
+          } catch {
+            throw new Error("Der gespeicherte Adressantrag ist unvollständig");
+          }
+          await client.query(
+            `UPDATE partners SET street = $1, house_number = $2, zip = $3, city = $4, country = $5, updated_at = NOW() WHERE id = $6`,
+            [address.street, address.houseNumber || null, address.zip, address.city, address.country, request.partner_id]
+          );
+        }
+        await client.query(
+          `UPDATE partner_address_requests
+           SET status = $1, reviewed_at = NOW(), reviewed_by = $2, review_note = $3, updated_at = NOW()
+           WHERE id = $4`,
+          [input.decision === "approve" ? "approved" : "rejected", reviewedBy, reviewNote, request.id]
+        );
+        await client.query("COMMIT");
+        return { success: true, status: input.decision === "approve" ? "approved" : "rejected" };
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
     }),
 
   // Create new partner
@@ -883,6 +1061,111 @@ export const partnerRouter = router({
           city: partner.city || "",
           country: partner.country || "",
         },
+      };
+    }),
+
+  // Aktuellen offenen Adressantrag für die Partnerportal-Einstellungen anzeigen.
+  portalAddressRequestStatus: partnerProcedure
+    .query(async ({ ctx }) => {
+      const partner = (ctx as any).partner;
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+      const [request] = await db.select().from(partnerAddressRequests)
+        .where(and(eq(partnerAddressRequests.partnerId, partner.id), eq(partnerAddressRequests.status, "open")))
+        .orderBy(desc(partnerAddressRequests.updatedAt))
+        .limit(1);
+      if (!request) return null;
+      return {
+        id: request.id,
+        status: request.status,
+        requestedAddress: JSON.parse(request.requestedAddressJson),
+        createdAt: request.createdAt,
+        updatedAt: request.updatedAt,
+      };
+    }),
+
+  // A portal partner can request, never directly overwrite, the canonical delivery address.
+  portalRequestAddressChange: partnerProcedure
+    .input(partnerAddressInput)
+    .mutation(async ({ ctx, input }) => {
+      const partner = (ctx as any).partner;
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      const requestedAddress = normalisePartnerAddress(input);
+      const currentAddress = {
+        street: partner.street || "",
+        houseNumber: partner.houseNumber || "",
+        zip: partner.zip || "",
+        city: partner.city || "",
+        country: partner.country || "",
+      };
+      const fingerprint = addressFingerprint(requestedAddress);
+      if (fingerprint === addressFingerprint(currentAddress)) {
+        return { success: true, alreadyCurrent: true, message: "Diese Lieferadresse ist bereits hinterlegt." };
+      }
+
+      const [openRequest] = await db.select().from(partnerAddressRequests)
+        .where(and(eq(partnerAddressRequests.partnerId, partner.id), eq(partnerAddressRequests.status, "open")))
+        .orderBy(desc(partnerAddressRequests.updatedAt))
+        .limit(1);
+
+      let requestId: number;
+      let shouldNotify = true;
+      if (openRequest && openRequest.requestFingerprint === fingerprint) {
+        requestId = openRequest.id;
+        shouldNotify = false;
+      } else if (openRequest) {
+        const [updated] = await db.update(partnerAddressRequests).set({
+          currentAddressJson: serialisePartnerAddress(currentAddress),
+          requestedAddressJson: serialisePartnerAddress(requestedAddress),
+          requestFingerprint: fingerprint,
+          notificationStatus: "pending",
+          notificationError: null,
+          notificationSentAt: null,
+          updatedAt: new Date(),
+        }).where(eq(partnerAddressRequests.id, openRequest.id)).returning({ id: partnerAddressRequests.id });
+        requestId = updated.id;
+      } else {
+        const [created] = await db.insert(partnerAddressRequests).values({
+          partnerId: partner.id,
+          partnerNameSnapshot: partner.name,
+          partnerNumberSnapshot: partner.partnerNumber,
+          partnerEmailSnapshot: partner.email || null,
+          currentAddressJson: serialisePartnerAddress(currentAddress),
+          requestedAddressJson: serialisePartnerAddress(requestedAddress),
+          requestFingerprint: fingerprint,
+          status: "open",
+          notificationStatus: "pending",
+        }).returning({ id: partnerAddressRequests.id });
+        requestId = created.id;
+      }
+
+      let notification: { sent: boolean; error?: string } = { sent: false };
+      if (shouldNotify) {
+        notification = await sendPartnerAddressRequestNotification({
+          id: requestId,
+          partnerName: partner.name,
+          partnerNumber: partner.partnerNumber,
+          partnerEmail: partner.email || null,
+          currentAddress,
+          requestedAddress,
+        });
+        await db.update(partnerAddressRequests).set({
+          notificationStatus: notification.sent ? "sent" : "failed",
+          notificationError: notification.error || null,
+          notificationSentAt: notification.sent ? new Date() : null,
+          updatedAt: new Date(),
+        }).where(eq(partnerAddressRequests.id, requestId));
+      }
+
+      return {
+        success: true,
+        requestId,
+        notificationSent: notification.sent,
+        message: shouldNotify
+          ? "Adressänderung wurde gespeichert und zur Prüfung weitergeleitet."
+          : "Der gleiche Adressantrag ist bereits zur Prüfung gespeichert.",
       };
     }),
 

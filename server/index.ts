@@ -31,6 +31,7 @@ import { ensureCustomerDossierSchema } from "./customerDossierSchema.js";
 import { ensureQrCampaignSchema } from "./qrCampaignSchema.js";
 import { ensureDiscountProvenanceSchema } from "./discountProvenanceSchema.js";
 import { ensureShipmentLabelOverrideConfig } from "./shipmentLabelOverrideConfig.js";
+import { ensurePartnerAddressRequestSchema } from "./partnerAddressRequestSchema.js";
 import { qrRedirectRouter } from "./qrRedirectRouter.js";
 import { ensurePeps4petsCheckoutSchema, isPeps4petsCheckoutSchemaReady } from "./peps4petsCheckoutSchema.js";
 
@@ -264,6 +265,13 @@ async function start() {
     await ensureCustomerDossierSchema();
   } catch (err) {
     console.warn("[Server] Customer dossier schema migration failed:", err);
+  }
+
+  // Partnerportal: revisionssichere Adressanträge mit WaWi-Prüfung.
+  try {
+    await ensurePartnerAddressRequestSchema();
+  } catch (err) {
+    console.warn("[Server] Partner address request schema migration failed:", err);
   }
 
   // Additive first-party QR campaign and order-attribution schema.
