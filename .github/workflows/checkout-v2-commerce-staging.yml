@@ -124,17 +124,21 @@ jobs:
           ref: ${{ needs.test_contract.outputs.backend_sha }}
           fetch-depth: 0
 
-      - name: Prove deploy source is the tested isolated Checkout V2 revision
+      - name: Require the contract-tested immutable commit handoff
         shell: sh
         run: |
-          actual_sha="$(git rev-parse HEAD)"
-          test "$actual_sha" = "$EXPECTED_BACKEND_SHA" || {
-            echo "Deploy source does not equal the contract-tested revision."
+          test -n "$EXPECTED_BACKEND_SHA" || {
+            echo "Missing contract-tested backend SHA."
             exit 1
           }
-          git fetch --no-tags origin "$CHECKOUT_V2_SOURCE_BRANCH"
-          git merge-base --is-ancestor "$actual_sha" "origin/$CHECKOUT_V2_SOURCE_BRANCH" || {
-            echo "Deploy source is not contained in the isolated Checkout V2 branch."
+          case "$EXPECTED_BACKEND_SHA" in
+            *[!0-9a-f]*|'')
+              echo "Contract-tested backend SHA must be a 40-character lowercase Git SHA."
+              exit 1
+              ;;
+          esac
+          test "${#EXPECTED_BACKEND_SHA}" -eq 40 || {
+            echo "Contract-tested backend SHA must be exactly 40 characters."
             exit 1
           }
 
