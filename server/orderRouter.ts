@@ -725,43 +725,49 @@ export const orderRouter = router({
             // ── Stock check: verify all peptide items are in stock before creating order ──
       const allArticlesForCheck = await db.select().from(articles).where(eq(articles.isActive, 1));
       const outOfStockItems: string[] = [];
+      const ambiguousVariantItems: string[] = [];
 
       // Smart Substitution: prüfen ob Feature aktiv ist
       const substitutionActive = await isSubstitutionEnabled();
 
-      // Helper: find articles matching a shop item by shopProductId + dosage
-      // Fallback: wenn keine shopProductId, suche nach Name + Dosage (für manuelle WaWi-Bestellungen)
+      // Helper: find articles matching a shop item by direct variant SKU or canonical
+      // shop product ID plus dosage. Bundle items carry the selected variant SKU; it must
+      // take precedence so stock and display metadata remain exact.
+      const getArticleDosage = (article: typeof allArticlesForCheck[number]): string => {
+        const parenMatch = article.name.match(/\(([^)]+)\)\s*$/);
+        const noParenMatch = article.name.match(/\b(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu))\s*$/i);
+        const nameDosage = parenMatch ? parenMatch[1].trim().toLowerCase() : noParenMatch ? noParenMatch[1].trim().toLowerCase() : '';
+        const skuDosage = extractDosageMg(article.sku);
+        return nameDosage || (skuDosage !== null ? `${skuDosage} mg` : '');
+      };
+      const dosageMatches = (article: typeof allArticlesForCheck[number], dosageNorm: string): boolean =>
+        !dosageNorm || getArticleDosage(article) === dosageNorm;
       const findMatchingArticles = (item: { name: string; dosage?: string; shopProductId?: string }, allArts: typeof allArticlesForCheck) => {
         const dosageNorm = (item.dosage || '').toLowerCase().trim();
         const itemShopId = (item.shopProductId || '').toLowerCase().trim();
-        
-        // Primary: shopProductId + dosage match (Online-Checkout)
+
         if (itemShopId) {
-          return allArts.filter(a => {
-            if (!a.shopProductId) return false;
-            if (a.shopProductId.toLowerCase() !== itemShopId) return false;
-            if (!dosageNorm) return true; // keine Dosage – alle Varianten
-            const parenMatch = a.name.match(/\(([^)]+)\)\s*$/);
-            const noParenMatch = a.name.match(/\b(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu))\s*$/i);
-            const nameDosage = parenMatch ? parenMatch[1].trim().toLowerCase() : noParenMatch ? noParenMatch[1].trim().toLowerCase() : '';
-            const skuDosage = extractDosageMg(a.sku);
-            const articleDosage = nameDosage || (skuDosage !== null ? String(skuDosage) + ' mg' : '');
-            return articleDosage === dosageNorm;
-          });
+          // A selected bundle variant is submitted as its inventory SKU (for example
+          // RETATRUTIDE-5MG), while all 3G records share the canonical shopProductId.
+          // Resolve that exact SKU first; never broaden a missing dosage to every variant.
+          const directVariantMatches = allArts.filter(article =>
+            article.sku.toLowerCase() === itemShopId && dosageMatches(article, dosageNorm)
+          );
+          if (directVariantMatches.length > 0) return directVariantMatches;
+
+          return allArts.filter(article =>
+            Boolean(article.shopProductId) &&
+            article.shopProductId!.toLowerCase() === itemShopId &&
+            dosageMatches(article, dosageNorm)
+          );
         }
-        
+
         // Fallback: Name + Dosage match (manuelle WaWi-Bestellungen ohne shopProductId)
         const itemNameNorm = item.name.replace(/\s*\[.*?\]\s*/g, '').trim().toLowerCase();
-        return allArts.filter(a => {
-          const artNameBase = a.name.replace(/\s*\(.*?\)\s*$/, '').trim().toLowerCase();
-          if (!artNameBase.includes(itemNameNorm) && !itemNameNorm.includes(artNameBase)) return false;
-          if (!dosageNorm) return true;
-          const parenMatch = a.name.match(/\(([^)]+)\)\s*$/);
-          const noParenMatch = a.name.match(/\b(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu))\s*$/i);
-          const nameDosage = parenMatch ? parenMatch[1].trim().toLowerCase() : noParenMatch ? noParenMatch[1].trim().toLowerCase() : '';
-          const skuDosage = extractDosageMg(a.sku);
-          const articleDosage = nameDosage || (skuDosage !== null ? String(skuDosage) + ' mg' : '');
-          return articleDosage === dosageNorm;
+        return allArts.filter(article => {
+          const articleNameBase = article.name.replace(/\s*\(.*?\)\s*$/, '').trim().toLowerCase();
+          return (articleNameBase.includes(itemNameNorm) || itemNameNorm.includes(articleNameBase)) &&
+            dosageMatches(article, dosageNorm);
         });
       };
 
@@ -772,6 +778,13 @@ export const orderRouter = router({
         const item = input.items[itemIdx];
         if (item.type !== 'peptide') continue;
         const matchingArticles = findMatchingArticles(item, allArticlesForCheck);
+        // Ein leerer Stärkenwert ist bei einer Variantenfamilie fachlich nicht
+        // bestimmbar. Die Bestellung wird abgebrochen, statt Bestand über alle
+        // Varianten zu aggregieren und eine unbrauchbare WaWi-Position zu speichern.
+        if (!item.dosage?.trim() && matchingArticles.length > 1) {
+          ambiguousVariantItems.push(item.name);
+          continue;
+        }
         if (matchingArticles.length > 0) {
           const totalStock = matchingArticles.reduce((sum, a) => sum + (a.stock ?? 0), 0);
           if (totalStock < item.quantity) {
@@ -808,6 +821,9 @@ export const orderRouter = router({
             }
           }
         }
+      }
+      if (ambiguousVariantItems.length > 0) {
+        throw new Error(`Bitte wähle für folgende Variantenprodukte eine Stärke: ${ambiguousVariantItems.join(', ')}`);
       }
       if (outOfStockItems.length > 0) {
         if (stockOverrideAuthorized) {
@@ -979,13 +995,21 @@ export const orderRouter = router({
         `);
       }
 
-      // Insert order items. If a client omitted the selected dosage, recover it
-      // generically from the persisted product variants and the exact selected unit price.
-      // This changes only the display metadata; price, stock and substitution logic remain untouched.
+      // Insert order items. If a client omitted the selected dosage, recover it first
+      // from the submitted variant SKU, then (only as a legacy fallback) from canonical
+      // product variants and an exact price. Bundle discounts make price-only recovery
+      // ambiguous, whereas an inventory SKU remains deterministic.
       const resolveDisplayDosage = async (item: typeof input.items[number]): Promise<string | null> => {
         const supplied = item.dosage?.trim();
         if (supplied) return supplied;
         if (item.type !== 'peptide' || !item.shopProductId) return null;
+
+        const [selectedArticle] = await db.select().from(articles)
+          .where(and(eq(articles.isActive, 1), eq(articles.sku, item.shopProductId)))
+          .limit(1);
+        const selectedSkuDosage = selectedArticle ? extractDosageMg(selectedArticle.sku) : null;
+        if (selectedSkuDosage !== null) return `${selectedSkuDosage} mg`;
+
         const [product] = await db.select().from(articles)
           .where(and(eq(articles.isActive, 1), eq(articles.shopProductId, item.shopProductId)))
           .limit(1);
