@@ -38,6 +38,7 @@ import {
 import { verifyKwkToken } from "./kwkAuth.js";
 import { getActiveGlobalAutomaticDiscountFromDb } from "./globalAutomaticDiscountConfig.js";
 import { calculateAuthoritativeWawiManualOrder } from "./manualWawiPricing.js";
+import { shouldSendOrderConfirmation } from "./orderConfirmationPolicy.js";
 
 // Die WaWi-Liste benötigt nur die Information, ob ein Label vorliegt. Die großen
 // Base64-/Legacy-Labeldaten bleiben ausschließlich für den gezielten, geschützten Abruf.
@@ -78,6 +79,10 @@ const createOrderSchema = z.object({
   // Der öffentliche Shop bleibt der Standard. Der WaWi-Herkunftsmarker wird
   // ausschließlich für eine bereits authentifizierte interne Sitzung akzeptiert.
   orderSource: z.enum(["shop", "wawi_manual"]).optional().default("shop"),
+  // Nur für manuelle WaWi-Aufträge: eine Kunden-Bestellbestätigung wird
+  // ausschließlich nach sichtbarer, expliziter Freigabe versendet. Shop-Checkout
+  // bleibt davon bewusst unberührt und weiterhin vollständig automatisch.
+  sendOrderConfirmation: z.boolean().optional(),
   // Zusätzliche Shopquelle. Ohne Angabe bleibt die bestehende 369-Research-Logik unverändert.
   storeKey: z.enum(["369research", "peps4pets"]).optional().default("369research"),
   // Nur Peps4pets verwendet diesen evidenzgebundenen Schlüssel. Die kanonische
@@ -195,6 +200,14 @@ export const orderRouter = router({
         throw new Error("WAWI_ANMELDUNG_ERFORDERLICH: Bitte erneut anmelden, bevor ein manueller Verkauf angelegt wird.");
       }
       const isAuthenticatedWawiManualSale = isRequestedWawiManualSale && Boolean(ctx.user);
+      // Der Shop-Checkout versendet wie bisher automatisch. Im manuellen
+      // WaWi-Workflow ist Versand an den Kunden eine bewusste Einzelfreigabe;
+      // der Browserwert ist erst nach erfolgreicher WaWi-Authentifizierung
+      // wirksam und kann deshalb nicht den öffentlichen Checkout beeinflussen.
+      const shouldSendConfirmation = shouldSendOrderConfirmation({
+        isAuthenticatedWawiManualSale,
+        sendOrderConfirmation: input.sendOrderConfirmation,
+      });
       if (!isAuthenticatedWawiManualSale && (hasKwkRequest || activeGlobalDiscount)) {
         const catalog = await db.select({
           sku: articles.sku,
@@ -1343,25 +1356,29 @@ export const orderRouter = router({
 
       // The shared CRM service sends, archives and protects the confirmation with
       // a Resend idempotency key. Do not add a second order-router log entry here.
-      try {
-        const emailSent = await sendOrderConfirmationEmail({
-          orderId: orderId,
-          storeKey: input.storeKey,
-          externalOrderReference,
-          customer: input.customer,
-          items: input.items.map(i => ({ ...i, dosage: i.dosage || null, variant: i.variant || null })),
-          subtotal: input.subtotal,
-          discount: input.discount,
-          discountCode: input.discountCode,
-          shipping: input.shipping,
-          total: input.total,
-          paymentMethod: input.paymentMethod,
-        });
-        if (!emailSent) {
-          console.warn(`[Orders] Confirmation email was not accepted for ${orderId}; failure is stored in the CRM communication record`);
+      if (shouldSendConfirmation) {
+        try {
+          const emailSent = await sendOrderConfirmationEmail({
+            orderId: orderId,
+            storeKey: input.storeKey,
+            externalOrderReference,
+            customer: input.customer,
+            items: input.items.map(i => ({ ...i, dosage: i.dosage || null, variant: i.variant || null })),
+            subtotal: input.subtotal,
+            discount: input.discount,
+            discountCode: input.discountCode,
+            shipping: input.shipping,
+            total: input.total,
+            paymentMethod: input.paymentMethod,
+          });
+          if (!emailSent) {
+            console.warn(`[Orders] Confirmation email was not accepted for ${orderId}; failure is stored in the CRM communication record`);
+          }
+        } catch (err) {
+          console.warn("[Orders] Failed to send confirmation email:", err);
         }
-      } catch (err) {
-        console.warn("[Orders] Failed to send confirmation email:", err);
+      } else {
+        console.info(`[Orders] Manual order confirmation intentionally not sent for ${orderId}`);
       }
 
       // Admin-Benachrichtigung deaktiviert:
