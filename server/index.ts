@@ -18,7 +18,7 @@ import type { Context } from "./trpc.js";
 import { startBackupScheduler } from "./backupService.js";
 import { dhlExpressRouter } from "./dhlExpressRouter.js";
 import { trackingRouter } from "./trackingRouter.js";
-import { checkoutErrorRouter } from "./checkoutErrorRouter.js";
+import { checkoutErrorRouter, ensureCheckoutFailureSchema } from "./checkoutErrorRouter.js";
 import { packingPhotoRouter } from "./packingPhotoRouter.js";
 import { resendWebhookRouter } from "./resendWebhookRouter.js";
 import { ensureCrmCommunicationSchema } from "./crmCommunicationSchema.js";
@@ -227,6 +227,15 @@ async function start() {
     await ensureCrmCommunicationSchema();
   } catch (err) {
     console.warn("[Server] CRM communication schema migration failed:", err);
+  }
+
+  // Checkout-Ausfälle werden separat und ohne Änderung operativer Aufträge
+  // archiviert. Der Alarmzustand verhindert doppelte Betreibermails bei
+  // wiederholten Browserübermittlungen derselben Fehlerreferenz.
+  try {
+    await ensureCheckoutFailureSchema();
+  } catch (err) {
+    console.warn("[Server] Checkout failure schema migration failed:", err);
   }
 
   // Additive customer-integrity migration. Reviews are now event-driven only:

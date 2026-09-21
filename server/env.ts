@@ -15,6 +15,9 @@ export const ENV = {
   resendApiKey: process.env.RESEND_API_KEY || "",
   // Signatur-Secret für eingehende Resend-Statuswebhooks (nie im Frontend verwenden)
   resendWebhookSecret: process.env.RESEND_WEBHOOK_SECRET || "",
+  // Zentraler Empfänger für operative Fehleralarme. Die bestehende Adresse ist
+  // nur der migrationssichere Fallback, bis die Variable in Railway gesetzt ist.
+  operatorAlertEmail: process.env.OPERATOR_ALERT_EMAIL || "369rebackup@gmail.com",
 
   // Forge LLM API (for KI-Bestellerfassung)
   forgeApiKey: process.env.FORGE_API_KEY || "",
