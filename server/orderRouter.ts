@@ -39,6 +39,7 @@ import { verifyKwkToken } from "./kwkAuth.js";
 import { getActiveGlobalAutomaticDiscountFromDb } from "./globalAutomaticDiscountConfig.js";
 import { calculateAuthoritativeWawiManualOrder } from "./manualWawiPricing.js";
 import { shouldSendOrderConfirmation } from "./orderConfirmationPolicy.js";
+import { resolveSubstitutionProductFamily } from "./orderItemIdentity.js";
 
 // Die WaWi-Liste benötigt nur die Information, ob ein Label vorliegt. Die großen
 // Base64-/Legacy-Labeldaten bleiben ausschließlich für den gezielten, geschützten Abruf.
@@ -802,8 +803,11 @@ export const orderRouter = router({
           const totalStock = matchingArticles.reduce((sum, a) => sum + (a.stock ?? 0), 0);
           if (totalStock < item.quantity) {
             // Variante nicht auf Lager – Smart Substitution versuchen?
-            // Smart Sub greift auch ohne shopProductId (manuelle Bestellungen) – dann shopProductId aus matchingArticle nehmen
-            const effectiveShopProductId = item.shopProductId || matchingArticles[0]?.shopProductId;
+            // Smart Sub greift auch ohne shopProductId (manuelle Bestellungen).
+            // Alte Bundle-Warenkörbe können noch die konkrete Varianten-SKU in
+            // shopProductId führen; für die Substitution wird daraus gezielt
+            // die kanonische Produktfamilie gewonnen.
+            const effectiveShopProductId = resolveSubstitutionProductFamily(item.shopProductId, matchingArticles);
             if (substitutionActive && effectiveShopProductId && isSubstitutionEligible(matchingArticles[0]?.category)) {
               const dosageMg = extractDosageMg(item.dosage || item.name);
               if (dosageMg !== null) {
