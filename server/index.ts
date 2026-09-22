@@ -37,6 +37,12 @@ import { ensurePeps4petsCheckoutSchema, isPeps4petsCheckoutSchemaReady } from ".
 
 const app = express();
 
+// Railway must be able to observe a live process while the application performs
+// its additive schema checks. Operational routes stay unavailable until the
+// initialization sequence has completed successfully.
+let startupState: "initializing" | "ready" | "failed" = "initializing";
+const startupStartedAt = Date.now();
+
 // CORS – allow frontend domains
 const allowedOrigins = [
   ENV.frontendUrl,
@@ -56,15 +62,17 @@ app.use(cors({
 // Resend signs the original raw request body. The webhook must therefore be mounted
 // before the global JSON parser, otherwise its signature could not be verified safely.
 app.use("/api/webhooks/resend", express.raw({ type: "application/json", limit: "1mb" }));
-app.use(resendWebhookRouter);
 
 app.use(express.json({ limit: "50mb" }));
 
-// Liveness: Der Prozess ist erreichbar. Für Produkt- und Checkout-Verfügbarkeit
-// muss zusätzlich `/health/ready` verwendet werden.
+// Liveness: Der Prozess ist erreichbar. Railway uses this lightweight endpoint
+// while additive database setup is running. Business routes are still guarded
+// below until `/health/ready` returns ready.
 app.get("/health", (_req, res) => {
   res.json({
     status: "ok",
+    startup: startupState,
+    uptimeMs: Date.now() - startupStartedAt,
     timestamp: new Date().toISOString(),
     version: "1.2.0-kwk",
     fix: "paid-status-filter",
@@ -72,9 +80,19 @@ app.get("/health", (_req, res) => {
   });
 });
 
-// Readiness: Stellt sicher, dass die produktive Datenquelle tatsächlich lesbar ist.
+// Readiness: keine Fachroute wird freigegeben, bevor die additive
+// Initialisierung und die produktive Datenquelle tatsächlich bereit sind.
 // Keine Daten werden geschrieben oder verändert.
 app.get("/health/ready", async (_req, res) => {
+  if (startupState !== "ready") {
+    return res.status(503).json({
+      status: "unavailable",
+      startup: startupState,
+      database: "initializing",
+      timestamp: new Date().toISOString(),
+    });
+  }
+
   const database = await checkDatabaseReadiness();
   if (!database.ready) {
     return res.status(503).json({
@@ -90,6 +108,24 @@ app.get("/health/ready", async (_req, res) => {
     timestamp: new Date().toISOString(),
   });
 });
+
+// All business routes remain unavailable until initialization completes. The
+// liveness and readiness routes above deliberately stay reachable for Railway.
+app.use((_req, res, next) => {
+  if (startupState === "ready") {
+    next();
+    return;
+  }
+
+  res.status(503).json({
+    error: "Der Server wird vorbereitet. Bitte kurz erneut versuchen.",
+    startup: startupState,
+  });
+});
+
+// The raw body parser above remains before the JSON parser, while handling the
+// provider event itself waits for the same ready gate as all other business routes.
+app.use(resendWebhookRouter);
 
 // First-party marketing QR redirects. Only `/r/*` is mounted here; `/i/*` remains
 // reserved for the prepared individual product/serial URLs.
@@ -1229,14 +1265,24 @@ async function start() {
     console.warn('[Server] KWK-Migration fehlgeschlagen (non-fatal):', err);
   }
 
-  app.listen(port, "0.0.0.0", () => {
-    console.log(`[Server] 369 Research Backend running on port ${port}`);
-    // Täglicher Datenbank-Backup um 03:00 Uhr UTC
-    startBackupScheduler();
-  });
 }
 
-start().catch((err) => {
-  console.error("[Server] Fatal error:", err);
-  process.exit(1);
+const server = app.listen(port, "0.0.0.0", () => {
+  console.log(`[Server] 369 Research Backend listening on port ${port}; initialization continues in the background`);
+});
+
+server.on("error", (err) => {
+  startupState = "failed";
+  console.error("[Server] HTTP listener failed:", err);
+});
+
+start().then(() => {
+  startupState = "ready";
+  console.log(`[Server] 369 Research Backend ready after ${Date.now() - startupStartedAt}ms`);
+  // The email archive scheduler is permanently disabled in backupService, so
+  // this remains a safe no-op while preserving the platform-snapshot policy.
+  startBackupScheduler();
+}).catch((err) => {
+  startupState = "failed";
+  console.error("[Server] Initialization failed; liveness remains available and business routes stay blocked:", err);
 });
