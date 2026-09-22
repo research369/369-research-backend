@@ -23,6 +23,7 @@ test("general promo and KWK stack sequentially while shipping stays untouched", 
     kwkCreditUsed: 0,
     applyReferralDiscount: true,
   }), {
+    globalDiscount: 0,
     promoDiscount: 10,
     kwkDiscount: 9,
     kwkCreditUsed: 0,
@@ -63,11 +64,30 @@ test("KWK credit is a payment instrument and cannot reduce shipping", () => {
     kwkCreditUsed: 100,
     applyReferralDiscount: false,
   }), {
+    globalDiscount: 0,
     promoDiscount: 0,
     kwkDiscount: 0,
     kwkCreditUsed: 50,
     totalDiscount: 50,
     total: 8,
+  });
+});
+
+test("global automatic discount, promo and KWK referral stack in the declared order", () => {
+  assert.deepEqual(calculateAuthoritativeKwkOrder({
+    subtotal: 100,
+    shipping: 8,
+    globalDiscount: 20,
+    promoDiscount: 8,
+    kwkCreditUsed: 0,
+    applyReferralDiscount: true,
+  }), {
+    globalDiscount: 20,
+    promoDiscount: 8,
+    kwkDiscount: 7.2,
+    kwkCreditUsed: 0,
+    totalDiscount: 35.2,
+    total: 72.8,
   });
 });
 

@@ -44,6 +44,7 @@ import {
   calculateKwkDiscount,
   KWK_DISCOUNT_PERCENT,
   KWK_COMMISSION_PERCENT,
+  syncKwkAccountCache,
 } from "./kwkService.js";
 import type { Request } from "express";
 import { createKwkToken, verifyKwkToken } from "./kwkAuth.js";
@@ -538,28 +539,9 @@ export const kwkRouter = router({
           [input.kwkId, input.amount.toFixed(2), input.note, adminUser]
         );
 
-        // Cache synchronisieren
-        const { syncCacheFromLedger } = await import("./kwkService.js") as any;
-        if (syncCacheFromLedger) {
-          // syncCacheFromLedger ist privat – direktes SQL
-          const ledgerResult = await client.query(
-            `SELECT
-               COALESCE(SUM(CASE WHEN type = 'pending_credit' AND status = 'pending' THEN amount ELSE 0 END), 0) AS pending,
-               COALESCE(SUM(CASE WHEN type = 'credit_released' AND status = 'confirmed' THEN amount ELSE 0 END), 0) AS released,
-               COALESCE(SUM(CASE WHEN type = 'redeemed' THEN ABS(amount) ELSE 0 END), 0) AS redeemed_total
-             FROM kwk_ledger WHERE kwk_id = $1`,
-            [input.kwkId]
-          );
-          const r = ledgerResult.rows[0];
-          const pending = parseFloat(r.pending) || 0;
-          const released = parseFloat(r.released) || 0;
-          const redeemed = parseFloat(r.redeemed_total) || 0;
-          const available = Math.max(0, released - redeemed);
-          await client.query(
-            `UPDATE kwk_accounts SET credit_pending = $1, credit_available = $2, credit_redeemed = $3, updated_at = NOW() WHERE id = $4`,
-            [pending.toFixed(2), available.toFixed(2), redeemed.toFixed(2), input.kwkId]
-          );
-        }
+        // Der Ledger ist die führende Quelle; Anzeige-Caches werden innerhalb
+        // derselben Transaktion mit exakt derselben Berechnung synchronisiert.
+        await syncKwkAccountCache(input.kwkId, client);
 
         await client.query("COMMIT");
       } catch (err) {

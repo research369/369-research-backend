@@ -115,8 +115,10 @@ export async function computeBalanceFromLedger(kwkId: number): Promise<{
 /**
  * Aktualisiert den Cache in kwk_accounts aus dem Ledger.
  * Wird nach jeder Ledger-Buchung aufgerufen.
+ * Der übergebene Client bleibt Teil derselben Transaktion, damit Ledger und
+ * Anzeige-Caches nie auseinanderlaufen.
  */
-async function syncCacheFromLedger(kwkId: number, client: any): Promise<void> {
+export async function syncKwkAccountCache(kwkId: number, client: any): Promise<void> {
   const result = await client.query(
     `SELECT
        COALESCE(SUM(CASE WHEN type = 'pending_credit' AND status = 'pending' THEN amount ELSE 0 END), 0) AS pending,
@@ -194,7 +196,7 @@ export async function bookPendingCredit(
     );
 
     // Cache synchronisieren
-    await syncCacheFromLedger(kwkId, client);
+    await syncKwkAccountCache(kwkId, client);
 
     await client.query("COMMIT");
     console.log(`[KWK] Pending credit booked: ${amount.toFixed(2)}€ for KWK-${kwkId}, order ${orderId}`);
@@ -253,7 +255,7 @@ export async function releaseCredit(orderId: string): Promise<void> {
     );
 
     // Cache synchronisieren
-    await syncCacheFromLedger(kwkId, client);
+    await syncKwkAccountCache(kwkId, client);
 
     await client.query("COMMIT");
     console.log(`[KWK] Credit released: ${amount}€ for order ${orderId}`);
@@ -317,7 +319,7 @@ export async function cancelCredit(orderId: string): Promise<void> {
           );
         }
       }
-      await syncCacheFromLedger(kwkId, client);
+      await syncKwkAccountCache(kwkId, client);
     }
 
     await client.query("UPDATE kwk_referrals SET status='cancelled' WHERE order_id=$1", [orderId]);
@@ -377,7 +379,7 @@ export async function partialRefundCredit(
           `Teilrückerstattung: Gutschrift anteilig korrigiert für Bestellung ${orderId} (-${correctionAmount.toFixed(2)}€)`,
         ]
       );
-      await syncCacheFromLedger(kwkId, client);
+      await syncKwkAccountCache(kwkId, client);
     }
 
     await client.query("COMMIT");
@@ -450,7 +452,7 @@ export async function redeemCredit(
     await client.query("UPDATE orders SET kwk_credit_used=$1, updated_at=NOW() WHERE order_id=$2", [amount.toFixed(2), orderId]);
 
     // Cache synchronisieren
-    await syncCacheFromLedger(kwkId, client);
+    await syncKwkAccountCache(kwkId, client);
 
     await client.query("COMMIT");
     console.log(`[KWK] Credit redeemed: ${amount.toFixed(2)}€ by KWK-${kwkId} for order ${orderId}`);

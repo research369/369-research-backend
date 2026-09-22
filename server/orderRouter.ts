@@ -40,6 +40,7 @@ import { getActiveGlobalAutomaticDiscountFromDb } from "./globalAutomaticDiscoun
 import { calculateAuthoritativeWawiManualOrder } from "./manualWawiPricing.js";
 import { shouldSendOrderConfirmation } from "./orderConfirmationPolicy.js";
 import { resolveSubstitutionProductFamily } from "./orderItemIdentity.js";
+import { serializeKwkFraudFlags } from "./kwkReferralPayload.js";
 
 // Die WaWi-Liste benötigt nur die Information, ob ein Label vorliegt. Die großen
 // Base64-/Legacy-Labeldaten bleiben ausschließlich für den gezielten, geschützten Abruf.
@@ -1168,7 +1169,7 @@ export const orderRouter = router({
             (${kwkId}, ${orderId}, ${(input.customer.email || "").trim().toLowerCase()},
              ${input.customer.phone}, ${addressHash}, ${(input.kwkDiscount || 0).toFixed(2)},
              ${commissionBase.toFixed(2)}, ${commissionAmount.toFixed(2)},
-             ${JSON.stringify(fraudFlags)}::jsonb, 'pending')
+             ${serializeKwkFraudFlags(fraudFlags)}, 'pending')
         `);
 
         if (commissionAmount > 0) {
