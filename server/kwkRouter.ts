@@ -67,6 +67,15 @@ const kwkAuthMiddleware = middleware(async ({ ctx, next }) => {
   if (!kwkAuth) {
     throw new Error("KWK-Authentifizierung erforderlich");
   }
+  const pool = await getPool();
+  if (!pool) throw new Error("Database not available");
+  const account = await pool.query(
+    "SELECT id FROM kwk_accounts WHERE id = $1 AND status = 'aktiv' AND deleted_at IS NULL LIMIT 1",
+    [kwkAuth.kwkId],
+  );
+  if (account.rows.length !== 1) {
+    throw new Error("KWK-Konto ist nicht aktiv");
+  }
   return next({ ctx: { ...ctx, kwkId: kwkAuth.kwkId } });
 });
 

@@ -175,7 +175,7 @@ export async function bookPendingCredit(
     // Serialisiert parallele Requests derselben Bestellung. Der bisherige
     // SELECT-vor-INSERT-Check allein war bei zwei gleichzeitigen Requests
     // nicht ausreichend.
-    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`kwk-pending:${orderId}`]);
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`kwk-order:${orderId}`]);
 
     // Idempotenz-Check
     const existing = await client.query(
@@ -221,7 +221,7 @@ export async function releaseCredit(orderId: string): Promise<void> {
 
     // Status-Webhooks und manuelle Klicks können gleichzeitig eintreffen.
     // Pro Bestellung darf Guthaben nur einmal freigegeben werden.
-    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`kwk-release:${orderId}`]);
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`kwk-order:${orderId}`]);
 
     // Pending-Eintrag finden
     const pendingResult = await client.query(
@@ -279,7 +279,7 @@ export async function cancelCredit(orderId: string): Promise<void> {
     await client.query("BEGIN");
 
     // Order-bound lock makes repeated status changes idempotent.
-    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`kwk-cancel:${orderId}`]);
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`kwk-order:${orderId}`]);
 
     // Alle Einträge für diese Bestellung finden
     const entries = await client.query(
@@ -347,7 +347,7 @@ export async function partialRefundCredit(
   try {
     await client.query("BEGIN");
 
-    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`kwk-refund:${orderId}`]);
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`kwk-order:${orderId}`]);
     const entries = await client.query(
       `SELECT kwk_id,
         COALESCE(MAX(amount) FILTER (WHERE type IN ('pending_credit','credit_released') AND status <> 'cancelled'),0) original_amount,
@@ -408,7 +408,11 @@ export async function redeemCredit(
     await client.query("BEGIN");
 
     if (!Number.isFinite(amount) || amount <= 0) throw new Error("Ungültiger Guthabenbetrag");
-    await client.query("SELECT id FROM kwk_accounts WHERE id=$1 FOR UPDATE", [kwkId]);
+    const account = await client.query(
+      "SELECT id FROM kwk_accounts WHERE id=$1 AND status='aktiv' AND deleted_at IS NULL FOR UPDATE",
+      [kwkId],
+    );
+    if (account.rows.length !== 1) throw new Error("KWK-Konto ist nicht aktiv");
     const orderResult = await client.query(
       "SELECT status, kwk_credit_requested FROM orders WHERE order_id=$1 FOR UPDATE",
       [orderId],

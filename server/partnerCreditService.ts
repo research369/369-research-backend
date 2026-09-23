@@ -327,3 +327,65 @@ export async function bookPaidPartnerCommission(orderId: string): Promise<{
     throw error;
   }
 }
+
+/**
+ * Reverses only the partner-credit movements that belong to a cancelled order.
+ * The original transactions remain auditable and are marked as cancelled; the
+ * cached balance is changed in the same locked transaction. Repeating the
+ * cancellation is intentionally a no-op.
+ */
+export async function reversePartnerFinancialEntriesForCancelledOrder(orderId: string): Promise<{
+  reversed: number;
+  balance: number;
+  reason: string;
+}> {
+  const { client } = await beginLockedTransaction();
+  try {
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`partner-order:${orderId}`]);
+    const order = await lockOrder(client, orderId);
+    const partner = await lockPartnerForOrder(client, order);
+    if (!partner) {
+      await client.query("COMMIT");
+      client.release();
+      return { reversed: 0, balance: 0, reason: "no_partner" };
+    }
+
+    const entries = await client.query<{ id: number; amount: string; type: "provision" | "einloesung" }>(
+      `SELECT id, amount, type
+         FROM partner_transactions
+        WHERE partner_id = $1
+          AND order_id = $2
+          AND status = 'normal'
+          AND type IN ('provision', 'einloesung')
+        FOR UPDATE`,
+      [partner.id, orderId],
+    );
+    if (entries.rows.length === 0) {
+      await client.query("COMMIT");
+      client.release();
+      return { reversed: 0, balance: parseMoney(partner.credit_balance), reason: "already_reversed_or_empty" };
+    }
+
+    const bookedNet = roundMoney(entries.rows.reduce((sum, entry) => sum + parseMoney(entry.amount), 0));
+    const currentBalance = parseMoney(partner.credit_balance);
+    const newBalance = roundMoney(currentBalance - bookedNet);
+    await client.query(
+      `UPDATE partner_transactions
+          SET status = 'storniert',
+              admin_note = COALESCE(admin_note, $1)
+        WHERE id = ANY($2::int[])`,
+      [`Automatische Storno-Gegenbuchung für Bestellung ${orderId}`, entries.rows.map((entry) => entry.id)],
+    );
+    await client.query(
+      "UPDATE partners SET credit_balance = $1, updated_at = NOW() WHERE id = $2",
+      [newBalance.toFixed(2), partner.id],
+    );
+
+    await client.query("COMMIT");
+    client.release();
+    return { reversed: roundMoney(-bookedNet), balance: newBalance, reason: "reversed" };
+  } catch (error) {
+    await rollbackAndRelease(client);
+    throw error;
+  }
+}

@@ -20,7 +20,11 @@ import { sql } from "drizzle-orm";
 import { queueCustomerDuplicateReview } from "./customerIntegrityService.js";
 import { NASAL_DIY_SET_COMPONENTS, isNasalDiySetEligible } from "./nasalDiySetConfig.js";
 import { persistAddressValidation, validateGermanAddress } from "./addressValidationService.js";
-import { bookPaidPartnerCommission, redeemPartnerCreditForOrder } from "./partnerCreditService.js";
+import {
+  bookPaidPartnerCommission,
+  redeemPartnerCreditForOrder,
+  reversePartnerFinancialEntriesForCancelledOrder,
+} from "./partnerCreditService.js";
 import { resolveQrAttribution } from "./qrCampaignService.js";
 import { withStoreSourceMarker } from "./storeSource.js";
 import {
@@ -41,6 +45,7 @@ import { calculateAuthoritativeWawiManualOrder } from "./manualWawiPricing.js";
 import { shouldSendOrderConfirmation } from "./orderConfirmationPolicy.js";
 import { resolveSubstitutionProductFamily } from "./orderItemIdentity.js";
 import { serializeKwkFraudFlags } from "./kwkReferralPayload.js";
+import { getAuthenticatedPartnerFromRequest } from "./partnerAuth.js";
 
 // Die WaWi-Liste benötigt nur die Information, ob ein Label vorliegt. Die großen
 // Base64-/Legacy-Labeldaten bleiben ausschließlich für den gezielten, geschützten Abruf.
@@ -601,12 +606,30 @@ export const orderRouter = router({
         });
       }
 
-      // ── Partner logic: validate code, calculate discount & commission ──
+      // ── Partner logic: validate attribution and financial authorization ──
       let partnerCode = input.partnerCode || null;
       let partnerNumber = input.partnerNumber || null;
       let partnerDiscountAmount = input.partnerDiscount || 0;
       let partnerCommissionAmount = 0;
       let creditUsed = input.creditUsed || 0;
+
+      // A partner number identifies a self-order and a credit redemption moves
+      // money. Neither may be authorized by a publicly known partner number.
+      // The session identity wins over all browser-provided partner fields.
+      const requiresPartnerSession = Boolean(partnerNumber) || creditUsed > 0;
+      const authenticatedPartner = requiresPartnerSession
+        ? await getAuthenticatedPartnerFromRequest(ctx.req)
+        : null;
+      if (requiresPartnerSession && !authenticatedPartner) {
+        throw new Error("PARTNER_GUTHABEN_AUTHENTIFIZIERUNG_ERFORDERLICH");
+      }
+      if (authenticatedPartner) {
+        if (partnerNumber && partnerNumber !== authenticatedPartner.partnerNumber) {
+          throw new Error("PARTNER_GUTHABEN_PARTNER_MISMATCH");
+        }
+        partnerNumber = authenticatedPartner.partnerNumber;
+        partnerCode = authenticatedPartner.code;
+      }
 
       // Partner wird beim Checkout ausschließlich zugeordnet. Eine Gutschrift entsteht
       // erst nach bestätigtem Zahlungseingang im zentralen Partnerguthaben-Service.
@@ -1545,6 +1568,11 @@ export const orderRouter = router({
       if (input.status === "bezahlt") {
         const creditResult = await bookPaidPartnerCommission(input.orderId);
         console.log(`[Partners] Zahlungsgebundene Gutschrift ${input.orderId}: ${creditResult.reason} (${creditResult.amount.toFixed(2)} €)`);
+      }
+
+      if (input.status === "storniert") {
+        const reversal = await reversePartnerFinancialEntriesForCancelledOrder(input.orderId);
+        console.log(`[Partners] Stornogegenbuchung ${input.orderId}: ${reversal.reason} (${reversal.reversed.toFixed(2)} €)`);
       }
 
       // KWK-Guthaben ist wie Partnerguthaben strikt zahlungsgebunden.
