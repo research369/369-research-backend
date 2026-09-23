@@ -1,9 +1,0 @@
-# Applies only to the isolated Railway environment named "commerce-staging".
-# The scripts themselves fail closed unless all staging/test gates are explicit.
-[environments.commerce-staging.deploy]
-preDeployCommand = [
-  "./node_modules/.bin/tsx scripts/checkout-v2-commerce-staging-bootstrap.ts",
-  "./node_modules/.bin/tsx scripts/checkout-v2-commerce-staging-smoke.ts",
-]
-healthcheckPath = "/health"
-healthcheckTimeout = 180

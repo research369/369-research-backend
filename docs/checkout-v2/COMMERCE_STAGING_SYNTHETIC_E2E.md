@@ -14,7 +14,9 @@ Dieses Verfahren initialisiert und prüft Checkout V2 ausschließlich im private
 | Datenbankziel | Ohne verifizierte Railway-Identität nur bei eindeutigem Staging-Marker oder einer exakten, expliziten lokalen Allowlist |
 | Öffentliche Erreichbarkeit | Keine Domain erforderlich oder vorgesehen |
 
-Die Railway-Konfiguration in `railway.toml` definiert den Ablauf **nur für das Environment `commerce-staging`**. Der Bootstrap und der Smoke-Test laufen als Railway Pre-Deploy-Schritte im privaten Netzwerk. Ein Fehler verhindert den Service-Start.
+Die Railway-Konfiguration in `railway.json` legt einen einzelnen Pre-Deploy-Runner fest. Der Runner selbst ist fail-closed auf `commerce-staging` und den dort erwarteten Service gebunden; auf jedem anderen Ziel endet er vor einer Datenmutation. Der Bootstrap und der Smoke-Test laufen damit als Railway Pre-Deploy-Schritte im privaten Netzwerk. Ein Fehler verhindert den Service-Start.
+
+> Am 23. September 2026 wurde der erste Lauf mit einer TOML-Environment-Override-Konfiguration zwar von Railway als Deployment angenommen, aber ohne übernommenen Pre-Deploy-Schritt gestartet. Die dadurch entstandene leere Testdatenbank führte nur im isolierten Service zu erwarteten „Tabelle fehlt“-Startfehlern. Die Quelle verwendet deshalb die von Railway dokumentierte JSON-Manifestform mit einem einzelnen, im Deployment sichtbaren Pre-Deploy-Kommando. Es wurden weder Produktionsdaten noch externe Integrationen berührt.
 
 ## Warum Schema-Push statt historischer Replay-Migration
 
