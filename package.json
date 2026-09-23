@@ -7,7 +7,9 @@
     "start": "tsx server/index.ts",
     "build": "echo 'No build step needed with tsx'",
     "db:push": "drizzle-kit generate && drizzle-kit migrate",
-    "db:seed": "tsx server/seed.ts"
+    "db:seed": "tsx server/seed.ts",
+    "checkout-v2:commerce-staging:bootstrap": "./node_modules/.bin/tsx scripts/checkout-v2-commerce-staging-bootstrap.ts",
+    "checkout-v2:commerce-staging:smoke": "./node_modules/.bin/tsx scripts/checkout-v2-commerce-staging-smoke.ts"
   },
   "dependencies": {
     "@trpc/server": "^11.6.0",
