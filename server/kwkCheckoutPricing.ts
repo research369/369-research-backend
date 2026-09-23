@@ -75,12 +75,13 @@ function articleDosage(article: KwkCatalogArticle): string {
 export function resolveAuthoritativeItemPrice(
   item: KwkCheckoutItem & { dosage?: string; isPlugPlay?: boolean; isNasalDiySet?: boolean; isFreeGift?: boolean },
   catalog: KwkCatalogArticle[],
+  options: { publicCatalogOnly?: boolean } = {},
 ): number {
-  if (item.isFreeGift) return 0;
   const productId = (item.shopProductId || "").trim().toLowerCase();
   if (!productId) throw new Error("KWK_ARTIKEL_OHNE_PRODUKTREFERENZ");
 
-  const family = catalog.filter((article) => article.isActive === 1 && (
+  const family = catalog.filter((article) => article.isActive === 1
+    && (!options.publicCatalogOnly || article.shopVisible === 1) && (
     article.shopProductId?.trim().toLowerCase() === productId
     || article.sku.trim().toLowerCase() === productId
   ));
@@ -88,6 +89,10 @@ export function resolveAuthoritativeItemPrice(
     ?? family.find((article) => article.shopVisible === 1)
     ?? family[0];
   if (!canonical) throw new Error(`KWK_ARTIKEL_NICHT_GEFUNDEN: ${item.shopProductId}`);
+
+  // Gratispositionen müssen trotzdem eine reale Katalogreferenz besitzen.
+  // Dadurch kann ein Browser keine frei erfundene Position in den Auftrag legen.
+  if (item.isFreeGift) return 0;
 
   const salePrice = Number(canonical.salePrice);
   let basePrice = Number.isFinite(salePrice) && salePrice > 0 ? salePrice : NaN;
