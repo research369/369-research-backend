@@ -46,6 +46,18 @@ import { shouldSendOrderConfirmation } from "./orderConfirmationPolicy.js";
 import { resolveSubstitutionProductFamily } from "./orderItemIdentity.js";
 import { serializeKwkFraudFlags } from "./kwkReferralPayload.js";
 import { getAuthenticatedPartnerFromRequest } from "./partnerAuth.js";
+import { isFinanciallyPaidStatus } from "./paidFinancialStatus.js";
+
+/**
+ * Releases a pending KWK referral only after an order is known to be paid.
+ * The ledger service is idempotent, so this deliberately runs on every later
+ * paid-status transition as a recovery path for an interrupted earlier event.
+ */
+async function releaseKwkCreditForPaidOrder(orderId: string): Promise<void> {
+  const { releaseCredit } = await import("./kwkService.js");
+  await releaseCredit(orderId);
+  console.log(`[KWK] Zahlungsgebundene Freigabe geprüft: ${orderId}`);
+}
 
 // Die WaWi-Liste benötigt nur die Information, ob ein Label vorliegt. Die großen
 // Base64-/Legacy-Labeldaten bleiben ausschließlich für den gezielten, geschützten Abruf.
@@ -1564,10 +1576,16 @@ export const orderRouter = router({
 
       await db.update(orders).set(updateData).where(eq(orders.orderId, input.orderId));
 
-      // Partnerguthaben ist strikt zahlungsgebunden. Wiederholte Klicks sind idempotent.
-      if (input.status === "bezahlt") {
+      // Partner- und KWK-Guthaben sind strikt zahlungsgebunden. Ein späterer
+      // Versand-/Zustellstatus wiederholt die idempotente Prüfung und heilt so
+      // einen unterbrochenen vorherigen Zahlungsstatusweg.
+      const [updatedFinancialOrder] = isFinanciallyPaidStatus(input.status)
+        ? await db.select({ paidAt: orders.paidAt }).from(orders).where(eq(orders.orderId, input.orderId)).limit(1)
+        : [null];
+      if (updatedFinancialOrder?.paidAt) {
         const creditResult = await bookPaidPartnerCommission(input.orderId);
         console.log(`[Partners] Zahlungsgebundene Gutschrift ${input.orderId}: ${creditResult.reason} (${creditResult.amount.toFixed(2)} €)`);
+        await releaseKwkCreditForPaidOrder(input.orderId);
       }
 
       if (input.status === "storniert") {
@@ -1575,16 +1593,6 @@ export const orderRouter = router({
         console.log(`[Partners] Stornogegenbuchung ${input.orderId}: ${reversal.reason} (${reversal.reversed.toFixed(2)} €)`);
       }
 
-      // KWK-Guthaben ist wie Partnerguthaben strikt zahlungsgebunden.
-      // Wiederholte Zahlungsereignisse sind im KWK-Service idempotent.
-      if (input.status === "bezahlt") {
-        try {
-          const { releaseCredit } = await import('./kwkService.js');
-          await releaseCredit(input.orderId);
-        } catch (kwkErr) {
-          console.warn('[KWK] releaseCredit failed (non-fatal):', kwkErr);
-        }
-      }
       // KWK-Guthaben entfernen bei Storno
       if (input.status === "storniert") {
         try {
@@ -1744,6 +1752,7 @@ export const orderRouter = router({
 
         const creditResult = await bookPaidPartnerCommission(order.orderId);
         console.log(`[Partners] Zahlungsgebundene Gutschrift ${order.orderId}: ${creditResult.reason} (${creditResult.amount.toFixed(2)} €)`);
+        await releaseKwkCreditForPaidOrder(order.orderId);
 
         usedPaymentIds.add(match.matchedPayment.id);
         autoMatchedCount++;
@@ -1851,6 +1860,7 @@ export const orderRouter = router({
       if (input.markAsPaid && order.status === "offen") {
         const creditResult = await bookPaidPartnerCommission(input.orderId);
         console.log(`[Partners] Zahlungsgebundene Gutschrift ${input.orderId}: ${creditResult.reason} (${creditResult.amount.toFixed(2)} €)`);
+        await releaseKwkCreditForPaidOrder(input.orderId);
       }
 
       console.log(`[Bunq] Manual assignment: Payment ${input.paymentId} (${input.paymentAmount} EUR) -> Order ${input.orderId}`);
