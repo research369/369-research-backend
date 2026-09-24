@@ -22,6 +22,7 @@ import {
   articleTranslations,
   productAuditLog,
 } from "../drizzle/schema.js";
+import { requiresResearchOnlyValidation } from "./productValidationPolicy.js";
 
 // ─────────────────────────────────────────────────────────────
 // HELPERS
@@ -648,6 +649,10 @@ export const productAdminRouter = router({
       if (!article[0].category && (!cats || cats.length === 0)) {
         warnings.push("Keine Kategorie gesetzt");
       }
+      const requiresResearchOnlyMetadata = requiresResearchOnlyValidation({
+        category: article[0].category,
+        categories: cats,
+      });
 
       // === COMPLIANCE CHECKS ===
       const descText = JSON.stringify(article[0].description ?? "").toLowerCase();
@@ -660,12 +665,12 @@ export const productAdminRouter = router({
         }
       }
       const hasResearchNote = allText.includes("research use only") || allText.includes("forschungszwecke") || allText.includes("not for human use");
-      if (!hasResearchNote) warnings.push("Research Use Only Hinweis fehlt im Produkttext");
+      if (requiresResearchOnlyMetadata && !hasResearchNote) warnings.push("Research Use Only Hinweis fehlt im Produkttext");
 
       // === OPTIONALE EMPFEHLUNGEN ===
-      if (!article[0].casNumber) warnings.push("CAS-Nummer fehlt (empfohlen für Peptide)");
+      if (requiresResearchOnlyMetadata && !article[0].casNumber) warnings.push("CAS-Nummer fehlt (empfohlen für Peptide)");
       if (!article[0].shortDescription) warnings.push("Kurzbeschreibung fehlt");
-      if (!article[0].purity) warnings.push("Reinheitsangabe fehlt");
+      if (requiresResearchOnlyMetadata && !article[0].purity) warnings.push("Reinheitsangabe fehlt");
 
       const totalChecks = 18;
       const score = Math.max(0, Math.round(((totalChecks - issues.length * 2 - warnings.length * 0.5) / totalChecks) * 100));
