@@ -106,6 +106,15 @@ test("catalog prices and option surcharges are authoritative", () => {
   }];
   assert.equal(resolveAuthoritativeItemPrice({ shopProductId: "test", dosage: "10 mg", price: 1, quantity: 1 }, catalog), 55);
   assert.equal(resolveAuthoritativeItemPrice({ shopProductId: "test", dosage: "10 mg", price: 1, quantity: 1, isPlugPlay: true }, catalog), 70);
+  assert.equal(resolveAuthoritativeItemPrice({ shopProductId: "test", dosage: "10 mg", price: 1, quantity: 1 }, catalog, { publicCatalogOnly: true }), 55);
+  assert.throws(
+    () => resolveAuthoritativeItemPrice({ shopProductId: "hidden", dosage: "10 mg", price: 1, quantity: 1 }, [{ ...catalog[0], shopProductId: "hidden", shopVisible: 0 }], { publicCatalogOnly: true }),
+    /KWK_ARTIKEL_NICHT_GEFUNDEN/,
+  );
+  assert.throws(
+    () => resolveAuthoritativeItemPrice({ price: 0, quantity: 1, isFreeGift: true }, catalog, { publicCatalogOnly: true }),
+    /KWK_ARTIKEL_OHNE_PRODUKTREFERENZ/,
+  );
 });
 
 test("shipping comes from the delivery country and is never discounted by KWK", () => {

@@ -206,8 +206,10 @@ export const orderRouter = router({
         ? configuredGlobalDiscount
         : null;
 
-      // Im öffentlichen Shop werden Preise für KWK und den aktiven Dauerrabatt
-      // zwingend aus dem aktuellen Katalog rekonstruiert. Eine WaWi-Anlage ist
+      // Im öffentlichen Shop werden Preise immer zwingend aus dem aktuellen
+      // Katalog rekonstruiert. Der Browser liefert nur Produktreferenz,
+      // Variante und Menge; der übermittelte Preis ist niemals autoritativ.
+      // Eine WaWi-Anlage ist
       // dagegen ein bewusst manuell bepreister Geschäftsprozess: Preis und Menge
       // dieser Positionen dürfen dort niemals durch den Katalogpreis überschrieben
       // werden. Der Marker allein genügt aus Sicherheitsgründen nicht; er benötigt
@@ -227,7 +229,7 @@ export const orderRouter = router({
         isAuthenticatedWawiManualSale,
         sendOrderConfirmation: input.sendOrderConfirmation,
       });
-      if (!isAuthenticatedWawiManualSale && (hasKwkRequest || activeGlobalDiscount)) {
+      if (!isAuthenticatedWawiManualSale) {
         const catalog = await db.select({
           sku: articles.sku,
           shopProductId: articles.shopProductId,
@@ -240,7 +242,7 @@ export const orderRouter = router({
         }).from(articles);
         input.items = input.items.map((item) => ({
           ...item,
-          price: resolveAuthoritativeItemPrice(item, catalog),
+          price: resolveAuthoritativeItemPrice(item, catalog, { publicCatalogOnly: true }),
         }));
         input.subtotal = roundMoney(input.items.reduce((sum, item) => sum + item.price * item.quantity, 0));
       }
