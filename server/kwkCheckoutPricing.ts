@@ -127,6 +127,8 @@ export type ShippingCheckoutItem = {
   isNasalDiySet?: boolean;
 };
 
+export const COLD_CHAIN_SHIPPING_SURCHARGE = 7;
+
 /**
  * Kühlversand ist für Plug&Play und fertig gemischte Nasensprays verpflichtend.
  * Neben dem persistierten Flag schützt die Rückfallerkennung Bestellungen aus
@@ -144,12 +146,15 @@ export function calculateAuthoritativeShipping(input: {
   country: string;
   items: ShippingCheckoutItem[];
   promoDescription?: string | null;
+  /** Explicit operator request for an otherwise non-cold manual WaWi shipment. */
+  coldChainRequested?: boolean;
 }): number {
   const region = resolveShippingRegion(input.country);
   const { freeShipping } = parsePromoMetadata(input.promoDescription);
   if (freeShipping.some((entry) => entry.toLowerCase() === region)) return 0;
   const base = region === "de" ? 8 : region === "ch" ? 18 : 15;
-  return base + (input.items.some(requiresColdChainShipping) ? 7 : 0);
+  const hasColdChainService = input.coldChainRequested === true || input.items.some(requiresColdChainShipping);
+  return base + (hasColdChainService ? COLD_CHAIN_SHIPPING_SURCHARGE : 0);
 }
 
 function productMatchesRestriction(productId: string, restriction: string): boolean {

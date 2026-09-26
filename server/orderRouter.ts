@@ -143,6 +143,9 @@ const createOrderSchema = z.object({
   discountBreakdown: z.array(discountBreakdownEntrySchema).max(30).optional(),
   shipping: z.number(),
   shippingCountry: z.string(),
+  // Nur für authentifizierte WaWi-Aufträge: optionaler Kühlversand für
+  // temperaturempfindliche Sendungen ohne Plug&Play- oder Nasenspray-Pflicht.
+  coldShippingRequested: z.boolean().optional(),
   total: z.number(),
   paymentMethod: z.enum(["bunq", "creditCard", "wise", "SEPA", "Bar", "Kreditkarte", "PayPal", "Crypto", "Guthaben", "Sonstige"]),
   date: z.string(),
@@ -219,6 +222,8 @@ export const orderRouter = router({
         throw new Error("WAWI_ANMELDUNG_ERFORDERLICH: Bitte erneut anmelden, bevor ein manueller Verkauf angelegt wird.");
       }
       const isAuthenticatedWawiManualSale = isRequestedWawiManualSale && Boolean(ctx.user);
+      const coldShippingRequestedByWawi = isAuthenticatedWawiManualSale
+        && input.coldShippingRequested === true;
       // Der Shop-Checkout versendet wie bisher automatisch. Im manuellen
       // WaWi-Workflow ist Versand an den Kunden eine bewusste Einzelfreigabe;
       // der Browserwert ist erst nach erfolgreicher WaWi-Authentifizierung
@@ -256,10 +261,17 @@ export const orderRouter = router({
       // mitgesendete Betrag wird ausschließlich dazu genutzt, die übrigen
       // bewusst gewährten Rabattanteile unverändert zu isolieren.
 
-        // Kühlpflichtige Artikel dürfen niemals mit der normalen DHL-Gebühr
-        // durchrutschen. Ein bereits gewährter Gratisversand (0 €) bleibt dabei
-        // ausdrücklich erhalten; alle normalen Versandbeträge werden mindestens
-        // auf die serverseitig berechnete Kühlversandpauschale angehoben.
+        // Kühlversand darf nur einmal pro Auftrag berechnet werden. Plug&Play
+        // und fertig gemischte Nasensprays aktivieren ihn verpflichtend; ein
+        // authentifizierter WaWi-Auftrag kann ihn für andere Sendungen bewusst
+        // ergänzen. Ein bereits gewährter Gratisversand (0 €) bleibt erhalten.
+        const hasColdShippingService = coldShippingRequestedByWawi
+          || input.items.some(requiresColdChainShipping);
+        if (hasColdShippingService) {
+          (input as any)._coldShippingNote = coldShippingRequestedByWawi
+            ? "Kühlversand aktiv (manuell gewählt oder Plug&Play)"
+            : "Kühlversand aktiv (pflichtig durch Plug&Play/Nasenspray)";
+        }
         const serverBaseShipping = calculateAuthoritativeShipping({
           country: input.customer.country,
           items: [],
@@ -267,11 +279,12 @@ export const orderRouter = router({
         const serverColdShipping = calculateAuthoritativeShipping({
           country: input.customer.country,
           items: input.items,
+          coldChainRequested: coldShippingRequestedByWawi,
         });
         if (
-          input.items.some(requiresColdChainShipping)
+          hasColdShippingService
           && input.shipping >= serverBaseShipping
-          && input.shipping < serverColdShipping
+          && Math.abs(input.shipping - serverColdShipping) > 0.02
         ) {
           input.shipping = serverColdShipping;
           input.shippingCountry = resolveShippingRegion(input.customer.country);
@@ -384,6 +397,7 @@ export const orderRouter = router({
           country: input.customer.country,
           items: input.items,
           promoDescription: promoDefinition?.description,
+          coldChainRequested: coldShippingRequestedByWawi,
         });
         input.shippingCountry = resolveShippingRegion(input.customer.country);
         const authoritative = calculateAuthoritativeKwkOrder({
@@ -1022,6 +1036,7 @@ export const orderRouter = router({
           input.internalNote,
           (input as any)._stockOverrideNote,
           (input as any)._substitutionNotes,
+          (input as any)._coldShippingNote,
         ]),
       });
 
