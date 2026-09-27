@@ -12,6 +12,8 @@
    - Anfangsbestand, Meldebestand, Einkaufspreis, Verkaufspreis, Notiz und optionale SKU.
    - Die SKU wird bei leerem Feld serverseitig erzeugt.
    - Bestand bleibt ausschließlich in `articles.stock` und wird im bestehenden `stock_history` geführt.
+   - Über `Bearbeiten` bleiben alle angelegten Werte nachträglich veränderbar: Name, SKU, Gruppe, Variante, Sortierung, Bestand, Meldebestand, Preise, Steuer, Kurztext, Notiz, Aktivität sowie die späteren Reward-/Shop-Vormerkungen.
+   - Hauptfoto und bis zu acht Galerie-Fotos können direkt hochgeladen werden (JPG/PNG/WebP, jeweils maximal 3 MB) oder als HTTPS-URL gepflegt werden. Die Originaldatei wird unverändert als Bildreferenz im Goodie-Artikel gespeichert; ein Bildwechsel löscht keine bestehende Goodie-Ausgabehistorie.
 
 2. **Packen → Goodies für diese Bestellung**
    - Nur aktive Goodies mit Bestand werden gezeigt.
@@ -28,7 +30,7 @@
 
 | Tabelle | Zweck |
 |---|---|
-| `goodie_catalog` | Ergänzt einen bestehenden Artikel um Goodie-spezifische Metadaten: optionale Gruppe/Anzeige, Aktivität, spätere Reward-/Shop-Vormerkung und Sortierung. |
+| `goodie_catalog` | Ergänzt einen bestehenden Artikel um Goodie-spezifische Metadaten: optionale Gruppe/Anzeige, Aktivität, spätere Reward-/Shop-Vormerkung und Sortierung. Inaktive Goodies bleiben zum Reaktivieren bearbeitbar, erscheinen aber nie im Packpicker. |
 | `goodie_assignments` | Revisionssicherer Einzelbeleg je Ausgabe mit Order-, Kunden- und Artikelbezug, Snapshots, Quelle, Benutzer, Zeit, `request_id` und Korrekturfeldern. |
 | `goodie_reward_config` | Deaktivierte Vorbereitung für die spätere Kundenwahl; `enabled = false`, keine automatische Schwelle und keine Checkout-Anzeige. |
 

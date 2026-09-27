@@ -4,6 +4,10 @@ import { getPool } from "./db.js";
 
 const optionalLabel = z.string().trim().max(160).optional().transform((value) => value || undefined);
 const optionalGroup = z.string().trim().max(80).optional().transform((value) => value || undefined);
+const imageReference = z.string().trim().max(7_000_000).refine(
+  (value) => /^(https?:\/\/|data:image\/(jpeg|png|webp);base64,)/i.test(value),
+  "Nur HTTPS-Bild-URLs oder JPG/PNG/WebP-Dateien sind erlaubt",
+);
 
 function actor(ctx: { user?: { name?: string | null; username?: string | null } | null }): string {
   return ctx.user?.name || ctx.user?.username || "admin";
@@ -47,8 +51,8 @@ export const goodieRouter = router({
         a.short_description
       FROM goodie_catalog gc
       JOIN articles a ON a.id = gc.article_id
-      WHERE gc.is_active = TRUE AND a.is_active = 1
-      ORDER BY COALESCE(NULLIF(LOWER(gc.group_label), ''), 'zzzz'), gc.sort_order, LOWER(a.name)
+      WHERE a.is_active = 1
+      ORDER BY gc.is_active DESC, COALESCE(NULLIF(LOWER(gc.group_label), ''), 'zzzz'), gc.sort_order, LOWER(a.name)
     `);
     return result.rows.map((row) => ({
       catalogId: Number(row.catalog_id),
@@ -127,30 +131,103 @@ export const goodieRouter = router({
 
   update: productManagerProcedure.input(z.object({
     articleId: z.number().int().positive(),
+    name: z.string().trim().min(2).max(200).optional(),
+    sku: z.string().trim().min(2).max(50).optional(),
     groupLabel: optionalGroup.nullable().optional(),
     displayLabel: optionalLabel.nullable().optional(),
+    purchasePrice: z.number().min(0).max(9999).optional(),
+    sellingPrice: z.number().min(0).max(9999).optional(),
+    taxRate: z.number().min(0).max(100).optional(),
+    stock: z.number().int().min(0).max(999999).optional(),
+    minStock: z.number().int().min(0).max(999999).optional(),
+    notes: z.string().trim().max(5000).nullable().optional(),
+    shortDescription: z.string().trim().max(1000).nullable().optional(),
+    imageUrl: imageReference.nullable().optional(),
+    galleryImages: z.array(imageReference).max(8).nullable().optional(),
     rewardEligible: z.boolean().optional(),
     shopSellable: z.boolean().optional(),
     isActive: z.boolean().optional(),
     sortOrder: z.number().int().min(0).max(9999).optional(),
-  })).mutation(async ({ input }) => {
+  })).mutation(async ({ input, ctx }) => {
     const pool = await getPool();
     if (!pool) throw new Error("Datenbank nicht verfügbar");
-    const fields: string[] = [];
-    const values: unknown[] = [];
-    const set = (column: string, value: unknown) => { values.push(value); fields.push(`${column} = $${values.length}`); };
-    if (input.groupLabel !== undefined) set("group_label", input.groupLabel || null);
-    if (input.displayLabel !== undefined) set("display_label", input.displayLabel || null);
-    if (input.rewardEligible !== undefined) set("reward_eligible", input.rewardEligible);
-    if (input.shopSellable !== undefined) set("shop_sellable", input.shopSellable);
-    if (input.isActive !== undefined) set("is_active", input.isActive);
-    if (input.sortOrder !== undefined) set("sort_order", input.sortOrder);
-    if (fields.length === 0) return { success: true };
-    fields.push("updated_at = NOW()");
-    values.push(input.articleId);
-    const result = await pool.query(`UPDATE goodie_catalog SET ${fields.join(", ")} WHERE article_id = $${values.length}`, values);
-    if ((result.rowCount || 0) !== 1) throw new Error("Goodie nicht gefunden");
-    return { success: true };
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await client.query(`
+        SELECT a.id, a.stock
+        FROM goodie_catalog gc
+        JOIN articles a ON a.id = gc.article_id
+        WHERE gc.article_id = $1
+        FOR UPDATE OF gc, a
+      `, [input.articleId]);
+      if (existing.rows.length !== 1) throw new Error("Goodie nicht gefunden");
+
+      const articleFields: string[] = [];
+      const articleValues: unknown[] = [];
+      const setArticle = (column: string, value: unknown) => {
+        articleValues.push(value);
+        articleFields.push(`${column} = $${articleValues.length}`);
+      };
+      if (input.name !== undefined) setArticle("name", input.name);
+      if (input.sku !== undefined) setArticle("sku", input.sku);
+      if (input.purchasePrice !== undefined) setArticle("purchase_price", input.purchasePrice.toFixed(2));
+      if (input.sellingPrice !== undefined) setArticle("selling_price", input.sellingPrice.toFixed(2));
+      if (input.taxRate !== undefined) setArticle("tax_rate", input.taxRate.toFixed(2));
+      if (input.minStock !== undefined) setArticle("min_stock", input.minStock);
+      if (input.notes !== undefined) setArticle("notes", input.notes || null);
+      if (input.shortDescription !== undefined) setArticle("short_description", input.shortDescription || null);
+      // A Goodie has one primary image. Reuse it as the standard image so a
+      // later merchandise profile has a complete visual source without copying files.
+      if (input.imageUrl !== undefined) {
+        setArticle("mockup_image_url", input.imageUrl || null);
+        setArticle("label_image_url", input.imageUrl || null);
+      }
+      if (input.galleryImages !== undefined) setArticle("gallery_images", JSON.stringify(input.galleryImages || []));
+      if (articleFields.length > 0) {
+        articleFields.push("updated_at = NOW()");
+        articleValues.push(input.articleId);
+        await client.query(`UPDATE articles SET ${articleFields.join(", ")} WHERE id = $${articleValues.length}`, articleValues);
+      }
+
+      const catalogFields: string[] = [];
+      const catalogValues: unknown[] = [];
+      const setCatalog = (column: string, value: unknown) => {
+        catalogValues.push(value);
+        catalogFields.push(`${column} = $${catalogValues.length}`);
+      };
+      if (input.groupLabel !== undefined) setCatalog("group_label", input.groupLabel || null);
+      if (input.displayLabel !== undefined) setCatalog("display_label", input.displayLabel || null);
+      if (input.rewardEligible !== undefined) setCatalog("reward_eligible", input.rewardEligible);
+      if (input.shopSellable !== undefined) setCatalog("shop_sellable", input.shopSellable);
+      if (input.isActive !== undefined) setCatalog("is_active", input.isActive);
+      if (input.sortOrder !== undefined) setCatalog("sort_order", input.sortOrder);
+      if (catalogFields.length > 0) {
+        catalogFields.push("updated_at = NOW()");
+        catalogValues.push(input.articleId);
+        await client.query(`UPDATE goodie_catalog SET ${catalogFields.join(", ")} WHERE article_id = $${catalogValues.length}`, catalogValues);
+      }
+
+      if (input.stock !== undefined) {
+        const previousStock = Number(existing.rows[0].stock);
+        if (previousStock !== input.stock) {
+          const change = input.stock - previousStock;
+          await client.query(`UPDATE articles SET stock = $1, updated_at = NOW() WHERE id = $2`, [input.stock, input.articleId]);
+          await client.query(`
+            INSERT INTO stock_history (
+              article_id, change_type, quantity_before, quantity_change, quantity_after, reason, user_name, created_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+          `, [input.articleId, change > 0 ? "wareneingang" : "korrektur", previousStock, change, input.stock, "Goodie-Bestandsänderung im Bearbeiten-Dialog", actor(ctx)]);
+        }
+      }
+      await client.query("COMMIT");
+      return { success: true };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }),
 
   assignmentsForOrder: goodieProcedure.input(z.object({ orderId: z.string().trim().min(1).max(32) })).query(async ({ input }) => {
