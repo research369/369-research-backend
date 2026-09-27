@@ -1,7 +1,7 @@
 import { desc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { router, adminProcedure } from "./trpc.js";
-import { getDb } from "./db.js";
+import { getDb, getPool } from "./db.js";
 import { customers, duplicateCheckRuns, duplicateFindings, orderItems, orders, shopSettings } from "../drizzle/schema.js";
 import { runDuplicateCheck } from "./customerIntegrityService.js";
 
@@ -62,11 +62,28 @@ export const customerIntegrityRouter = router({
     const historyItems = historyOrderIds.length > 0
       ? await db.select().from(orderItems).where(inArray(orderItems.orderId, historyOrderIds))
       : [];
+    const pool = await getPool();
+    const historyGoodies = pool && historyOrderIds.length > 0
+      ? await pool.query(`
+          SELECT order_id, article_name_snapshot, display_label_snapshot, group_label_snapshot,
+                 quantity, assigned_at
+          FROM goodie_assignments
+          WHERE customer_id = $1 AND reversed_at IS NULL AND order_id = ANY($2::varchar[])
+          ORDER BY assigned_at ASC, id ASC
+        `, [customer.id, historyOrderIds])
+      : { rows: [] as Array<Record<string, unknown>> };
     const itemsByOrderId = new Map<string, typeof historyItems>();
     for (const item of historyItems) {
       const existing = itemsByOrderId.get(item.orderId) || [];
       existing.push(item);
       itemsByOrderId.set(item.orderId, existing);
+    }
+    const goodiesByOrderId = new Map<string, Array<Record<string, unknown>>>();
+    for (const goodie of historyGoodies.rows) {
+      const orderId = String(goodie.order_id);
+      const existing = goodiesByOrderId.get(orderId) || [];
+      existing.push(goodie);
+      goodiesByOrderId.set(orderId, existing);
     }
     return {
       customerId: customer.id,
@@ -89,6 +106,13 @@ export const customerIntegrityRouter = router({
           isNasalSpray: item.isNasalSpray,
           isNasalDiySet: item.isNasalDiySet,
           isPlugPlay: item.isPlugPlay,
+        })),
+        goodies: (goodiesByOrderId.get(order.orderId) || []).map((goodie) => ({
+          name: String(goodie.article_name_snapshot),
+          displayLabel: goodie.display_label_snapshot ? String(goodie.display_label_snapshot) : null,
+          groupLabel: goodie.group_label_snapshot ? String(goodie.group_label_snapshot) : null,
+          quantity: Number(goodie.quantity),
+          assignedAt: goodie.assigned_at,
         })),
       })),
     };

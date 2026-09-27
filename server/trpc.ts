@@ -56,6 +56,20 @@ const isProductManager = middleware(({ ctx, next }) => {
 
 export const productManagerProcedure = t.procedure.use(isProductManager);
 
+// Goodies: product managers maintain the catalog while packing users assign
+// items to orders. Neither role receives unrelated financial or user access.
+const isGoodieOperator = middleware(({ ctx, next }) => {
+  if (!ctx.user) {
+    throw new TRPCError({ code: "UNAUTHORIZED", message: "Bitte anmelden" });
+  }
+  if (!["admin", "product_manager", "packing"].includes(ctx.user.role)) {
+    throw new TRPCError({ code: "FORBIDDEN", message: "Keine Berechtigung für Goodies" });
+  }
+  return next({ ctx: { ...ctx, user: ctx.user } });
+});
+
+export const goodieProcedure = t.procedure.use(isGoodieOperator);
+
 // Packing: role = "admin" OR role = "packing"
 // Zugriff auf: Bestellungen, Labels, Kunden, Artikel (lesen+Bestand), Rechnungen, Eingang
 // KEIN Zugriff auf: Artikel anlegen, Partner anlegen, Benutzer anlegen

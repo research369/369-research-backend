@@ -34,6 +34,7 @@ import { ensureShipmentLabelOverrideConfig } from "./shipmentLabelOverrideConfig
 import { ensurePartnerAddressRequestSchema } from "./partnerAddressRequestSchema.js";
 import { qrRedirectRouter } from "./qrRedirectRouter.js";
 import { ensurePeps4petsCheckoutSchema, isPeps4petsCheckoutSchemaReady } from "./peps4petsCheckoutSchema.js";
+import { ensureGoodieSchema } from "./goodieSchema.js";
 
 const app = express();
 
@@ -310,6 +311,14 @@ async function start() {
     await ensureCustomerDossierSchema();
   } catch (err) {
     console.warn("[Server] Customer dossier schema migration failed:", err);
+  }
+
+  // Goodies: additive inventory catalog and immutable packing assignments.
+  // Checkout reward selection remains disabled until explicitly configured and tested.
+  try {
+    await ensureGoodieSchema();
+  } catch (err) {
+    console.warn("[Server] Goodie schema migration failed:", err);
   }
 
   // Partnerportal: revisionssichere Adressanträge mit WaWi-Prüfung.
