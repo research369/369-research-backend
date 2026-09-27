@@ -46,6 +46,15 @@ import { shouldSendOrderConfirmation } from "./orderConfirmationPolicy.js";
 import { resolveSubstitutionProductFamily } from "./orderItemIdentity.js";
 import { serializeKwkFraudFlags } from "./kwkReferralPayload.js";
 import { getAuthenticatedPartnerFromRequest } from "./partnerAuth.js";
+import {
+  calculateProgramDiscount,
+  getPartnerProgram,
+  isDiscountAllowedForProgram,
+  isRepeatCodeUseAllowed,
+  resolveActivePartnerCode,
+  type PartnerProgram,
+  type ResolvedPartnerCode,
+} from "./partnerProgramService.js";
 import { isFinanciallyPaidStatus } from "./paidFinancialStatus.js";
 
 /**
@@ -208,6 +217,48 @@ export const orderRouter = router({
         && (configuredGlobalDiscount.stackWithPromotionCodes || !input.discountCode?.trim())
         ? configuredGlobalDiscount
         : null;
+
+      // A public Creator/Partner code is a server-authoritative commercial term.
+      // Its customer discount is never accepted from the browser. Creator codes
+      // are reusable by policy; exact terms are snapshotted with the new order.
+      let resolvedPublicPartnerCode: ResolvedPartnerCode | null = null;
+      if (input.partnerCode?.trim() && !input.partnerNumber?.trim()) {
+        resolvedPublicPartnerCode = await resolveActivePartnerCode(input.partnerCode);
+        if (!resolvedPublicPartnerCode) throw new Error("PARTNER_CODE_UNGUELTIG");
+        input.partnerCode = resolvedPublicPartnerCode.partnerCode;
+        const authoritativeGlobalDiscount = activeGlobalDiscount
+          ? calculateAutomaticGlobalDiscount(input.subtotal, activeGlobalDiscount.percentage)
+          : 0;
+        let discountEligible = isDiscountAllowedForProgram(
+          resolvedPublicPartnerCode.program,
+          input.customer.email,
+          resolvedPublicPartnerCode.partnerEmail,
+        );
+        const normalizedCustomerEmail = input.customer.email?.trim().toLowerCase() || "";
+        if (discountEligible && normalizedCustomerEmail && !isRepeatCodeUseAllowed(resolvedPublicPartnerCode.program)) {
+          const previousPaidOrder = await db.select({ orderId: orders.orderId }).from(orders)
+            .where(and(
+              eq(orders.partnerCode, resolvedPublicPartnerCode.partnerCode),
+              eq(orders.email, normalizedCustomerEmail),
+              sql`${orders.status} IN ('bezahlt', 'gepackt', 'versendet', 'zugestellt', 'abgeholt')`,
+              sql`${orders.paidAt} IS NOT NULL`,
+            ))
+            .limit(1);
+          discountEligible = previousPaidOrder.length === 0;
+        }
+        const authoritativePartnerDiscount = calculateProgramDiscount(
+          input.subtotal,
+          authoritativeGlobalDiscount,
+          discountEligible ? resolvedPublicPartnerCode.customerDiscountPercent : 0,
+        );
+        input.partnerDiscount = authoritativePartnerDiscount;
+        // Browser requests from the shop have no manual rebate channel. WaWi keeps
+        // its authenticated manual-price workflow unchanged.
+        if (input.orderSource !== "wawi_manual") {
+          input.discount = roundMoney(authoritativeGlobalDiscount + authoritativePartnerDiscount);
+          input.total = roundMoney(input.subtotal - input.discount + input.shipping);
+        }
+      }
 
       // Im öffentlichen Shop werden Preise für KWK und den aktiven Dauerrabatt
       // zwingend aus dem aktuellen Katalog rekonstruiert. Eine WaWi-Anlage ist
@@ -447,7 +498,9 @@ export const orderRouter = router({
       // aus der aktiven DB-Konfiguration neu aufgebaut und ist damit in jeder
       // Bestellung sauber von Aktionscodes, Partnern und Guthaben getrennt.
       const submittedDiscountBreakdown = (input.discountBreakdown || [])
-        .filter((entry) => entry.amount > 0 && entry.source !== "automatic_global_percent")
+        .filter((entry) => entry.amount > 0
+          && entry.source !== "automatic_global_percent"
+          && !(resolvedPublicPartnerCode && entry.source === "partner_self_discount"))
         .map((entry) => ({
           ...entry,
           amount: roundMoney(entry.amount),
@@ -459,6 +512,18 @@ export const orderRouter = router({
           label: activeGlobalDiscount.labelDe,
           amount: automaticGlobalDiscountAmount,
           percentage: activeGlobalDiscount.percentage,
+        });
+      }
+      const authoritativePublicPartnerDiscount = roundMoney(input.partnerDiscount || 0);
+      if (resolvedPublicPartnerCode && authoritativePublicPartnerDiscount > 0) {
+        submittedDiscountBreakdown.push({
+          source: "partner_self_discount" as const,
+          label: resolvedPublicPartnerCode.program.key === "creator"
+            ? `Creator-Code ${resolvedPublicPartnerCode.partnerCode} (${resolvedPublicPartnerCode.customerDiscountPercent}%)`
+            : `Partner-Code ${resolvedPublicPartnerCode.partnerCode} (${resolvedPublicPartnerCode.customerDiscountPercent}%)`,
+          amount: authoritativePublicPartnerDiscount,
+          percentage: resolvedPublicPartnerCode.customerDiscountPercent,
+          code: resolvedPublicPartnerCode.partnerCode,
         });
       }
       const submittedDiscountBreakdownTotal = roundMoney(
@@ -635,9 +700,13 @@ export const orderRouter = router({
       // ── Partner logic: validate attribution and financial authorization ──
       let partnerCode = input.partnerCode || null;
       let partnerNumber = input.partnerNumber || null;
-      let partnerDiscountAmount = input.partnerDiscount || 0;
+      let partnerDiscountAmount = roundMoney(input.partnerDiscount || 0);
       let partnerCommissionAmount = 0;
       let creditUsed = input.creditUsed || 0;
+      let partnerSourceId: number | null = resolvedPublicPartnerCode?.partnerId || null;
+      let partnerProgram: PartnerProgram | null = resolvedPublicPartnerCode?.program || null;
+      let partnerCommissionPercentSnapshot: number | null = resolvedPublicPartnerCode?.commissionPercent || null;
+      let partnerCommissionBaseSnapshot: number | null = null;
 
       // A partner number identifies a self-order and a credit redemption moves
       // money. Neither may be authorized by a publicly known partner number.
@@ -661,24 +730,23 @@ export const orderRouter = router({
       // erst nach bestätigtem Zahlungseingang im zentralen Partnerguthaben-Service.
       const resolvePartnerForOrder = async (partner: { id: number; code: string }, reason: string) => {
         if (!partnerCode) partnerCode = partner.code;
+        partnerSourceId = partner.id;
         console.log(`[Orders] Partner zugeordnet: ${partner.code} (${reason}); Guthaben wird erst nach Zahlung gebucht.`);
       };
 
       // Case 1: Partner CODE was provided (customer or partner entered the code)
-      if (partnerCode) {
-        const { and: andOp } = await import("drizzle-orm");
-        const [partner] = await db.select().from(partners)
-          .where(andOp(eq(partners.code, partnerCode.toUpperCase()), eq(partners.isActive, 1)))
-          .limit(1);
-
-        if (partner) {
-          await resolvePartnerForOrder(partner, "Code");
-        }
+      if (partnerCode && resolvedPublicPartnerCode) {
+        partnerCode = resolvedPublicPartnerCode.partnerCode;
+        partnerSourceId = resolvedPublicPartnerCode.partnerId;
+        partnerProgram = resolvedPublicPartnerCode.program;
+        partnerCommissionPercentSnapshot = resolvedPublicPartnerCode.commissionPercent;
+        await resolvePartnerForOrder({ id: resolvedPublicPartnerCode.partnerId, code: resolvedPublicPartnerCode.partnerCode }, "Code");
       }
 
-      // Case 2: Partner NUMBER was provided but no code – partner ordering for themselves
-      // Also book commission for the partner (they get both discount + commission)
-      if (partnerNumber && !partnerCode) {
+      // Case 2: authenticated partner self-order. The authentication helper has
+      // intentionally populated partnerCode above, so this must be keyed by the
+      // verified partner number rather than the absence of a code.
+      if (partnerNumber && authenticatedPartner) {
         const { and: andOp } = await import("drizzle-orm");
         const [partner] = await db.select().from(partners)
           .where(andOp(eq(partners.partnerNumber, partnerNumber), eq(partners.isActive, 1)))
@@ -686,7 +754,20 @@ export const orderRouter = router({
 
         if (partner) {
           await resolvePartnerForOrder(partner, "Eigenbestellung");
+          partnerProgram = await getPartnerProgram(partner.id);
+          partnerCommissionPercentSnapshot = Number(partner.commissionPercent || 0);
         }
+      }
+
+      if (partnerProgram) {
+        // Both Partner- and KWK-credit are payment methods, not discounts. The
+        // commission base therefore restores them after the client total has
+        // combined all discount and payment reductions into `input.discount`.
+        partnerCommissionBaseSnapshot = roundMoney(Math.max(
+          0,
+          input.subtotal - input.discount + creditUsed + (input.kwkCreditUsed || 0),
+        ));
+        partnerCommissionAmount = roundMoney(partnerCommissionBaseSnapshot * (partnerCommissionPercentSnapshot || 0) / 100);
       }
 
       // Ein Guthabeneinsatz muss als eigener Wert vorliegen. Er wird erst nach
@@ -1019,9 +1100,17 @@ export const orderRouter = router({
         status: "offen",
         orderDate: new Date(input.date),
         partnerCode: partnerCode ? partnerCode.toUpperCase() : null,
+        partnerSourceId,
         partnerNumber: partnerNumber || null,
         partnerDiscount: partnerDiscountAmount.toFixed(2),
         partnerCommission: partnerCommissionAmount.toFixed(2),
+        partnerProgramSnapshot: partnerProgram?.key || null,
+        partnerSettlementMethodSnapshot: partnerProgram?.settlementMethod || null,
+        partnerCommissionPolicySnapshot: partnerProgram?.commissionPolicy || null,
+        partnerCustomerDiscountPolicySnapshot: partnerProgram?.customerDiscountPolicy || null,
+        partnerCommissionPercentSnapshot: partnerCommissionPercentSnapshot?.toFixed(2) || null,
+        partnerCustomerDiscountPercentSnapshot: resolvedPublicPartnerCode?.customerDiscountPercent.toFixed(2) || null,
+        partnerCommissionBaseSnapshot: partnerCommissionBaseSnapshot?.toFixed(2) || null,
         creditUsed: creditUsed.toFixed(2),
         kwkCreditUsed: (input.kwkCreditUsed || 0).toFixed(2),
         kwkCreditRequested: (input.kwkCreditUsed || 0).toFixed(2),

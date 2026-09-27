@@ -4,9 +4,10 @@
  * Business Logic:
  * - Partners have a unique CODE (for customers) and a unique PARTNER NUMBER (for themselves)
  * - Customer enters CODE at checkout → gets discount % on product subtotal (NOT shipping)
- * - commissionType "einmalig": partner gets one-time cash payout on FIRST order only
- * - commissionType "dauerhaft": partner gets ongoing shop credit (Guthaben) on EVERY order
- * - Dauerhaft-partners can redeem credit at checkout via login
+ * - Program policies are data-driven: Creator earns a payout on every paid code order;
+ *   Partner retains the historical first-order credit policy; Eigennutzer is credit-only.
+ * - Each order snapshots its program conditions, so future configuration changes never
+ *   alter historical settlement rights.
  * - All transactions are tracked for transparent accounting
  */
 
@@ -26,6 +27,15 @@ import {
   PARTNER_COOKIE_NAME,
   PARTNER_TOKEN_EXPIRY,
 } from "./partnerAuth.js";
+import {
+  canRedeemShopCredit,
+  getPartnerProgram,
+  isDiscountAllowedForProgram,
+  isRepeatCodeUseAllowed,
+  replacePartnerCodes,
+  resolveActivePartnerCode,
+  splitPartnerCodes,
+} from "./partnerProgramService.js";
 // ─── Partner Auth Helpers ─────────────────────────────────────────
 // Middleware for partner-authenticated procedures
 const isPartner = middleware(async ({ ctx, next }) => {
@@ -297,6 +307,7 @@ export const partnerRouter = router({
       commissionPercent: z.number().min(0).max(100),
       customerDiscountPercent: z.number().min(0).max(100),
       commissionType: z.enum(["einmalig", "dauerhaft"]).optional(),
+      programKey: z.enum(["creator", "partner", "self_user"]).optional(),
       password: z.string().min(6).optional(),
       notes: z.string().optional(),
       street: z.string().optional(),
@@ -309,9 +320,15 @@ export const partnerRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
-      // Check uniqueness of code
-      const existingCode = await db.select().from(partners).where(eq(partners.code, input.code.toUpperCase())).limit(1);
-      if (existingCode.length > 0) throw new Error(`Code "${input.code}" ist bereits vergeben`);
+      const normalizedCodes = splitPartnerCodes(input.code);
+      if (normalizedCodes.length === 0) throw new Error("Mindestens ein Partnercode ist erforderlich");
+      const pool = await getPool();
+      if (!pool) throw new Error("Database not available");
+      const duplicateCode = await pool.query(
+        "SELECT code_normalized FROM partner_codes WHERE code_normalized = ANY($1::varchar[])",
+        [normalizedCodes],
+      );
+      if (duplicateCode.rows.length > 0) throw new Error(`Code "${duplicateCode.rows[0].code_normalized}" ist bereits vergeben`);
 
       // Check uniqueness of partner number
       const existingPN = await db.select().from(partners).where(eq(partners.partnerNumber, input.partnerNumber)).limit(1);
@@ -327,7 +344,7 @@ export const partnerRouter = router({
         email: input.email || null,
         phone: input.phone || null,
         company: input.company || null,
-        code: input.code.toUpperCase(),
+        code: normalizedCodes.join(", "),
         partnerNumber: input.partnerNumber,
         street: input.street || null,
         houseNumber: input.houseNumber || null,
@@ -337,12 +354,14 @@ export const partnerRouter = router({
         commissionPercent: input.commissionPercent.toFixed(2),
         customerDiscountPercent: input.customerDiscountPercent.toFixed(2),
         commissionType: input.commissionType || "dauerhaft",
+        programKey: input.programKey || (input.commissionType === "einmalig" ? "creator" : "partner"),
         creditBalance: "0.00",
         passwordHash,
         notes: input.notes || null,
       }).returning();
 
-      console.log(`[Partners] Created partner: ${input.name} (Code: ${input.code}, Nr: ${input.partnerNumber}, Type: ${input.commissionType || "dauerhaft"})`);
+      await replacePartnerCodes(newPartner.id, normalizedCodes.join(", "));
+      console.log(`[Partners] Created partner: ${input.name} (Code: ${normalizedCodes.join(", ")}, Nr: ${input.partnerNumber}, Program: ${newPartner.programKey})`);
       return { ...newPartner, passwordHash: undefined };
     }),
 
@@ -358,6 +377,7 @@ export const partnerRouter = router({
       commissionPercent: z.number().min(0).max(100).optional(),
       customerDiscountPercent: z.number().min(0).max(100).optional(),
       commissionType: z.enum(["einmalig", "dauerhaft"]).optional(),
+      programKey: z.enum(["creator", "partner", "self_user"]).optional(),
       isActive: z.number().min(0).max(1).optional(),
       notes: z.string().optional(),
       street: z.string().optional(),
@@ -372,30 +392,27 @@ export const partnerRouter = router({
 
       // Check for code uniqueness if code is being changed
       if (input.code !== undefined) {
-        const normalizedCode = input.code.toUpperCase().trim();
-        // Check each code in the comma-separated list for duplicates
-        const codeParts = normalizedCode.split(",").map(c => c.trim()).filter(Boolean);
-        for (const codePart of codeParts) {
-          const existing = await db.select({ id: partners.id }).from(partners)
-            .where(and(
-              sql`UPPER(${partners.code}) LIKE ${'%' + codePart + '%'}`,
-              sql`${partners.id} != ${input.id}`
-            ));
-          if (existing.length > 0) {
-            throw new Error(`Code "${codePart}" ist bereits vergeben`);
-          }
-        }
+        const codeParts = splitPartnerCodes(input.code);
+        if (codeParts.length === 0) throw new Error("Mindestens ein Partnercode ist erforderlich");
+        const pool = await getPool();
+        if (!pool) throw new Error("Database not available");
+        const duplicateCode = await pool.query(
+          "SELECT code_normalized FROM partner_codes WHERE partner_id <> $1 AND code_normalized = ANY($2::varchar[])",
+          [input.id, codeParts],
+        );
+        if (duplicateCode.rows.length > 0) throw new Error(`Code "${duplicateCode.rows[0].code_normalized}" ist bereits vergeben`);
       }
 
       const updateData: Record<string, any> = { updatedAt: new Date() };
       if (input.name !== undefined) updateData.name = input.name;
-      if (input.code !== undefined) updateData.code = input.code.toUpperCase().trim();
+      if (input.code !== undefined) updateData.code = splitPartnerCodes(input.code).join(", ");
       if (input.email !== undefined) updateData.email = input.email || null;
       if (input.phone !== undefined) updateData.phone = input.phone || null;
       if (input.company !== undefined) updateData.company = input.company || null;
       if (input.commissionPercent !== undefined) updateData.commissionPercent = input.commissionPercent.toFixed(2);
       if (input.customerDiscountPercent !== undefined) updateData.customerDiscountPercent = input.customerDiscountPercent.toFixed(2);
       if (input.commissionType !== undefined) updateData.commissionType = input.commissionType;
+      if (input.programKey !== undefined) updateData.programKey = input.programKey;
       if (input.isActive !== undefined) updateData.isActive = input.isActive;
       if (input.notes !== undefined) updateData.notes = input.notes || null;
       if (input.street !== undefined) updateData.street = input.street || null;
@@ -405,6 +422,7 @@ export const partnerRouter = router({
       if (input.country !== undefined) updateData.country = input.country || null;
 
       await db.update(partners).set(updateData).where(eq(partners.id, input.id));
+      if (input.code !== undefined) await replacePartnerCodes(input.id, updateData.code);
       return { success: true };
     }),
 
@@ -770,60 +788,35 @@ export const partnerRouter = router({
   // ─── PUBLIC: Checkout integration ──────────────────────────────
 
   // Validate a partner code (public – called from checkout)
-  // Business rules:
-  // - "einmalig" (Creator): Customer gets discount ONLY on their FIRST order
-  // - "dauerhaft" (Partner): Customer gets discount ONLY on their FIRST order (partner earns commission on ALL orders)
+  // A Creator code grants its configured customer discount on every valid use.
+  // Historical Partner and Eigennutzer conditions remain separately configured.
   validateCode: publicProcedure
     .input(z.object({ code: z.string(), customerEmail: z.string().optional() }))
     .query(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
-      const [partner] = await db.select().from(partners)
-        .where(and(
-          eq(partners.code, input.code.toUpperCase()),
-          eq(partners.isActive, 1)
-        ))
-        .limit(1);
-
-      if (!partner) {
+      const resolved = await resolveActivePartnerCode(input.code);
+      if (!resolved) {
         return { valid: false, discountPercent: 0, partnerName: null, discountEligible: false, reason: "code_not_found" };
       }
 
-      // Check if customer is eligible for discount (first order only for both types)
-      let discountEligible = true;
+      let discountEligible = isDiscountAllowedForProgram(resolved.program, input.customerEmail, resolved.partnerEmail);
       let reason: string | null = null;
-      const isEigennutzer = (partner.notes || "").includes("[EIGENNUTZER]");
-
-      // Eigennutzer: Code ist auf die eigene E-Mail gesperrt
-      if (isEigennutzer && partner.email) {
-        if (!input.customerEmail) {
-          // Kein E-Mail angegeben – Code nicht zulässig (E-Mail muss eingegeben werden)
-          discountEligible = false;
-          reason = "eigennutzer_email_required";
-        } else {
-          const customerEmail = input.customerEmail.toLowerCase().trim();
-          const partnerEmail = partner.email.toLowerCase().trim();
-          if (customerEmail !== partnerEmail) {
-            // Fremde E-Mail – Code gesperrt
-            return {
-              valid: false,
-              discountPercent: 0,
-              partnerName: null,
-              commissionType: partner.commissionType,
-              discountEligible: false,
-              reason: "eigennutzer_locked",
-            };
-          }
-        }
+      if (!discountEligible) {
+        reason = resolved.program.customerDiscountPolicy === "own_email_only"
+          ? (input.customerEmail ? "eigennutzer_locked" : "eigennutzer_email_required")
+          : "program_inactive";
       }
 
-      if (input.customerEmail && discountEligible) {
+      // Creators explicitly allow unlimited valid code use. The legacy partner
+      // program retains its existing first-paid-code-order policy.
+      if (input.customerEmail && discountEligible && !isRepeatCodeUseAllowed(resolved.program)) {
         const customerEmail = input.customerEmail.toLowerCase().trim();
-        // Check for previous PAID orders from this customer using this partner code
+        // Legacy records are matched by the normalized actual code, not a comma list.
         const previousOrders = await db.select().from(orders)
           .where(and(
-            eq(orders.partnerCode, partner.code),
+            eq(orders.partnerCode, resolved.partnerCode),
             eq(orders.email, customerEmail)
           ));
         const previousPaidOrders = previousOrders.filter(o =>
@@ -832,15 +825,17 @@ export const partnerRouter = router({
         if (previousPaidOrders.length > 0) {
           discountEligible = false;
           reason = "already_used";
-          console.log(`[Partners] validateCode: Customer ${customerEmail} already has ${previousPaidOrders.length} paid orders with code ${partner.code} – discount not eligible`);
+          console.log(`[Partners] validateCode: Customer ${customerEmail} already has ${previousPaidOrders.length} paid orders with code ${resolved.partnerCode} – discount not eligible`);
         }
       }
 
       return {
         valid: true,
-        discountPercent: discountEligible ? parseFloat(partner.customerDiscountPercent) : 0,
-        partnerName: partner.name,
-        commissionType: partner.commissionType,
+        discountPercent: discountEligible ? resolved.customerDiscountPercent : 0,
+        partnerName: resolved.partnerName,
+        commissionType: resolved.program.key === "creator" ? "einmalig" : "dauerhaft",
+        programKey: resolved.program.key,
+        settlementMethod: resolved.program.settlementMethod,
         discountEligible,
         reason,
       };
@@ -944,6 +939,7 @@ export const partnerRouter = router({
           code: partner.code,
           partnerNumber: partner.partnerNumber,
           commissionType: partner.commissionType,
+          programKey: partner.programKey,
           creditBalance: parseFloat(partner.creditBalance),
           customerDiscountPercent: parseFloat(partner.customerDiscountPercent),
           address: {
@@ -986,6 +982,7 @@ export const partnerRouter = router({
         commissionPercent: parseFloat(partner.commissionPercent),
         customerDiscountPercent: parseFloat(partner.customerDiscountPercent),
         commissionType: partner.commissionType,
+        programKey: partner.programKey,
         creditBalance: parseFloat(partner.creditBalance),
         address: {
           street: partner.street || "",
@@ -1267,6 +1264,7 @@ export const partnerRouter = router({
         totalPaidOut,
         currentBalance: parseFloat(partner.creditBalance),
         commissionType: partner.commissionType,
+        programKey: partner.programKey,
         commissionPercent: parseFloat(partner.commissionPercent),
         customerDiscountPercent: parseFloat(partner.customerDiscountPercent),
       };
@@ -1278,11 +1276,14 @@ export const partnerRouter = router({
   portalMyCredit: partnerProcedure
     .query(async ({ ctx }) => {
       const partner = (ctx as any).partner;
+      const program = await getPartnerProgram(partner.id);
       return {
         creditBalance: parseFloat(partner.creditBalance),
         partnerName: partner.name,
         partnerNumber: partner.partnerNumber,
         commissionType: partner.commissionType,
+        programKey: program?.key || partner.programKey,
+        creditRedeemable: Boolean(program && canRedeemShopCredit(program)),
         address: {
           street: partner.street || "",
           houseNumber: partner.houseNumber || "",
@@ -1303,6 +1304,10 @@ export const partnerRouter = router({
       const partner = (ctx as any).partner;
       const db = await getDb();
       if (!db) throw new Error("Database not available");
+      const program = await getPartnerProgram(partner.id);
+      if (!program || !canRedeemShopCredit(program)) {
+        throw new Error("Dieses Programm führt Provisionen als Auszahlung und hat kein Shopguthaben zur Einlösung");
+      }
 
       const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1);
       if (!order || order.partnerNumber !== partner.partnerNumber) {
@@ -1339,6 +1344,10 @@ export const partnerRouter = router({
         .where(and(eq(partners.partnerNumber, input.partnerNumber), eq(partners.isActive, 1)))
         .limit(1);
       if (!partner) throw new Error("Partner nicht gefunden");
+      const program = await getPartnerProgram(partner.id);
+      if (!program || !canRedeemShopCredit(program)) {
+        throw new Error("Dieses Programm führt Provisionen als Auszahlung und hat kein Shopguthaben zur Einlösung");
+      }
 
       // Verify password
       if (!partner.passwordHash) {

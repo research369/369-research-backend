@@ -32,6 +32,7 @@ import { ensureQrCampaignSchema } from "./qrCampaignSchema.js";
 import { ensureDiscountProvenanceSchema } from "./discountProvenanceSchema.js";
 import { ensureShipmentLabelOverrideConfig } from "./shipmentLabelOverrideConfig.js";
 import { ensurePartnerAddressRequestSchema } from "./partnerAddressRequestSchema.js";
+import { ensurePartnerProgramSchema } from "./partnerProgramSchema.js";
 import { qrRedirectRouter } from "./qrRedirectRouter.js";
 import { ensurePeps4petsCheckoutSchema, isPeps4petsCheckoutSchemaReady } from "./peps4petsCheckoutSchema.js";
 import { ensureGoodieSchema } from "./goodieSchema.js";
@@ -326,6 +327,15 @@ async function start() {
     await ensurePartnerAddressRequestSchema();
   } catch (err) {
     console.warn("[Server] Partner address request schema migration failed:", err);
+  }
+
+  // Creator, Partner und Eigennutzer sind programmorientiert konfiguriert.
+  // Jede neue Partnerbestellung speichert ihre Bedingungen als unveränderlichen Snapshot.
+  try {
+    await ensurePartnerProgramSchema();
+    console.log("[Server] Partner program schema ready");
+  } catch (err) {
+    console.warn("[Server] Partner program schema migration failed:", err);
   }
 
   // Additive first-party QR campaign and order-attribution schema.

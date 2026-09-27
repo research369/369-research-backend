@@ -471,10 +471,20 @@ export const orders = pgTable("orders", {
   weightGrams: integer("weight_grams"),
 
   // Partner / Affiliate
+  partnerSourceId: integer("partner_source_id"),
   partnerCode: varchar("partner_code", { length: 50 }),
   partnerNumber: varchar("partner_number", { length: 50 }),
   partnerDiscount: decimal("partner_discount", { precision: 10, scale: 2 }).default("0"),
   partnerCommission: decimal("partner_commission", { precision: 10, scale: 2 }).default("0"),
+  // Immutable program terms for each new partner-attributed order. Existing orders
+  // deliberately remain NULL and continue on their historical settlement path.
+  partnerProgramSnapshot: varchar("partner_program_snapshot", { length: 32 }),
+  partnerSettlementMethodSnapshot: varchar("partner_settlement_method_snapshot", { length: 24 }),
+  partnerCommissionPolicySnapshot: varchar("partner_commission_policy_snapshot", { length: 40 }),
+  partnerCustomerDiscountPolicySnapshot: varchar("partner_customer_discount_policy_snapshot", { length: 40 }),
+  partnerCommissionPercentSnapshot: decimal("partner_commission_percent_snapshot", { precision: 6, scale: 2 }),
+  partnerCustomerDiscountPercentSnapshot: decimal("partner_customer_discount_percent_snapshot", { precision: 6, scale: 2 }),
+  partnerCommissionBaseSnapshot: decimal("partner_commission_base_snapshot", { precision: 10, scale: 2 }),
   creditUsed: decimal("credit_used", { precision: 10, scale: 2 }).default("0"),
   kwkCreditUsed: decimal("kwk_credit_used", { precision: 10, scale: 2 }).default("0"),
   kwkCreditRequested: decimal("kwk_credit_requested", { precision: 10, scale: 2 }).default("0"),
@@ -596,6 +606,10 @@ export const partners = pgTable("partners", {
   // Commission type: einmalig = one-time cash payout, dauerhaft = ongoing shop credit
   commissionType: commissionTypeEnum("commission_type").default("dauerhaft").notNull(),
 
+  // Program policies are data-driven in partner_programs; commissionType is kept
+  // solely as a legacy compatibility field for historical records.
+  programKey: varchar("program_key", { length: 32 }).notNull().default("partner"),
+
   // Partner login credentials
   passwordHash: text("password_hash"),
   lastLogin: timestamp("last_login"),
@@ -617,6 +631,30 @@ export const partners = pgTable("partners", {
 
 export type Partner = typeof partners.$inferSelect;
 export type InsertPartner = typeof partners.$inferInsert;
+
+/** Data-driven financial terms for Creator, Partner and Eigennutzer programs. */
+export const partnerPrograms = pgTable("partner_programs", {
+  key: varchar("key", { length: 32 }).primaryKey(),
+  label: varchar("label", { length: 80 }).notNull(),
+  customerDiscountPolicy: varchar("customer_discount_policy", { length: 40 }).notNull(),
+  commissionPolicy: varchar("commission_policy", { length: 40 }).notNull(),
+  settlementMethod: varchar("settlement_method", { length: 24 }).notNull(),
+  allowSelfOrderCredit: boolean("allow_self_order_credit").notNull().default(false),
+  active: boolean("active").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+/** Individual public codes. The old comma-separated partners.code field remains a legacy mirror. */
+export const partnerCodes = pgTable("partner_codes", {
+  id: serial("id").primaryKey(),
+  partnerId: integer("partner_id").notNull(),
+  displayCode: varchar("display_code", { length: 50 }).notNull(),
+  codeNormalized: varchar("code_normalized", { length: 50 }).notNull().unique(),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
 
 /**
  * Partner address requests – partner-submitted delivery-address changes.
