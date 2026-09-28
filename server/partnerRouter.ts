@@ -12,7 +12,7 @@
  */
 
 import { z } from "zod";
-import { eq, desc, and, sql } from "drizzle-orm";
+import { eq, desc, and, inArray, isNull, or, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import bcrypt from "bcryptjs";
 import { router, publicProcedure, adminProcedure, middleware } from "./trpc.js";
@@ -28,10 +28,13 @@ import {
   PARTNER_TOKEN_EXPIRY,
 } from "./partnerAuth.js";
 import {
+  buildLegacyPartnerCodeTerms,
   canRedeemShopCredit,
   getPartnerProgram,
   isDiscountAllowedForProgram,
   isRepeatCodeUseAllowed,
+  listPartnerCodeTerms,
+  normalizePartnerCodeTerms,
   replacePartnerCodes,
   resolveActivePartnerCode,
   splitPartnerCodes,
@@ -57,7 +60,35 @@ const partnerAddressInput = z.object({
   country: z.string().trim().min(1).max(100),
 });
 
+const partnerCodeTermsInput = z.object({
+  id: z.number().int().positive().optional(),
+  code: z.string().trim().min(1).max(50),
+  commissionPercent: z.number().min(0).max(100),
+  customerDiscountPercent: z.number().min(0).max(100),
+  isActive: z.boolean().optional(),
+});
+
 type PartnerAddress = z.infer<typeof partnerAddressInput>;
+
+async function getPartnerAttributionCodes(partnerId: number, legacyCsv: string): Promise<string[]> {
+  const storedCodes = await listPartnerCodeTerms(partnerId);
+  return [...new Set([
+    ...splitPartnerCodes(legacyCsv),
+    ...storedCodes.map((entry) => entry.code),
+  ])];
+}
+
+function partnerAttributionWhere(partnerId: number, codes: string[]) {
+  // All post-program orders use partner_source_id. The code-only fallback is
+  // deliberately limited to legacy rows with no source ID, so no order can be
+  // attributed to two partners when a historical CSV mirror changes.
+  return codes.length > 0
+    ? or(
+        eq(orders.partnerSourceId, partnerId),
+        and(isNull(orders.partnerSourceId), inArray(orders.partnerCode, codes)),
+      )
+    : eq(orders.partnerSourceId, partnerId);
+}
 
 function normalisePartnerAddress(address: PartnerAddress) {
   return {
@@ -188,13 +219,14 @@ export const partnerRouter = router({
         );
       }
 
-      return allPartners.map(p => ({
+      return Promise.all(allPartners.map(async (p) => ({
         ...p,
         commissionPercent: parseFloat(p.commissionPercent),
         customerDiscountPercent: parseFloat(p.customerDiscountPercent),
         creditBalance: parseFloat(p.creditBalance),
+        codeTerms: await listPartnerCodeTerms(p.id),
         passwordHash: undefined, // Never expose
-      }));
+      })));
     }),
 
   // Get single partner with transactions
@@ -210,12 +242,14 @@ export const partnerRouter = router({
       const transactions = await db.select().from(partnerTransactions)
         .where(eq(partnerTransactions.partnerId, input.id))
         .orderBy(desc(partnerTransactions.createdAt));
+      const codeTerms = await listPartnerCodeTerms(input.id);
 
       return {
         ...partner,
         commissionPercent: parseFloat(partner.commissionPercent),
         customerDiscountPercent: parseFloat(partner.customerDiscountPercent),
         creditBalance: parseFloat(partner.creditBalance),
+        codeTerms,
         passwordHash: undefined,
         hasPassword: !!partner.passwordHash,
         transactions: transactions.map(t => ({
@@ -302,7 +336,8 @@ export const partnerRouter = router({
       email: z.string().email().optional().or(z.literal("")),
       phone: z.string().optional(),
       company: z.string().optional(),
-      code: z.string().min(2).max(50),
+      code: z.string().min(2).max(500).optional(),
+      codes: z.array(partnerCodeTermsInput).min(1).optional(),
       partnerNumber: z.string().min(2).max(50),
       commissionPercent: z.number().min(0).max(100),
       customerDiscountPercent: z.number().min(0).max(100),
@@ -315,18 +350,28 @@ export const partnerRouter = router({
       zip: z.string().optional(),
       city: z.string().optional(),
       country: z.string().optional(),
+    }).refine((value) => Boolean(value.code || value.codes?.length), {
+      message: "Mindestens ein Partnercode ist erforderlich",
+      path: ["codes"],
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
-      const normalizedCodes = splitPartnerCodes(input.code);
-      if (normalizedCodes.length === 0) throw new Error("Mindestens ein Partnercode ist erforderlich");
+      const codeTerms = input.codes
+        ? normalizePartnerCodeTerms(input.codes)
+        : normalizePartnerCodeTerms(splitPartnerCodes(input.code || "").map((code) => ({
+            code,
+            commissionPercent: input.commissionPercent,
+            customerDiscountPercent: input.customerDiscountPercent,
+            isActive: true,
+          })));
+      const activeCodes = codeTerms.filter((entry) => entry.isActive).map((entry) => entry.code);
       const pool = await getPool();
       if (!pool) throw new Error("Database not available");
       const duplicateCode = await pool.query(
         "SELECT code_normalized FROM partner_codes WHERE code_normalized = ANY($1::varchar[])",
-        [normalizedCodes],
+        [codeTerms.map((entry) => entry.code)],
       );
       if (duplicateCode.rows.length > 0) throw new Error(`Code "${duplicateCode.rows[0].code_normalized}" ist bereits vergeben`);
 
@@ -344,7 +389,7 @@ export const partnerRouter = router({
         email: input.email || null,
         phone: input.phone || null,
         company: input.company || null,
-        code: normalizedCodes.join(", "),
+        code: activeCodes.join(", "),
         partnerNumber: input.partnerNumber,
         street: input.street || null,
         houseNumber: input.houseNumber || null,
@@ -360,9 +405,9 @@ export const partnerRouter = router({
         notes: input.notes || null,
       }).returning();
 
-      await replacePartnerCodes(newPartner.id, normalizedCodes.join(", "));
-      console.log(`[Partners] Created partner: ${input.name} (Code: ${normalizedCodes.join(", ")}, Nr: ${input.partnerNumber}, Program: ${newPartner.programKey})`);
-      return { ...newPartner, passwordHash: undefined };
+      const storedCodes = await replacePartnerCodes(newPartner.id, codeTerms);
+      console.log(`[Partners] Created partner: ${input.name} (Code: ${activeCodes.join(", ")}, Nr: ${input.partnerNumber}, Program: ${newPartner.programKey})`);
+      return { ...newPartner, codeTerms: storedCodes, passwordHash: undefined };
     }),
 
   // Update partner
@@ -371,6 +416,7 @@ export const partnerRouter = router({
       id: z.number(),
       name: z.string().min(1).optional(),
       code: z.string().min(1).optional(),
+      codes: z.array(partnerCodeTermsInput).min(1).optional(),
       email: z.string().email().optional().or(z.literal("")),
       phone: z.string().optional(),
       company: z.string().optional(),
@@ -390,22 +436,26 @@ export const partnerRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
-      // Check for code uniqueness if code is being changed
-      if (input.code !== undefined) {
-        const codeParts = splitPartnerCodes(input.code);
-        if (codeParts.length === 0) throw new Error("Mindestens ein Partnercode ist erforderlich");
-        const pool = await getPool();
-        if (!pool) throw new Error("Database not available");
-        const duplicateCode = await pool.query(
-          "SELECT code_normalized FROM partner_codes WHERE partner_id <> $1 AND code_normalized = ANY($2::varchar[])",
-          [input.id, codeParts],
-        );
-        if (duplicateCode.rows.length > 0) throw new Error(`Code "${duplicateCode.rows[0].code_normalized}" ist bereits vergeben`);
-      }
+      const existingCodeTerms = input.codes || input.code !== undefined
+        ? await listPartnerCodeTerms(input.id)
+        : [];
+      const nextCommissionDefault = input.commissionPercent;
+      const nextDiscountDefault = input.customerDiscountPercent;
+      const requestedCodeTerms = input.codes
+        ? normalizePartnerCodeTerms(input.codes)
+        : input.code === undefined
+          ? null
+          : buildLegacyPartnerCodeTerms(
+              input.code,
+              existingCodeTerms,
+              {
+                commissionPercent: nextCommissionDefault ?? Number(existingCodeTerms[0]?.commissionPercent ?? 0),
+                customerDiscountPercent: nextDiscountDefault ?? Number(existingCodeTerms[0]?.customerDiscountPercent ?? 0),
+              },
+            );
 
       const updateData: Record<string, any> = { updatedAt: new Date() };
       if (input.name !== undefined) updateData.name = input.name;
-      if (input.code !== undefined) updateData.code = splitPartnerCodes(input.code).join(", ");
       if (input.email !== undefined) updateData.email = input.email || null;
       if (input.phone !== undefined) updateData.phone = input.phone || null;
       if (input.company !== undefined) updateData.company = input.company || null;
@@ -422,8 +472,10 @@ export const partnerRouter = router({
       if (input.country !== undefined) updateData.country = input.country || null;
 
       await db.update(partners).set(updateData).where(eq(partners.id, input.id));
-      if (input.code !== undefined) await replacePartnerCodes(input.id, updateData.code);
-      return { success: true };
+      const storedCodes = requestedCodeTerms
+        ? await replacePartnerCodes(input.id, requestedCodeTerms)
+        : await listPartnerCodeTerms(input.id);
+      return { success: true, codeTerms: storedCodes };
     }),
 
   // Set/reset partner password (admin)
@@ -515,6 +567,8 @@ export const partnerRouter = router({
 
       const [partner] = await db.select().from(partners).where(eq(partners.id, input.partnerId)).limit(1);
       if (!partner) throw new Error("Partner nicht gefunden");
+      const codeTerms = await listPartnerCodeTerms(partner.id);
+      const attributionCodes = await getPartnerAttributionCodes(partner.id, partner.code);
 
       // Get all transactions
       const transactions = await db.select().from(partnerTransactions)
@@ -523,7 +577,7 @@ export const partnerRouter = router({
 
       // Get all orders referred by this partner
       const referredOrders = await db.select().from(orders)
-        .where(eq(orders.partnerCode, partner.code))
+        .where(partnerAttributionWhere(partner.id, attributionCodes))
         .orderBy(desc(orders.orderDate));
 
       // Get order items for referred orders
@@ -553,6 +607,7 @@ export const partnerRouter = router({
           commissionPercent: parseFloat(partner.commissionPercent),
           customerDiscountPercent: parseFloat(partner.customerDiscountPercent),
           creditBalance: parseFloat(partner.creditBalance),
+          codeTerms,
           passwordHash: undefined,
         },
         summary: {
@@ -571,8 +626,13 @@ export const partnerRouter = router({
           total: parseFloat(o.total),
           status: o.status,
           paidAt: o.paidAt,
+          appliedPartnerCode: o.partnerCode,
+          partnerCodeIdSnapshot: o.partnerCodeIdSnapshot,
           partnerDiscount: parseFloat(o.partnerDiscount || "0"),
           partnerCommission: parseFloat(o.partnerCommission || "0"),
+          partnerCommissionPercentSnapshot: o.partnerCommissionPercentSnapshot === null ? null : parseFloat(o.partnerCommissionPercentSnapshot),
+          partnerCustomerDiscountPercentSnapshot: o.partnerCustomerDiscountPercentSnapshot === null ? null : parseFloat(o.partnerCustomerDiscountPercentSnapshot),
+          partnerCommissionBaseSnapshot: o.partnerCommissionBaseSnapshot === null ? null : parseFloat(o.partnerCommissionBaseSnapshot),
           items: allItems
             .filter(i => i.orderId === o.orderId)
             .map(i => ({ name: i.name, quantity: i.quantity, price: parseFloat(i.price) })),
@@ -831,6 +891,8 @@ export const partnerRouter = router({
 
       return {
         valid: true,
+        codeId: resolved.codeId,
+        partnerCode: resolved.partnerCode,
         discountPercent: discountEligible ? resolved.customerDiscountPercent : 0,
         partnerName: resolved.partnerName,
         commissionType: resolved.program.key === "creator" ? "einmalig" : "dauerhaft",
@@ -1171,8 +1233,9 @@ export const partnerRouter = router({
 
       const limit = input?.limit || 50;
       const offset = input?.offset || 0;
+      const attributionCodes = await getPartnerAttributionCodes(partner.id, partner.code);
 
-            // Only show paid orders
+      // Only show paid orders
       const { inArray } = await import("drizzle-orm");
       const paidStatuses = ["bezahlt", "gepackt", "versendet", "zugestellt"] as const;
       const referredOrders = await db.select({
@@ -1186,7 +1249,7 @@ export const partnerRouter = router({
         paidAt: orders.paidAt,
       }).from(orders)
         .where(and(
-          eq(orders.partnerCode, partner.code),
+          partnerAttributionWhere(partner.id, attributionCodes),
           inArray(orders.status, paidStatuses)
         ))
         .orderBy(desc(orders.orderDate))
@@ -1215,8 +1278,9 @@ export const partnerRouter = router({
       // Count total referred orders (paid only)
       const { inArray, ne } = await import("drizzle-orm");
       const paidStatuses = ["bezahlt", "gepackt", "versendet", "zugestellt"] as const;
+      const attributionCodes = await getPartnerAttributionCodes(partner.id, partner.code);
 
-       const referredOrders = await db.select({
+      const referredOrders = await db.select({
         total: orders.total,
         subtotal: orders.subtotal,
         discount: orders.discount,
@@ -1224,7 +1288,7 @@ export const partnerRouter = router({
         partnerCommission: orders.partnerCommission,
       }).from(orders)
         .where(and(
-          eq(orders.partnerCode, partner.code),
+          partnerAttributionWhere(partner.id, attributionCodes),
           inArray(orders.status, paidStatuses)
         ));
       const totalOrders = referredOrders.length;

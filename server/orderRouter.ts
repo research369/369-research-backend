@@ -355,10 +355,7 @@ export const orderRouter = router({
         const normalizedDiscountCode = input.discountCode?.trim().toUpperCase() || "";
         let discountCodeIsPartnerCode = false;
         if (normalizedDiscountCode) {
-          const [matchingPartner] = await db.select({ id: partners.id }).from(partners)
-            .where(and(sql`UPPER(TRIM(${partners.code})) = ${normalizedDiscountCode}`, eq(partners.isActive, 1)))
-            .limit(1);
-          discountCodeIsPartnerCode = Boolean(matchingPartner);
+          discountCodeIsPartnerCode = Boolean(await resolveActivePartnerCode(normalizedDiscountCode));
         }
 
         const hasPartnerCombination = Boolean(
@@ -704,6 +701,7 @@ export const orderRouter = router({
       let partnerCommissionAmount = 0;
       let creditUsed = input.creditUsed || 0;
       let partnerSourceId: number | null = resolvedPublicPartnerCode?.partnerId || null;
+      let partnerCodeIdSnapshot: number | null = resolvedPublicPartnerCode?.codeId || null;
       let partnerProgram: PartnerProgram | null = resolvedPublicPartnerCode?.program || null;
       let partnerCommissionPercentSnapshot: number | null = resolvedPublicPartnerCode?.commissionPercent || null;
       let partnerCommissionBaseSnapshot: number | null = null;
@@ -738,6 +736,7 @@ export const orderRouter = router({
       if (partnerCode && resolvedPublicPartnerCode) {
         partnerCode = resolvedPublicPartnerCode.partnerCode;
         partnerSourceId = resolvedPublicPartnerCode.partnerId;
+        partnerCodeIdSnapshot = resolvedPublicPartnerCode.codeId;
         partnerProgram = resolvedPublicPartnerCode.program;
         partnerCommissionPercentSnapshot = resolvedPublicPartnerCode.commissionPercent;
         await resolvePartnerForOrder({ id: resolvedPublicPartnerCode.partnerId, code: resolvedPublicPartnerCode.partnerCode }, "Code");
@@ -1101,6 +1100,7 @@ export const orderRouter = router({
         orderDate: new Date(input.date),
         partnerCode: partnerCode ? partnerCode.toUpperCase() : null,
         partnerSourceId,
+        partnerCodeIdSnapshot,
         partnerNumber: partnerNumber || null,
         partnerDiscount: partnerDiscountAmount.toFixed(2),
         partnerCommission: partnerCommissionAmount.toFixed(2),
@@ -1419,14 +1419,11 @@ export const orderRouter = router({
           if (nextNum < 1210) nextNum = 1210;
 
           // Determine acquisition source
-          const acquiredBy = partnerCode ? "partner" as const : "shop" as const;
-          let acquiredByPartnerId: number | null = null;
-          if (partnerCode) {
-            const [assignedPartner] = await db.select({ id: partners.id }).from(partners)
-              .where(and(eq(partners.code, partnerCode.toUpperCase()), eq(partners.isActive, 1)))
-              .limit(1);
-            acquiredByPartnerId = assignedPartner?.id ?? null;
-          }
+          const acquiredBy = partnerSourceId ? "partner" as const : "shop" as const;
+          // Attribution was already resolved server-side from the exact public
+          // code or authenticated partner number. Never re-resolve against the
+          // legacy comma-separated mirror here.
+          const acquiredByPartnerId = partnerSourceId;
 
           const [newCustomer] = await db.insert(customers).values({
             customerNumber: String(nextNum),

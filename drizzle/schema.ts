@@ -472,6 +472,9 @@ export const orders = pgTable("orders", {
 
   // Partner / Affiliate
   partnerSourceId: integer("partner_source_id"),
+  // Exact public-code row used for this order. The text and financial snapshots
+  // remain alongside it so later code edits cannot change historical evidence.
+  partnerCodeIdSnapshot: integer("partner_code_id_snapshot"),
   partnerCode: varchar("partner_code", { length: 50 }),
   partnerNumber: varchar("partner_number", { length: 50 }),
   partnerDiscount: decimal("partner_discount", { precision: 10, scale: 2 }).default("0"),
@@ -645,12 +648,14 @@ export const partnerPrograms = pgTable("partner_programs", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
-/** Individual public codes. The old comma-separated partners.code field remains a legacy mirror. */
+/** Individual public codes with independently configurable commercial terms. */
 export const partnerCodes = pgTable("partner_codes", {
   id: serial("id").primaryKey(),
   partnerId: integer("partner_id").notNull(),
   displayCode: varchar("display_code", { length: 50 }).notNull(),
   codeNormalized: varchar("code_normalized", { length: 50 }).notNull().unique(),
+  commissionPercent: decimal("commission_percent", { precision: 6, scale: 2 }).notNull(),
+  customerDiscountPercent: decimal("customer_discount_percent", { precision: 6, scale: 2 }).notNull(),
   isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

@@ -150,8 +150,17 @@ async function lockPartnerForOrder(client: PoolClient, order: OrderForCredit): P
     `SELECT id, name, code, partner_number, commission_percent, commission_type, program_key, credit_balance
        FROM partners
       WHERE is_active = 1
-        AND (id = $3 OR upper(code) = upper($1) OR partner_number = $2)
-      ORDER BY CASE WHEN id = $3 THEN 0 WHEN upper(code) = upper($1) THEN 1 ELSE 2 END
+        AND (
+          id = $3
+          OR partner_number = $2
+          OR EXISTS (
+             SELECT 1
+              FROM partner_codes pc
+             WHERE pc.partner_id = partners.id
+               AND pc.code_normalized = upper(regexp_replace($1, '[[:space:]]+', '', 'g'))
+          )
+        )
+      ORDER BY CASE WHEN id = $3 THEN 0 WHEN partner_number = $2 THEN 1 ELSE 2 END
       LIMIT 1
       FOR UPDATE`,
     [order.partner_code || "", order.partner_number || "", order.partner_source_id || -1],
@@ -342,7 +351,7 @@ export async function bookPaidPartnerCommission(orderId: string): Promise<{
         `${order.first_name} ${order.last_name}`.trim(),
         creditOverride
           ? `Manuell freigegebenes Guthaben für bezahlte Bestellung ${orderId} – ${creditOverride.reason}`
-          : `Provision für bezahlte Bestellung ${orderId} (${order.first_name} ${order.last_name}) – ${label}`,
+          : `Provision für bezahlte Bestellung ${orderId} (${order.first_name} ${order.last_name}) – ${label}${order.partner_code ? ` · Code ${order.partner_code}` : ""}`,
       ],
     );
     await client.query(

@@ -15,7 +15,20 @@ export type PartnerProgram = {
   active: boolean;
 };
 
+/** A public code's current commercial terms. Historical orders always use their snapshots. */
+export type PartnerCodeTerms = {
+  id?: number;
+  code: string;
+  commissionPercent: number;
+  customerDiscountPercent: number;
+  isActive: boolean;
+};
+
+export type StoredPartnerCodeTerms = Required<Pick<PartnerCodeTerms, "id">> & PartnerCodeTerms;
+
 export type ResolvedPartnerCode = {
+  /** Immutable identifier for the exact public code used by a new order. */
+  codeId: number;
   partnerId: number;
   partnerName: string;
   partnerCode: string;
@@ -40,24 +53,229 @@ export function splitPartnerCodes(value: string): string[] {
   return [...new Set(value.split(",").map(normalizePartnerCode).filter(Boolean))];
 }
 
-/** Keeps the legacy display field and the normalized public lookup registry aligned. */
-export async function replacePartnerCodes(partnerId: number, value: string): Promise<void> {
-  const codes = splitPartnerCodes(value);
-  if (codes.length === 0) throw new Error("Mindestens ein Partnercode ist erforderlich");
+function validPercentage(value: number, label: string): number {
+  if (!Number.isFinite(value) || value < 0 || value > 100) {
+    throw new Error(`${label} muss zwischen 0 und 100 liegen`);
+  }
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+/**
+ * Canonicalizes public-code terms before they are written. A duplicate normalized
+ * code in one request is rejected instead of silently merging different rates.
+ */
+export function normalizePartnerCodeTerms(input: Array<{
+  id?: number;
+  code: string;
+  commissionPercent: number;
+  customerDiscountPercent: number;
+  isActive?: boolean;
+}>): PartnerCodeTerms[] {
+  if (input.length === 0) throw new Error("Mindestens ein Partnercode ist erforderlich");
+
+  const seen = new Set<string>();
+  const terms = input.map((entry) => {
+    const code = normalizePartnerCode(entry.code);
+    if (!code) throw new Error("Partnercode darf nicht leer sein");
+    if (code.length > 50) throw new Error("Partnercode darf maximal 50 Zeichen haben");
+    if (seen.has(code)) throw new Error(`Code "${code}" wurde mehrfach angegeben`);
+    seen.add(code);
+
+    return {
+      ...(entry.id === undefined ? {} : { id: entry.id }),
+      code,
+      commissionPercent: validPercentage(entry.commissionPercent, "Provision"),
+      customerDiscountPercent: validPercentage(entry.customerDiscountPercent, "Kundenrabatt"),
+      isActive: entry.isActive !== false,
+    };
+  });
+
+  if (!terms.some((entry) => entry.isActive)) {
+    throw new Error("Mindestens ein öffentlicher Partnercode muss aktiv bleiben");
+  }
+  return terms;
+}
+
+/**
+ * Compatibility bridge for older callers that still submit a comma-separated
+ * `code` field. Existing code-specific terms win; only genuinely new codes use
+ * the supplied legacy defaults. This prevents a legacy update from flattening
+ * different rates that are already stored per code.
+ */
+export function buildLegacyPartnerCodeTerms(
+  rawCodes: string,
+  existingCodes: StoredPartnerCodeTerms[],
+  defaults: { commissionPercent: number; customerDiscountPercent: number },
+): PartnerCodeTerms[] {
+  const existingByCode = new Map(existingCodes.map((entry) => [normalizePartnerCode(entry.code), entry]));
+  return splitPartnerCodes(rawCodes).map((code) => {
+    const existing = existingByCode.get(code);
+    return existing
+      ? {
+          id: existing.id,
+          code,
+          commissionPercent: existing.commissionPercent,
+          customerDiscountPercent: existing.customerDiscountPercent,
+          isActive: true,
+        }
+      : {
+          code,
+          commissionPercent: defaults.commissionPercent,
+          customerDiscountPercent: defaults.customerDiscountPercent,
+          isActive: true,
+        };
+  });
+}
+
+/** Returns all code rows, including inactive rows retained for audit/history. */
+export async function listPartnerCodeTerms(partnerId: number): Promise<StoredPartnerCodeTerms[]> {
+  const pool = await getPool();
+  if (!pool) throw new Error("Datenbank nicht verfügbar");
+  const result = await pool.query<{
+    id: number;
+    display_code: string;
+    commission_percent: string;
+    customer_discount_percent: string;
+    is_active: boolean;
+  }>(`
+    SELECT id, display_code, commission_percent, customer_discount_percent, is_active
+      FROM partner_codes
+     WHERE partner_id = $1
+     ORDER BY created_at ASC, id ASC`, [partnerId]);
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    code: row.display_code,
+    commissionPercent: Number(row.commission_percent),
+    customerDiscountPercent: Number(row.customer_discount_percent),
+    isActive: row.is_active,
+  }));
+}
+
+/**
+ * Synchronizes public-code terms without deleting or renaming historical code
+ * rows. Existing code IDs are immutable identities: deactivate a retired code
+ * and create a fresh row instead of changing its text. This keeps audit views,
+ * legacy attribution and every order's code-ID snapshot meaningful forever.
+ */
+export async function replacePartnerCodes(
+  partnerId: number,
+  rawTerms: Array<{
+    id?: number;
+    code: string;
+    commissionPercent: number;
+    customerDiscountPercent: number;
+    isActive?: boolean;
+  }>,
+): Promise<StoredPartnerCodeTerms[]> {
+  const terms = normalizePartnerCodeTerms(rawTerms);
   const pool = await getPool();
   if (!pool) throw new Error("Datenbank nicht verfügbar");
   const client = await pool.connect();
+
   try {
     await client.query("BEGIN");
-    await client.query("DELETE FROM partner_codes WHERE partner_id = $1", [partnerId]);
-    for (const code of codes) {
-      await client.query(
-        `INSERT INTO partner_codes (partner_id, display_code, code_normalized, is_active, updated_at)
-         VALUES ($1, $2, $3, TRUE, NOW())`,
-        [partnerId, code, code],
-      );
+    const existingResult = await client.query<{
+      id: number;
+      display_code: string;
+      code_normalized: string;
+    }>(`
+      SELECT id, display_code, code_normalized
+        FROM partner_codes
+       WHERE partner_id = $1
+       FOR UPDATE`, [partnerId]);
+    const existingById = new Map(existingResult.rows.map((row) => [row.id, row]));
+    const existingByCode = new Map(existingResult.rows.map((row) => [row.code_normalized, row]));
+
+    const collisions = await client.query<{ code_normalized: string }>(`
+      SELECT code_normalized
+        FROM partner_codes
+       WHERE partner_id <> $1
+         AND code_normalized = ANY($2::varchar[])
+       LIMIT 1`, [partnerId, terms.map((entry) => entry.code)]);
+    if (collisions.rows.length > 0) {
+      throw new Error(`Code "${collisions.rows[0].code_normalized}" ist bereits vergeben`);
     }
+
+    const resolvedRows = terms.map((term) => {
+      const existing = term.id === undefined
+        ? existingByCode.get(term.code)
+        : existingById.get(term.id);
+      if (term.id !== undefined && !existing) {
+        throw new Error("Ein ausgewählter Partnercode gehört nicht zu diesem Partner");
+      }
+      if (existing && existing.code_normalized !== term.code) {
+        throw new Error("Ein bestehender Partnercode kann nicht umbenannt werden. Bitte den alten Code deaktivieren und einen neuen Code anlegen.");
+      }
+      return { term, existing };
+    });
+
+    const retainedIds: number[] = [];
+    for (const { term, existing } of resolvedRows) {
+      if (existing) {
+        await client.query(`
+          UPDATE partner_codes
+             SET commission_percent = $1,
+                 customer_discount_percent = $2,
+                 is_active = $3,
+                 updated_at = NOW()
+           WHERE id = $4`, [
+          term.commissionPercent.toFixed(2),
+          term.customerDiscountPercent.toFixed(2),
+          term.isActive,
+          existing.id,
+        ]);
+        retainedIds.push(existing.id);
+      } else {
+        const inserted = await client.query<{ id: number }>(`
+          INSERT INTO partner_codes (
+            partner_id, display_code, code_normalized,
+            commission_percent, customer_discount_percent, is_active, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
+          RETURNING id`, [
+          partnerId,
+          term.code,
+          term.code,
+          term.commissionPercent.toFixed(2),
+          term.customerDiscountPercent.toFixed(2),
+          term.isActive,
+        ]);
+        retainedIds.push(inserted.rows[0].id);
+      }
+    }
+
+    await client.query(`
+      UPDATE partner_codes
+         SET is_active = FALSE, updated_at = NOW()
+       WHERE partner_id = $1
+         AND NOT (id = ANY($2::int[]))`, [partnerId, retainedIds]);
+
+    const activeCodes = terms.filter((term) => term.isActive).map((term) => term.code).join(", ");
+    await client.query(
+      "UPDATE partners SET code = $1, updated_at = NOW() WHERE id = $2",
+      [activeCodes, partnerId],
+    );
+
+    const stored = await client.query<{
+      id: number;
+      display_code: string;
+      commission_percent: string;
+      customer_discount_percent: string;
+      is_active: boolean;
+    }>(`
+      SELECT id, display_code, commission_percent, customer_discount_percent, is_active
+        FROM partner_codes
+       WHERE partner_id = $1
+       ORDER BY created_at ASC, id ASC`, [partnerId]);
     await client.query("COMMIT");
+
+    return stored.rows.map((row) => ({
+      id: row.id,
+      code: row.display_code,
+      commissionPercent: Number(row.commission_percent),
+      customerDiscountPercent: Number(row.customer_discount_percent),
+      isActive: row.is_active,
+    }));
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
@@ -97,6 +315,7 @@ export async function resolveActivePartnerCode(rawCode: string): Promise<Resolve
   const pool = await getPool();
   if (!pool) throw new Error("Datenbank nicht verfügbar");
   const result = await pool.query<{
+    partner_code_id: number;
     partner_id: number;
     partner_name: string;
     partner_code: string;
@@ -112,13 +331,14 @@ export async function resolveActivePartnerCode(rawCode: string): Promise<Resolve
     allow_self_order_credit: boolean;
     active: boolean;
   }>(`
-    SELECT p.id AS partner_id,
+    SELECT pc.id AS partner_code_id,
+           p.id AS partner_id,
            p.name AS partner_name,
            pc.display_code AS partner_code,
            p.partner_number,
            p.email AS partner_email,
-           p.commission_percent,
-           p.customer_discount_percent,
+           pc.commission_percent,
+           pc.customer_discount_percent,
            pp.key AS program_key,
            pp.label,
            pp.customer_discount_policy,
@@ -134,6 +354,7 @@ export async function resolveActivePartnerCode(rawCode: string): Promise<Resolve
   const row = result.rows[0];
   if (!row || !isPartnerProgramKey(row.program_key)) return null;
   return {
+    codeId: row.partner_code_id,
     partnerId: row.partner_id,
     partnerName: row.partner_name,
     partnerCode: row.partner_code,
