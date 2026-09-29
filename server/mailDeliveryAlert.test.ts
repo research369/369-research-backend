@@ -35,6 +35,12 @@ test("Zustellwarnung unterdrückt nur technische QA-Empfänger und bereinigte Da
     recipientEmail: "kunde@example.de",
     customerRecordExists: true,
   }), true);
+  assert.equal(shouldSendOperatorDeliveryFailureAlert({
+    eventType: "email.bounced",
+    recipientEmail: "kunde@example.de",
+    customerRecordExists: true,
+    deliveryIssueResolvedAt: new Date("2026-09-29T05:05:00.000Z"),
+  }), false);
 });
 
 test("Zustellwarnung enthält nur prüfungsrelevante Metadaten und keinen Kundenmailinhalt", () => {

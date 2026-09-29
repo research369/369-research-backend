@@ -287,6 +287,11 @@ export const customerCommunications = pgTable("customer_communications", {
   deliveryStatus: varchar("delivery_status", { length: 32 }),
   deliveryStatusAt: timestamp("delivery_status_at"),
   errorMessage: text("error_message"),
+  // Resolution metadata preserves the failed historical message while
+  // suppressing duplicate alerts from later provider retries after correction.
+  deliveryIssueResolvedAt: timestamp("delivery_issue_resolved_at"),
+  deliveryIssueResolution: varchar("delivery_issue_resolution", { length: 500 }),
+  deliveryIssueResolvedBy: varchar("delivery_issue_resolved_by", { length: 100 }),
   idempotencyKey: varchar("idempotency_key", { length: 200 }),
   direction: varchar("direction", { length: 16 }).default("outbound").notNull(),
   source: varchar("source", { length: 32 }).default("manual").notNull(),

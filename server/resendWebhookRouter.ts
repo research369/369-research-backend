@@ -92,6 +92,7 @@ resendWebhookRouter.post("/api/webhooks/resend", async (req, res) => {
       eventType,
       recipientEmail: comm.recipientEmail,
       customerRecordExists: customer.length > 0,
+      deliveryIssueResolvedAt: comm.deliveryIssueResolvedAt,
     });
     const bounceMessage = eventType === "email.bounced"
       ? (event?.data?.bounce?.message || event?.data?.bounce?.diagnosticCode?.join("\n") || "Unzustellbar")

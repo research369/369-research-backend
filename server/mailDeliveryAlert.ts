@@ -51,9 +51,11 @@ export function shouldSendOperatorDeliveryFailureAlert(input: {
   eventType: string;
   recipientEmail: string | null | undefined;
   customerRecordExists: boolean;
+  deliveryIssueResolvedAt?: Date | string | null;
 }): boolean {
   return shouldAlertOnDeliveryEvent(input.eventType)
     && input.customerRecordExists
+    && !input.deliveryIssueResolvedAt
     && !isTechnicalQaRecipient(input.recipientEmail);
 }
 

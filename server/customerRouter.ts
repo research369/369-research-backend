@@ -3,7 +3,7 @@
  * Features: CRUD, advanced filtering, communication history, email sending, CSV export
  */
 import { z } from "zod";
-import { eq, desc, sql, and, gte, lte, like, or } from "drizzle-orm";
+import { eq, desc, sql, and, gte, lte, like, or, inArray } from "drizzle-orm";
 import { router, adminProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
 import { customers, orders, orderItems, customerCommunications, emailTemplates, emailCampaigns, partners } from "../drizzle/schema.js";
@@ -304,7 +304,7 @@ export const customerRouter = router({
     // Update customer
   update: adminProcedure
     .input(z.object({ id: z.number() }).merge(customerSchema.partial()))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
       const { id, ...data } = input;
@@ -343,6 +343,24 @@ export const customerRouter = router({
       if (data.dhlPostNumber !== undefined) updateData.dhlPostNumber = data.dhlPostNumber || null;
 
       await db.update(customers).set(updateData).where(eq(customers.id, id));
+
+      // A corrected recipient address resolves prior delivery incidents for the
+      // obsolete address. Provider retries remain journalled but must not create
+      // duplicate operator alerts after the correction is already completed.
+      const previousEmail = existingCustomer.email?.trim().toLowerCase() || "";
+      const correctedEmail = data.email?.trim().toLowerCase() || "";
+      if (data.email !== undefined && previousEmail && correctedEmail && previousEmail !== correctedEmail) {
+        await db.update(customerCommunications).set({
+          deliveryIssueResolvedAt: new Date(),
+          deliveryIssueResolution: `E-Mail-Adresse korrigiert: ${previousEmail} → ${correctedEmail}`,
+          deliveryIssueResolvedBy: ctx.user.name || ctx.user.username,
+        }).where(and(
+          eq(customerCommunications.customerId, id),
+          eq(customerCommunications.recipientEmail, previousEmail),
+          inArray(customerCommunications.deliveryStatus, ["delayed", "bounced", "failed", "suppressed"]),
+          sql`${customerCommunications.deliveryIssueResolvedAt} IS NULL`,
+        ));
+      }
 
       // ── Sync address/contact data to all linked orders ──
       // Only sync fields that are actually address/contact related (not tags, notes, source)
