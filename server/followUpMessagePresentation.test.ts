@@ -19,7 +19,7 @@ test("WhatsApp follow-up uses the approved direct structure and exact product co
   assert.match(message, /wir hoffen, du bist zufrieden mit deiner Bestellung/);
   assert.match(message, /Als Dankeschön für dein Vertrauen möchten wir dir eine gezielte Ergänzung zeigen/);
   assert.match(message, new RegExp(productCopy.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  assert.match(message, /Dein persönlicher Rabatt: \*\[DISCOUNT_CODE\] – 15%\*/);
+  assert.match(message, /Dein persönlicher Rabatt: \*\[DISCOUNT_CODE\] – 15% auf den gesamten Warenkorb \(Versand ausgenommen\)\*/);
   assert.match(message, /https:\/\/www\.369research\.eu\/product\/ghk-cu/);
   assert.doesNotMatch(message, /79,00 €/);
 });
@@ -30,6 +30,8 @@ test("email follows the same product wording and escapes product copy", () => {
   assert.match(body, /wir hoffen, du bist zufrieden mit deiner Bestellung/);
   assert.match(body, /Gezielt für dich ausgewählt/);
   assert.match(body, /GHK-Cu 50 mg ist ein Beauty- und Regenerations-Favorit/);
+  assert.match(body, /15% Rabatt<\/strong> auf den gesamten Warenkorb/);
+  assert.match(body, /Versandkosten sind ausgenommen/);
 
   const unsafe = [{ ...selectedProducts[0], generatedCopy: "Text <script>alert('x')</script> & mehr. Zweiter Satz ohne Wirkung." }];
   const escaped = generateEmailContent(order, unsafe, "CODE", null, terms).body;

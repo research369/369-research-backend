@@ -13,7 +13,7 @@ Jede Nachricht folgt diesem Aufbau:
 1. „Wir hoffen, du bist zufrieden …“
 2. „Als Dankeschön für dein Vertrauen …“
 3. Pro ausgewähltem Produkt: Produktname, zwei kurze produktbezogene Sätze, Produktlink
-4. Persönlicher Rabattcode, Rabatt und Ablaufzeit
+4. Persönlicher Rabattcode, Rabatt auf den gesamten Warenkorb und Ablaufzeit – Versandkosten ausdrücklich ausgenommen
 5. RUO-Hinweis
 
 ## KI-Leitplanken
@@ -25,5 +25,7 @@ Sie muss für jedes Produkt genau zwei direkte, verkaufsstarke Sätze erzeugen. 
 ## Revisionssicherheit und Ausfallschutz
 
 Der erzeugte Produkttext wird an der Auswahlzeile gespeichert. Dadurch bleiben Vorschau, WhatsApp und E-Mail auch nach späteren Katalogänderungen identisch.
+
+Die ein oder zwei ausgewählten Produkte steuern nur die gezielte Ansprache. Der Follow-up-Code selbst wird wie jeder allgemeine Aktionscode auf die gesamte Produktsumme des Warenkorbs angewendet; Versandkosten bleiben unverändert.
 
 Ist die KI nicht erreichbar oder liefert sie keinen zulässigen Text, erzeugt das System eine neutrale, kurze Produktvorlage. Die WaWi zeigt diesen Fall beim Generieren an. Der Rabattcode bleibt davon getrennt und wird weiterhin ausschließlich beim Kundenkontakt ausgestellt.

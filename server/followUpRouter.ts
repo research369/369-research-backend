@@ -151,7 +151,7 @@ async function createIndividualCode(db: any, followUp: any): Promise<{
     validUntil: expiresAt,
     validUntilExact: 1,
     isActive: 1,
-    description: `Follow-up Code für Bestellung ${orderId} – ${terms.discountPercent}% Rabatt, gültig ${terms.codeValidityHours}h ab Kundenkontakt`,
+    description: `Follow-up Code für Bestellung ${orderId} – ${terms.discountPercent}% auf den gesamten Warenkorb (Versand ausgenommen), gültig ${terms.codeValidityHours}h ab Kundenkontakt`,
   }).returning({ id: promoCodes.id });
 
   const promoCodeId = inserted.id;
@@ -253,7 +253,7 @@ Als Dankeschön für dein Vertrauen möchten wir dir eine gezielte Ergänzung ze
 
 ${productLines}
 
-Dein persönlicher Rabatt: *${promoCode} – ${terms.discountPercent}%*
+Dein persönlicher Rabatt: *${promoCode} – ${terms.discountPercent}% auf den gesamten Warenkorb (Versand ausgenommen)*
 
 ⏳ _Dieser Code ist nur für dich und nur bis ${expiryStr} Uhr gültig._
 
@@ -336,7 +336,7 @@ export function generateEmailContent(
       <div style="background:#f0f7ff;border:2px dashed #0040C1;border-radius:8px;padding:20px;text-align:center;margin-bottom:16px;">
         <p style="color:#475569;font-size:14px;margin:0 0 8px;">Dein persönlicher Rabattcode</p>
         <p style="color:#0040C1;font-size:28px;font-weight:800;letter-spacing:0.1em;margin:0 0 8px;">${promoCode}</p>
-        <p style="color:#475569;font-size:14px;margin:0;"><strong>${terms.discountPercent}% Rabatt</strong> auf deine nächste Bestellung</p>
+        <p style="color:#475569;font-size:14px;margin:0;"><strong>${terms.discountPercent}% Rabatt</strong> auf den gesamten Warenkorb<br><span style="font-size:12px;">Versandkosten sind ausgenommen.</span></p>
       </div>
       <p style="color:#ef4444;font-size:13px;text-align:center;margin:0 0 24px;">
         ⏳ Dieser Code ist nur für dich und nur bis <strong>${expiryStr} Uhr</strong> gültig.
