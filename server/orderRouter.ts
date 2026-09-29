@@ -46,6 +46,7 @@ import { shouldSendOrderConfirmation } from "./orderConfirmationPolicy.js";
 import { resolveSubstitutionProductFamily } from "./orderItemIdentity.js";
 import { serializeKwkFraudFlags } from "./kwkReferralPayload.js";
 import { getAuthenticatedPartnerFromRequest } from "./partnerAuth.js";
+import { isPromoCodeExpired } from "./promoCodeRouter.js";
 import {
   calculateProgramDiscount,
   calculateSelfOrderDiscountPercent,
@@ -256,6 +257,36 @@ export const orderRouter = router({
         input.partnerDiscount = authoritativePartnerDiscount;
       }
 
+      // A general promo code, including an individual Follow-up code, is also
+      // resolved server-side. The browser may display it, but can neither extend
+      // its validity nor choose its discount percentage.
+      let resolvedPromoCode: PromoDefinition | null = null;
+      let resolvedPromoCodeRecord: { id: number; code: string } | null = null;
+      const normalizedPromotionCode = input.discountCode?.trim().toUpperCase() || "";
+      if (normalizedPromotionCode && !resolvedPublicPartnerCode) {
+        const [promo] = await db.select().from(promoCodes)
+          .where(and(eq(promoCodes.code, normalizedPromotionCode), eq(promoCodes.isActive, 1)))
+          .limit(1);
+        if (!promo) throw new Error("AKTIONSCODE_UNGUELTIG");
+
+        const now = new Date();
+        const minimumOrder = Number(promo.minOrder || 0);
+        if ((promo.validFrom && now < promo.validFrom)
+          || isPromoCodeExpired(promo, now)
+          || ((promo.maxUses || 0) > 0 && promo.currentUses >= (promo.maxUses || 0))
+          || (minimumOrder > 0 && input.subtotal < minimumOrder)) {
+          throw new Error("AKTIONSCODE_UNGUELTIG");
+        }
+        resolvedPromoCode = {
+          discountType: promo.discountType,
+          percentage: Number(promo.percentage || 0),
+          fixedAmount: Number(promo.fixedAmount || 0),
+          description: promo.description,
+        };
+        resolvedPromoCodeRecord = { id: promo.id, code: promo.code };
+        input.discountCode = promo.code;
+      }
+
       // A partner number identifies an authenticated self-order. Its monetary
       // terms are resolved below from the session-owned partner row; a public
       // code or any browser-provided percentage can never authorize this route.
@@ -314,6 +345,16 @@ export const orderRouter = router({
         throw new Error("WAWI_ANMELDUNG_ERFORDERLICH: Bitte erneut anmelden, bevor ein manueller Verkauf angelegt wird.");
       }
       const isAuthenticatedWawiManualSale = isRequestedWawiManualSale && Boolean(ctx.user);
+      // WaWi order pricing is deliberately a separate, manually authorized
+      // workflow. Do not consume a customer-facing one-time Follow-up code in
+      // that route; its existing manual discount controls stay untouched.
+      if (isAuthenticatedWawiManualSale && resolvedPromoCode) {
+        resolvedPromoCode = null;
+        resolvedPromoCodeRecord = null;
+      }
+      if (authenticatedPartner && resolvedPromoCode) {
+        throw new Error("PARTNER_AKTIONSCODE_AUSGESCHLOSSEN: Partnerbestellungen können nur den zentralen Shop-Dauerrabatt kombinieren.");
+      }
       const coldShippingRequestedByWawi = isAuthenticatedWawiManualSale
         && input.coldShippingRequested === true;
       // Der Shop-Checkout versendet wie bisher automatisch. Im manuellen
@@ -345,10 +386,26 @@ export const orderRouter = router({
       const automaticGlobalDiscountAmount = activeGlobalDiscount
         ? calculateAutomaticGlobalDiscount(input.subtotal, activeGlobalDiscount.percentage)
         : 0;
+      if (resolvedPromoCode) {
+        const [promo] = await db.select({ minOrder: promoCodes.minOrder })
+          .from(promoCodes)
+          .where(eq(promoCodes.id, resolvedPromoCodeRecord!.id))
+          .limit(1);
+        if (!promo || Number(promo.minOrder || 0) > input.subtotal) {
+          throw new Error("AKTIONSCODE_UNGUELTIG");
+        }
+        input.shipping = calculateAuthoritativeShipping({
+          country: input.customer.country,
+          items: input.items,
+          promoDescription: resolvedPromoCode.description,
+          coldChainRequested: coldShippingRequestedByWawi,
+        });
+        input.shippingCountry = resolveShippingRegion(input.customer.country);
+      }
       // The catalog-backed subtotal is available now. Recalculate every public
       // partner and authenticated self-order discount here, rather than trusting
       // a preview value computed in the browser before prices were reconstructed.
-      if (resolvedPublicPartnerCode || authenticatedPartner) {
+      if (resolvedPublicPartnerCode || authenticatedPartner || resolvedPromoCode) {
         const authoritativePartnerDiscount = resolvedPublicPartnerCode
           ? calculateProgramDiscount(
               input.subtotal,
@@ -359,13 +416,23 @@ export const orderRouter = router({
               input.subtotal,
               automaticGlobalDiscountAmount,
               selfOrderDiscountPercent || 0,
-        );
-        input.partnerDiscount = authoritativePartnerDiscount;
+            );
+        const authoritativePromoDiscount = resolvedPromoCode
+          ? calculatePromoDiscount({
+              subtotal: input.subtotal,
+              items: input.items,
+              promo: resolvedPromoCode,
+              precedingProductDiscount: automaticGlobalDiscountAmount,
+            })
+          : 0;
+        input.partnerDiscount = resolvedPublicPartnerCode || authenticatedPartner
+          ? authoritativePartnerDiscount
+          : 0;
         if (!isAuthenticatedWawiManualSale) {
           // A partner path is an explicit commercial program, not a browser
           // supplied discount stack. Its sole allowed companion is the centrally
           // configured automatic global promotion.
-          input.discount = roundMoney(automaticGlobalDiscountAmount + authoritativePartnerDiscount);
+          input.discount = roundMoney(automaticGlobalDiscountAmount + authoritativePartnerDiscount + authoritativePromoDiscount);
           input.total = roundMoney(input.subtotal - input.discount + input.shipping);
         }
       }
@@ -562,6 +629,7 @@ export const orderRouter = router({
       const submittedDiscountBreakdown = (input.discountBreakdown || [])
         .filter((entry) => entry.amount > 0
           && entry.source !== "automatic_global_percent"
+          && !(resolvedPromoCode && entry.source === "promotion_code")
           && !(resolvedPublicPartnerCode && entry.source === "partner_self_discount"))
         .map((entry) => ({
           ...entry,
@@ -575,6 +643,23 @@ export const orderRouter = router({
           amount: automaticGlobalDiscountAmount,
           percentage: activeGlobalDiscount.percentage,
         });
+      }
+      if (resolvedPromoCode) {
+        const authoritativePromoDiscount = calculatePromoDiscount({
+          subtotal: input.subtotal,
+          items: input.items,
+          promo: resolvedPromoCode,
+          precedingProductDiscount: automaticGlobalDiscountAmount,
+        });
+        if (authoritativePromoDiscount > 0) {
+          submittedDiscountBreakdown.push({
+            source: "promotion_code" as const,
+            label: `Aktionscode: ${resolvedPromoCodeRecord?.code || normalizedPromotionCode}`,
+            amount: authoritativePromoDiscount,
+            percentage: resolvedPromoCode.discountType === "percent" ? resolvedPromoCode.percentage : undefined,
+            code: resolvedPromoCodeRecord?.code || normalizedPromotionCode,
+          });
+        }
       }
       const authoritativePartnerDiscount = roundMoney(input.partnerDiscount || 0);
       if ((resolvedPublicPartnerCode || authenticatedPartner) && authoritativePartnerDiscount > 0) {
@@ -1189,6 +1274,29 @@ export const orderRouter = router({
           (input as any)._coldShippingNote,
         ]),
       });
+
+      // Consume the code in the same transaction as the order. The guarded
+      // update makes a single-use Follow-up code race-safe and prevents the
+      // previous browser-side post-order increment from double counting.
+      if (resolvedPromoCodeRecord) {
+        const consumed = await db.update(promoCodes)
+          .set({
+            currentUses: sql`${promoCodes.currentUses} + 1`,
+            updatedAt: new Date(),
+          })
+          .where(and(
+            eq(promoCodes.id, resolvedPromoCodeRecord.id),
+            eq(promoCodes.isActive, 1),
+            or(
+              eq(promoCodes.maxUses, 0),
+              sql`${promoCodes.currentUses} < ${promoCodes.maxUses}`,
+            ),
+          ))
+          .returning({ id: promoCodes.id });
+        if (consumed.length !== 1) {
+          throw new Error("AKTIONSCODE_UNGUELTIG");
+        }
+      }
 
       if (authoritativeKwkCredit > 0 && kwkCreditAccountId) {
         await db.execute(sql`

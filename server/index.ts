@@ -33,6 +33,7 @@ import { ensureDiscountProvenanceSchema } from "./discountProvenanceSchema.js";
 import { ensureShipmentLabelOverrideConfig } from "./shipmentLabelOverrideConfig.js";
 import { ensurePartnerAddressRequestSchema } from "./partnerAddressRequestSchema.js";
 import { ensurePartnerProgramSchema } from "./partnerProgramSchema.js";
+import { ensureFollowUpTermsSchema } from "./followUpTermsSchema.js";
 import { qrRedirectRouter } from "./qrRedirectRouter.js";
 import { ensurePeps4petsCheckoutSchema, isPeps4petsCheckoutSchemaReady } from "./peps4petsCheckoutSchema.js";
 import { ensureGoodieSchema } from "./goodieSchema.js";
@@ -336,6 +337,14 @@ async function start() {
     console.log("[Server] Partner program schema ready");
   } catch (err) {
     console.warn("[Server] Partner program schema migration failed:", err);
+  }
+
+  // Follow-up-Angebote erhalten vor dem Versand eigene, revisionssichere Konditionen.
+  try {
+    await ensureFollowUpTermsSchema();
+    console.log("[Server] Follow-up offer terms schema ready");
+  } catch (err) {
+    console.warn("[Server] Follow-up offer terms schema migration failed:", err);
   }
 
   // Additive first-party QR campaign and order-attribution schema.

@@ -781,6 +781,9 @@ export const promoCodes = pgTable("promo_codes", {
   // Validity period
   validFrom: timestamp("valid_from"),
   validUntil: timestamp("valid_until"),
+  // A follow-up code has a minute-exact validity window from customer contact.
+  // Manually managed WaWi promo codes keep their existing end-of-day semantics.
+  validUntilExact: integer("valid_until_exact").notNull().default(0),
   
   // Status
   isActive: integer("is_active").default(1).notNull(),
@@ -1023,6 +1026,9 @@ export const salesFollowups = pgTable("sales_followups", {
   // Individual promo code (AGAIN-[ORDERNR]-[4CHARS])
   promoCodeId: integer("promo_code_id"),
   discountCode: varchar("discount_code", { length: 50 }),
+  // Offer terms are selected per follow-up and become immutable when its code is first created.
+  discountPercent: decimal("discount_percent", { precision: 5, scale: 2 }).notNull().default("10"),
+  codeValidityHours: integer("code_validity_hours").notNull().default(48),
   codeCreatedAt: timestamp("code_created_at"),
   codeExpiresAt: timestamp("code_expires_at"),
   messageGeneratedAt: timestamp("message_generated_at"),

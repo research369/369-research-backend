@@ -14,6 +14,22 @@ import { router, publicProcedure, adminProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
 import { promoCodes, partnerCodeUsage } from "../drizzle/schema.js";
 
+/**
+ * Standard WaWi codes retain their established end-of-day expiry. Follow-up
+ * codes opt into an exact timestamp so a stated 72-hour window is never
+ * silently prolonged until midnight.
+ */
+export function isPromoCodeExpired(
+  code: { validUntil?: Date | null; validUntilExact?: number | null },
+  now = new Date(),
+): boolean {
+  if (!code.validUntil) return false;
+  const expiry = new Date(code.validUntil);
+  if (code.validUntilExact === 1) return now > expiry;
+  expiry.setHours(23, 59, 59, 999);
+  return now > expiry;
+}
+
 export const promoCodeRouter = router({
   // ─── ADMIN: CRUD ───────────────────────────────────────────────
 
@@ -183,12 +199,8 @@ export const promoCodeRouter = router({
       if (code.validFrom && now < code.validFrom) {
         return { valid: false, reason: "Code ist noch nicht gültig", discountPercent: 0, fixedAmount: 0 };
       }
-      if (code.validUntil) {
-        const expiry = new Date(code.validUntil);
-        expiry.setHours(23, 59, 59, 999);
-        if (now > expiry) {
-          return { valid: false, reason: "Code ist abgelaufen", discountPercent: 0, fixedAmount: 0 };
-        }
+      if (isPromoCodeExpired(code, now)) {
+        return { valid: false, reason: "Code ist abgelaufen", discountPercent: 0, fixedAmount: 0 };
       }
 
       // Check usage limit
