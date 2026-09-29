@@ -1050,6 +1050,11 @@ export const salesFollowupProducts = pgTable("sales_followup_products", {
   id: serial("id").primaryKey(),
   followupId: integer("followup_id").notNull(), // FK to salesFollowups.id
   articleId: integer("article_id").notNull(),   // FK to articles.id
+  // Exact copy used in the customer-facing follow-up. Kept as a snapshot so
+  // later catalogue edits cannot change an already generated offer.
+  generatedCopy: text("generated_copy"),
+  generatedCopySource: varchar("generated_copy_source", { length: 20 }),
+  generatedCopyGeneratedAt: timestamp("generated_copy_generated_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 export type SalesFollowupProduct = typeof salesFollowupProducts.$inferSelect;

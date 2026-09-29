@@ -5,7 +5,7 @@
  * - 7 Tage nach shipped_at wird automatisch ein Follow-up erstellt
  * - Nur 1 Follow-up pro Bestellung (unique constraint auf order_id)
  * - Individueller 48h-Rabattcode pro Follow-up (AGAIN-[ORDERNR]-[4CHARS])
- * - Code wird erst beim Klick auf "Nachricht generieren" erzeugt
+ * - Code wird erst beim tatsächlichen Kundenkontakt erzeugt
  * - Gültiger Code wird wiederverwendet, abgelaufener Code gibt Warnung zurück
  */
 import { z } from "zod";
@@ -23,9 +23,16 @@ import {
   promoCodes,
 } from "../drizzle/schema.js";
 import { calculateFollowUpShipmentWindow } from "./followUpEligibility.js";
+import { generateFollowUpProductCopies } from "./followUpProductCopy.js";
 
 const RESEND_API_URL = "https://api.resend.com/emails";
 const SHOP_BASE_URL = "https://www.369research.eu";
+
+function escapeHtml(value: unknown): string {
+  return String(value ?? "").replace(/[&<>'"]/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
+  }[character] || character));
+}
 
 /**
  * Zentrale Konfiguration – alle Parameter hier ändern, nirgendwo sonst hardcoden
@@ -211,7 +218,7 @@ async function getCustomerOrderHistory(db: any, order: any): Promise<any[]> {
 }
 
 /** Generiert WhatsApp-Nachricht – entweder mit echtem Code oder Platzhalter */
-function generateWhatsAppMessage(
+export function generateWhatsAppMessage(
   order: any,
   selectedArticles: any[],
   promoCode: string,
@@ -234,20 +241,19 @@ function generateWhatsAppMessage(
     .map((a) => {
       const slug = a.shopProductId || "";
       const link = slug ? `${SHOP_BASE_URL}/product/${slug}` : SHOP_BASE_URL;
-      const price = a.sellingPrice ? `${parseFloat(a.sellingPrice).toFixed(2).replace(".", ",")} €` : "";
-      return `• ${a.name}${price ? ` (${price})` : ""}\n  ${link}`;
+      return `*${a.name}*\n${a.generatedCopy}\n${link}`;
     })
-    .join("\n");
+    .join("\n\n");
 
   return `Hallo ${firstName},
 
 wir hoffen, du bist zufrieden mit deiner Bestellung vom ${orderDate}! 🙏
 
-Als Dankeschön für dein Vertrauen möchten wir dir heute einige Produkte vorstellen, die hervorragend zu deiner bisherigen Forschung passen könnten:
+Als Dankeschön für dein Vertrauen möchten wir dir eine gezielte Ergänzung zeigen:
 
 ${productLines}
 
-Mit dem Code *${promoCode}* erhältst du *${terms.discountPercent}% Rabatt* auf deine nächste Bestellung – einfach im Checkout eingeben.
+Dein persönlicher Rabatt: *${promoCode} – ${terms.discountPercent}%*
 
 ⏳ _Dieser Code ist nur für dich und nur bis ${expiryStr} Uhr gültig._
 
@@ -260,7 +266,7 @@ Dein 369 Research Team`;
 }
 
 /** Generiert E-Mail-Betreff und -Body – entweder mit echtem Code oder Platzhalter */
-function generateEmailContent(
+export function generateEmailContent(
   order: any,
   selectedArticles: any[],
   promoCode: string,
@@ -288,8 +294,8 @@ function generateEmailContent(
         : "";
       return `<tr>
         <td style="padding:8px 12px;border-bottom:1px solid #f0f0f0;">
-          <a href="${link}" style="color:#0040C1;text-decoration:none;font-weight:600;">${a.name}</a>
-          ${a.category ? `<br><span style="color:#64748b;font-size:12px;">${a.category}</span>` : ""}
+          <a href="${link}" style="color:#0040C1;text-decoration:none;font-weight:600;">${escapeHtml(a.name)}</a>
+          <br><span style="color:#475569;font-size:13px;line-height:1.5;">${escapeHtml(a.generatedCopy)}</span>
         </td>
         <td style="padding:8px 12px;border-bottom:1px solid #f0f0f0;text-align:right;white-space:nowrap;">${price}</td>
       </tr>`;
@@ -313,11 +319,10 @@ function generateEmailContent(
       <p style="color:#1A1A2E;font-size:16px;margin:0 0 8px;">Hallo ${firstName},</p>
       <p style="color:#475569;font-size:15px;line-height:1.6;margin:0 0 24px;">
         wir hoffen, du bist zufrieden mit deiner Bestellung vom <strong>${orderDate}</strong>!
-        Als Dankeschön für dein Vertrauen möchten wir dir heute einige Produkte vorstellen,
-        die hervorragend zu deiner bisherigen Forschung passen könnten.
+        Als Dankeschön für dein Vertrauen möchten wir dir eine gezielte Ergänzung zeigen.
       </p>
       <!-- Products -->
-      <h2 style="color:#1A1A2E;font-size:16px;font-weight:700;margin:0 0 16px;">Empfehlungen für dich</h2>
+      <h2 style="color:#1A1A2E;font-size:16px;font-weight:700;margin:0 0 16px;">Gezielt für dich ausgewählt</h2>
       <table style="width:100%;border-collapse:collapse;margin-bottom:24px;">
         <thead>
           <tr style="background:#f7f9fc;">
@@ -821,11 +826,18 @@ export const followUpRouter = router({
   selectProducts: adminProcedure
     .input(z.object({
       followupId: z.number(),
-      articleIds: z.array(z.number()),
+      articleIds: z.array(z.number()).min(1).max(2),
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
+
+      const [followUp] = await db.select().from(salesFollowups)
+        .where(eq(salesFollowups.id, input.followupId)).limit(1);
+      if (!followUp) throw new Error("Follow-up nicht gefunden");
+      if (followUp.discountCode || followUp.promoCodeId || followUp.codeCreatedAt) {
+        throw new Error("AUSWAHL_FIXIERT: Produkte können nach der Code-Erstellung nicht mehr geändert werden.");
+      }
 
       // Alte Auswahl löschen
       await db
@@ -841,6 +853,15 @@ export const followUpRouter = router({
           }))
         );
       }
+
+      // Any old preview belongs to the previous selection and must never be sent.
+      await db.update(salesFollowups).set({
+        whatsappMessage: null,
+        emailSubject: null,
+        emailBody: null,
+        messageGeneratedAt: null,
+        updatedAt: new Date(),
+      }).where(eq(salesFollowups.id, input.followupId));
 
       return { ok: true };
     }),
@@ -879,11 +900,16 @@ export const followUpRouter = router({
       // Ausgewählte Produkte laden
       const selectedProducts = await db
         .select({
+          followupProductId: salesFollowupProducts.id,
           id: articles.id,
           name: articles.name,
           sellingPrice: articles.sellingPrice,
           shopProductId: articles.shopProductId,
           category: articles.category,
+          shortDescription: articles.shortDescription,
+          description: articles.description,
+          beautyData: articles.beautyData,
+          generatedCopy: salesFollowupProducts.generatedCopy,
         })
         .from(salesFollowupProducts)
         .leftJoin(articles, eq(salesFollowupProducts.articleId, articles.id))
@@ -891,6 +917,39 @@ export const followUpRouter = router({
 
       if (selectedProducts.length === 0) {
         throw new Error("Keine Produkte ausgewählt. Bitte zuerst Produkte auswählen.");
+      }
+      if (selectedProducts.length > 2) {
+        throw new Error("Bitte maximal zwei Produkte für eine Follow-up-Nachricht auswählen.");
+      }
+
+      if (selectedProducts.some((product) => !product.id || !product.name)) {
+        throw new Error("Ein ausgewähltes Produkt ist nicht mehr verfügbar.");
+      }
+
+      let productCopySource: "ai" | "fallback" | "existing" = "existing";
+      const missingCopyProducts = selectedProducts.filter((product) => !product.generatedCopy);
+      if (missingCopyProducts.length > 0) {
+        const generated = await generateFollowUpProductCopies(missingCopyProducts.map((product) => ({
+          id: Number(product.id),
+          name: product.name || "Produkt",
+          category: product.category,
+          shortDescription: product.shortDescription,
+          description: product.description,
+          beautyData: product.beautyData,
+        })));
+        const copyByArticleId = new Map(generated.copies.map((copy) => [copy.articleId, copy.copy]));
+        productCopySource = generated.source;
+
+        for (const product of missingCopyProducts) {
+          const generatedCopy = copyByArticleId.get(Number(product.id));
+          if (!generatedCopy) throw new Error("Produkttext konnte nicht sicher erstellt werden.");
+          await db.update(salesFollowupProducts).set({
+            generatedCopy,
+            generatedCopySource: generated.source,
+            generatedCopyGeneratedAt: now,
+          }).where(eq(salesFollowupProducts.id, product.followupProductId));
+          product.generatedCopy = generatedCopy;
+        }
       }
 
       // Nachrichten mit Platzhalter generieren – KEIN Code-Erstellen hier.
@@ -924,6 +983,7 @@ export const followUpRouter = router({
         codeExpired: followUp.discountCode && followUp.codeExpiresAt
           ? new Date(followUp.codeExpiresAt) < now
           : false,
+        productCopySource,
         ...terms,
       };
     }),
@@ -974,10 +1034,15 @@ export const followUpRouter = router({
           sellingPrice: articles.sellingPrice,
           shopProductId: articles.shopProductId,
           category: articles.category,
+          generatedCopy: salesFollowupProducts.generatedCopy,
         })
         .from(salesFollowupProducts)
         .leftJoin(articles, eq(salesFollowupProducts.articleId, articles.id))
         .where(eq(salesFollowupProducts.followupId, input.followupId));
+
+      if (selectedProducts.some((product) => !product.generatedCopy)) {
+        throw new Error("Produkttexte fehlen. Bitte die Nachricht vor dem Senden neu generieren.");
+      }
 
       // ── Code-Logik ──────────────────────────────────────────────────────────
       let promoCode: string;

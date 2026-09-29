@@ -586,6 +586,15 @@ async function start() {
           ADD COLUMN IF NOT EXISTS message_generated_at TIMESTAMP,
           ADD COLUMN IF NOT EXISTS whatsapp_opened_at TIMESTAMP,
           ADD COLUMN IF NOT EXISTS reminder_stage INTEGER NOT NULL DEFAULT 1;
+
+        ALTER TABLE sales_followup_products
+          ADD COLUMN IF NOT EXISTS generated_copy TEXT,
+          ADD COLUMN IF NOT EXISTS generated_copy_source VARCHAR(20),
+          ADD COLUMN IF NOT EXISTS generated_copy_generated_at TIMESTAMP;
+
+        CREATE INDEX IF NOT EXISTS idx_sales_followup_products_generated_copy
+          ON sales_followup_products(followup_id)
+          WHERE generated_copy IS NOT NULL;
       `);
       console.log("[Server] Follow-up tables ready (incl. code fields v2)");
     }
