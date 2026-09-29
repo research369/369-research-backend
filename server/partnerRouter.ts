@@ -29,6 +29,7 @@ import {
 } from "./partnerAuth.js";
 import {
   buildLegacyPartnerCodeTerms,
+  calculateSelfOrderDiscountPercent,
   canRedeemShopCredit,
   getPartnerProgram,
   isDiscountAllowedForProgram,
@@ -39,6 +40,7 @@ import {
   resolveActivePartnerCode,
   splitPartnerCodes,
 } from "./partnerProgramService.js";
+import { persistAddressValidation, validateGermanAddress } from "./addressValidationService.js";
 // ─── Partner Auth Helpers ─────────────────────────────────────────
 // Middleware for partner-authenticated procedures
 const isPartner = middleware(async ({ ctx, next }) => {
@@ -58,6 +60,10 @@ const partnerAddressInput = z.object({
   zip: z.string().trim().min(1).max(30),
   city: z.string().trim().min(1).max(100),
   country: z.string().trim().min(1).max(100),
+});
+
+const partnerAddressUpdateInput = partnerAddressInput.extend({
+  addressValidationOverride: z.object({ confirmed: z.literal(true) }).optional(),
 });
 
 const partnerCodeTermsInput = z.object({
@@ -120,6 +126,10 @@ function serialisePartnerAddress(address: Record<string, string | null | undefin
     city: address.city || "",
     country: address.country || "",
   });
+}
+
+function partnerAddressValidationError(warnings: Array<{ message: string }>): Error {
+  return new Error(`PARTNER_ADRESSE_UNGUELTIG: ${warnings.map((warning) => warning.message).join(" ")}`);
 }
 
 async function getPartnerAddressNotificationRecipients(): Promise<string[]> {
@@ -981,6 +991,13 @@ export const partnerRouter = router({
       await db.update(partners).set({ lastLogin: new Date() }).where(eq(partners.id, partner.id));
 
       const token = createPartnerToken(partner.id);
+      const program = await getPartnerProgram(partner.id);
+      if (!program) throw new Error("Partnerprogramm nicht verfügbar");
+      const selfOrderDiscountPercent = calculateSelfOrderDiscountPercent(
+        program,
+        parseFloat(partner.customerDiscountPercent),
+        parseFloat(partner.commissionPercent),
+      );
 
       // Set cookie
       ctx.res.cookie(PARTNER_COOKIE_NAME, token, {
@@ -1004,6 +1021,7 @@ export const partnerRouter = router({
           programKey: partner.programKey,
           creditBalance: parseFloat(partner.creditBalance),
           customerDiscountPercent: parseFloat(partner.customerDiscountPercent),
+          selfOrderDiscountPercent,
           address: {
             street: partner.street || "",
             houseNumber: partner.houseNumber || "",
@@ -1033,6 +1051,7 @@ export const partnerRouter = router({
   portalMe: partnerProcedure
     .query(async ({ ctx }) => {
       const partner = (ctx as any).partner;
+      const program = await getPartnerProgram(partner.id);
       return {
         id: partner.id,
         name: partner.name,
@@ -1046,6 +1065,13 @@ export const partnerRouter = router({
         commissionType: partner.commissionType,
         programKey: partner.programKey,
         creditBalance: parseFloat(partner.creditBalance),
+        selfOrderDiscountPercent: program
+          ? calculateSelfOrderDiscountPercent(
+              program,
+              parseFloat(partner.customerDiscountPercent),
+              parseFloat(partner.commissionPercent),
+            )
+          : parseFloat(partner.customerDiscountPercent),
         address: {
           street: partner.street || "",
           houseNumber: partner.houseNumber || "",
@@ -1073,6 +1099,95 @@ export const partnerRouter = router({
         requestedAddress: JSON.parse(request.requestedAddressJson),
         createdAt: request.createdAt,
         updatedAt: request.updatedAt,
+      };
+    }),
+
+  // An authenticated partner owns their own delivery address. Every direct
+  // change is validated first and retained as an immutable approved audit row;
+  // no other partner, customer or historic order can be altered through this route.
+  portalUpdateDeliveryAddress: partnerProcedure
+    .input(partnerAddressUpdateInput)
+    .mutation(async ({ ctx, input }) => {
+      const partner = (ctx as any).partner;
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      const requestedAddress = normalisePartnerAddress(input);
+      const currentAddress = {
+        street: partner.street || "",
+        houseNumber: partner.houseNumber || "",
+        zip: partner.zip || "",
+        city: partner.city || "",
+        country: partner.country || "",
+      };
+      if (addressFingerprint(requestedAddress) === addressFingerprint(currentAddress)) {
+        return { success: true, alreadyCurrent: true, message: "Diese Lieferadresse ist bereits hinterlegt." };
+      }
+
+      const validation = await validateGermanAddress({
+        ...requestedAddress,
+        deliveryType: "home",
+      });
+      const needsExplicitConfirmation = validation.applicable
+        && (validation.status === "warning" || validation.status === "unavailable");
+      if (needsExplicitConfirmation && input.addressValidationOverride?.confirmed !== true) {
+        throw partnerAddressValidationError(validation.warnings);
+      }
+
+      if (needsExplicitConfirmation) {
+        await persistAddressValidation({
+          input: { ...requestedAddress, deliveryType: "home" },
+          result: validation,
+          context: "partner_address_update",
+          overrideConfirmed: true,
+          confirmedBy: `Partner ${partner.partnerNumber}`,
+        });
+      }
+
+      await db.transaction(async (tx) => {
+        await tx.update(partners).set({
+          street: requestedAddress.street,
+          houseNumber: requestedAddress.houseNumber || null,
+          zip: requestedAddress.zip,
+          city: requestedAddress.city,
+          country: requestedAddress.country,
+          updatedAt: new Date(),
+        }).where(eq(partners.id, partner.id));
+
+        // Supersede any still-open request: the portal owner has now saved a
+        // newer verified address directly, so an older admin approval must not
+        // overwrite it later.
+        await tx.update(partnerAddressRequests).set({
+          status: "rejected",
+          reviewedAt: new Date(),
+          reviewedBy: `partner:${partner.partnerNumber}`,
+          reviewNote: "Durch die spätere direkte, validierte Partner-Adressänderung ersetzt.",
+          updatedAt: new Date(),
+        }).where(and(
+          eq(partnerAddressRequests.partnerId, partner.id),
+          eq(partnerAddressRequests.status, "open"),
+        ));
+
+        await tx.insert(partnerAddressRequests).values({
+          partnerId: partner.id,
+          partnerNameSnapshot: partner.name,
+          partnerNumberSnapshot: partner.partnerNumber,
+          partnerEmailSnapshot: partner.email || null,
+          currentAddressJson: serialisePartnerAddress(currentAddress),
+          requestedAddressJson: serialisePartnerAddress(requestedAddress),
+          requestFingerprint: addressFingerprint(requestedAddress),
+          status: "approved",
+          notificationStatus: "not_required",
+          reviewedAt: new Date(),
+          reviewedBy: `partner:${partner.partnerNumber}`,
+          reviewNote: "Direkte, durch den angemeldeten Partner bestätigte und validierte Lieferadressänderung.",
+        });
+      });
+
+      return {
+        success: true,
+        alreadyCurrent: false,
+        message: "Lieferadresse wurde geprüft und für zukünftige Partnerbestellungen gespeichert.",
       };
     }),
 

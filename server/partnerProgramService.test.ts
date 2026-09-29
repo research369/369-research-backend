@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   buildLegacyPartnerCodeTerms,
   calculateProgramDiscount,
+  calculateSelfOrderDiscountPercent,
   canRedeemShopCredit,
   isDiscountAllowedForProgram,
   isRepeatCodeUseAllowed,
@@ -92,4 +93,11 @@ test("calculates the customer discount only once on the post-promotion product b
   assert.equal(calculateProgramDiscount(100, 20, 10), 8);
   assert.equal(calculateProgramDiscount(100, 0, 10), 10);
   assert.equal(calculateProgramDiscount(10, 20, 10), 0);
+});
+
+test("converts a Creator's public discount plus payout into one self-order discount", () => {
+  assert.equal(calculateSelfOrderDiscountPercent(creator, 10, 20), 30);
+  assert.equal(calculateSelfOrderDiscountPercent(creator, 5, 12.5), 17.5);
+  // Historic partner/self-user programs retain their own configured product discount.
+  assert.equal(calculateSelfOrderDiscountPercent(partner, 10, 20), 10);
 });

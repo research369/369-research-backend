@@ -46,3 +46,12 @@ test("an explicit order-bound credit amount remains auditable and cannot be nega
     commissionPercent: 10,
   }, -0.01));
 });
+
+test("a Creator self-order can persist a zero commission after converting it into direct discount", () => {
+  assert.equal(calculateCommissionAmount({
+    subtotal: 100,
+    totalProductDiscount: 30,
+    creditUsed: 0,
+    commissionPercent: 0,
+  }), 0);
+});

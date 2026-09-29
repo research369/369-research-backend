@@ -303,6 +303,24 @@ export function isPayoutProgram(program: PartnerProgram): boolean {
   return program.settlementMethod === "payout";
 }
 
+/**
+ * A Creator's own authenticated purchase converts the benefit normally split
+ * between the customer discount and the Creator payout into one direct product
+ * discount. It never applies to public code orders and must not create a second
+ * commission afterwards. Other programs retain their established self-order
+ * customer-discount rate.
+ */
+export function calculateSelfOrderDiscountPercent(
+  program: PartnerProgram,
+  customerDiscountPercent: number,
+  commissionPercent: number,
+): number {
+  const customerDiscount = validPercentage(customerDiscountPercent, "Kundenrabatt");
+  const commission = validPercentage(commissionPercent, "Provision");
+  if (program.key !== "creator") return customerDiscount;
+  return Math.min(100, Math.round((customerDiscount + commission + Number.EPSILON) * 100) / 100);
+}
+
 export function calculateProgramDiscount(subtotal: number, priorProductDiscount: number, percentage: number): number {
   const base = Math.max(0, Math.round((subtotal - priorProductDiscount) * 100) / 100);
   const percent = Math.max(0, Math.min(100, percentage));

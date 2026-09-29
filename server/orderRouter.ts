@@ -48,6 +48,7 @@ import { serializeKwkFraudFlags } from "./kwkReferralPayload.js";
 import { getAuthenticatedPartnerFromRequest } from "./partnerAuth.js";
 import {
   calculateProgramDiscount,
+  calculateSelfOrderDiscountPercent,
   getPartnerProgram,
   isDiscountAllowedForProgram,
   isRepeatCodeUseAllowed,
@@ -222,6 +223,7 @@ export const orderRouter = router({
       // Its customer discount is never accepted from the browser. Creator codes
       // are reusable by policy; exact terms are snapshotted with the new order.
       let resolvedPublicPartnerCode: ResolvedPartnerCode | null = null;
+      let publicPartnerDiscountEligible = false;
       if (input.partnerCode?.trim() && !input.partnerNumber?.trim()) {
         resolvedPublicPartnerCode = await resolveActivePartnerCode(input.partnerCode);
         if (!resolvedPublicPartnerCode) throw new Error("PARTNER_CODE_UNGUELTIG");
@@ -229,13 +231,13 @@ export const orderRouter = router({
         const authoritativeGlobalDiscount = activeGlobalDiscount
           ? calculateAutomaticGlobalDiscount(input.subtotal, activeGlobalDiscount.percentage)
           : 0;
-        let discountEligible = isDiscountAllowedForProgram(
+        publicPartnerDiscountEligible = isDiscountAllowedForProgram(
           resolvedPublicPartnerCode.program,
           input.customer.email,
           resolvedPublicPartnerCode.partnerEmail,
         );
         const normalizedCustomerEmail = input.customer.email?.trim().toLowerCase() || "";
-        if (discountEligible && normalizedCustomerEmail && !isRepeatCodeUseAllowed(resolvedPublicPartnerCode.program)) {
+        if (publicPartnerDiscountEligible && normalizedCustomerEmail && !isRepeatCodeUseAllowed(resolvedPublicPartnerCode.program)) {
           const previousPaidOrder = await db.select({ orderId: orders.orderId }).from(orders)
             .where(and(
               eq(orders.partnerCode, resolvedPublicPartnerCode.partnerCode),
@@ -244,20 +246,59 @@ export const orderRouter = router({
               sql`${orders.paidAt} IS NOT NULL`,
             ))
             .limit(1);
-          discountEligible = previousPaidOrder.length === 0;
+          publicPartnerDiscountEligible = previousPaidOrder.length === 0;
         }
         const authoritativePartnerDiscount = calculateProgramDiscount(
           input.subtotal,
           authoritativeGlobalDiscount,
-          discountEligible ? resolvedPublicPartnerCode.customerDiscountPercent : 0,
+          publicPartnerDiscountEligible ? resolvedPublicPartnerCode.customerDiscountPercent : 0,
         );
         input.partnerDiscount = authoritativePartnerDiscount;
-        // Browser requests from the shop have no manual rebate channel. WaWi keeps
-        // its authenticated manual-price workflow unchanged.
-        if (input.orderSource !== "wawi_manual") {
-          input.discount = roundMoney(authoritativeGlobalDiscount + authoritativePartnerDiscount);
-          input.total = roundMoney(input.subtotal - input.discount + input.shipping);
+      }
+
+      // A partner number identifies an authenticated self-order. Its monetary
+      // terms are resolved below from the session-owned partner row; a public
+      // code or any browser-provided percentage can never authorize this route.
+      const requiresPartnerSession = Boolean(input.partnerNumber?.trim()) || (input.creditUsed || 0) > 0;
+      const authenticatedPartner = requiresPartnerSession
+        ? await getAuthenticatedPartnerFromRequest(ctx.req)
+        : null;
+      if (requiresPartnerSession && !authenticatedPartner) {
+        throw new Error("PARTNER_GUTHABEN_AUTHENTIFIZIERUNG_ERFORDERLICH");
+      }
+      if (authenticatedPartner && input.partnerNumber && input.partnerNumber !== authenticatedPartner.partnerNumber) {
+        throw new Error("PARTNER_GUTHABEN_PARTNER_MISMATCH");
+      }
+
+      let selfOrderDiscountPercent: number | null = null;
+      let authenticatedSelfOrderProgram: PartnerProgram | null = null;
+      if (authenticatedPartner) {
+        const normalizedPartnerEmail = (authenticatedPartner.email || "").trim().toLowerCase();
+        const normalizedOrderEmail = (input.customer.email || "").trim().toLowerCase();
+        if (normalizedPartnerEmail && normalizedOrderEmail !== normalizedPartnerEmail) {
+          throw new Error("PARTNER_SELBSTBESTELLUNG_EMAIL_MISMATCH");
         }
+        const normalizeAddressPart = (value: string | null | undefined) => String(value || "")
+          .trim().toLocaleLowerCase("de-DE").replace(/\s+/g, " ");
+        const partnerHasDeliveryAddress = Boolean(
+          authenticatedPartner.street && authenticatedPartner.zip && authenticatedPartner.city,
+        );
+        if (partnerHasDeliveryAddress && (
+          normalizeAddressPart(input.customer.street) !== normalizeAddressPart(authenticatedPartner.street)
+          || normalizeAddressPart(input.customer.houseNumber) !== normalizeAddressPart(authenticatedPartner.houseNumber)
+          || normalizeAddressPart(input.customer.zip) !== normalizeAddressPart(authenticatedPartner.zip)
+          || normalizeAddressPart(input.customer.city) !== normalizeAddressPart(authenticatedPartner.city)
+          || normalizeAddressPart(input.customer.country) !== normalizeAddressPart(authenticatedPartner.country)
+        )) {
+          throw new Error("PARTNER_SELBSTBESTELLUNG_ADRESS_MISMATCH");
+        }
+        authenticatedSelfOrderProgram = await getPartnerProgram(authenticatedPartner.id);
+        if (!authenticatedSelfOrderProgram) throw new Error("PARTNER_PROGRAMM_NICHT_VERFUEGBAR");
+        selfOrderDiscountPercent = calculateSelfOrderDiscountPercent(
+          authenticatedSelfOrderProgram,
+          Number(authenticatedPartner.customerDiscountPercent || 0),
+          Number(authenticatedPartner.commissionPercent || 0),
+        );
       }
 
       // Im öffentlichen Shop werden Preise für KWK und den aktiven Dauerrabatt
@@ -283,7 +324,7 @@ export const orderRouter = router({
         isAuthenticatedWawiManualSale,
         sendOrderConfirmation: input.sendOrderConfirmation,
       });
-      if (!isAuthenticatedWawiManualSale && (hasKwkRequest || activeGlobalDiscount)) {
+      if (!isAuthenticatedWawiManualSale && (hasKwkRequest || activeGlobalDiscount || resolvedPublicPartnerCode || authenticatedPartner)) {
         const catalog = await db.select({
           sku: articles.sku,
           shopProductId: articles.shopProductId,
@@ -304,6 +345,30 @@ export const orderRouter = router({
       const automaticGlobalDiscountAmount = activeGlobalDiscount
         ? calculateAutomaticGlobalDiscount(input.subtotal, activeGlobalDiscount.percentage)
         : 0;
+      // The catalog-backed subtotal is available now. Recalculate every public
+      // partner and authenticated self-order discount here, rather than trusting
+      // a preview value computed in the browser before prices were reconstructed.
+      if (resolvedPublicPartnerCode || authenticatedPartner) {
+        const authoritativePartnerDiscount = resolvedPublicPartnerCode
+          ? calculateProgramDiscount(
+              input.subtotal,
+              automaticGlobalDiscountAmount,
+              publicPartnerDiscountEligible ? resolvedPublicPartnerCode.customerDiscountPercent : 0,
+            )
+          : calculateProgramDiscount(
+              input.subtotal,
+              automaticGlobalDiscountAmount,
+              selfOrderDiscountPercent || 0,
+        );
+        input.partnerDiscount = authoritativePartnerDiscount;
+        if (!isAuthenticatedWawiManualSale) {
+          // A partner path is an explicit commercial program, not a browser
+          // supplied discount stack. Its sole allowed companion is the centrally
+          // configured automatic global promotion.
+          input.discount = roundMoney(automaticGlobalDiscountAmount + authoritativePartnerDiscount);
+          input.total = roundMoney(input.subtotal - input.discount + input.shipping);
+        }
+      }
       const submittedAutomaticGlobalDiscount = roundMoney((input.discountBreakdown || [])
         .filter((entry) => entry.source === "automatic_global_percent")
         .reduce((sum, entry) => sum + entry.amount, 0));
@@ -511,16 +576,24 @@ export const orderRouter = router({
           percentage: activeGlobalDiscount.percentage,
         });
       }
-      const authoritativePublicPartnerDiscount = roundMoney(input.partnerDiscount || 0);
-      if (resolvedPublicPartnerCode && authoritativePublicPartnerDiscount > 0) {
+      const authoritativePartnerDiscount = roundMoney(input.partnerDiscount || 0);
+      if ((resolvedPublicPartnerCode || authenticatedPartner) && authoritativePartnerDiscount > 0) {
+        const isCreatorSelfOrder = Boolean(authenticatedPartner && authenticatedSelfOrderProgram?.key === "creator");
+        const partnerDiscountPercent = selfOrderDiscountPercent
+          ?? resolvedPublicPartnerCode?.customerDiscountPercent
+          ?? 0;
         submittedDiscountBreakdown.push({
           source: "partner_self_discount" as const,
-          label: resolvedPublicPartnerCode.program.key === "creator"
-            ? `Creator-Code ${resolvedPublicPartnerCode.partnerCode} (${resolvedPublicPartnerCode.customerDiscountPercent}%)`
-            : `Partner-Code ${resolvedPublicPartnerCode.partnerCode} (${resolvedPublicPartnerCode.customerDiscountPercent}%)`,
-          amount: authoritativePublicPartnerDiscount,
-          percentage: resolvedPublicPartnerCode.customerDiscountPercent,
-          code: resolvedPublicPartnerCode.partnerCode,
+          label: authenticatedPartner
+            ? (isCreatorSelfOrder
+                ? `Creator-Eigenbestellung (${partnerDiscountPercent}%)`
+                : `Partnereigenbestellung (${partnerDiscountPercent}%)`)
+            : (resolvedPublicPartnerCode?.program.key === "creator"
+                ? `Creator-Code ${resolvedPublicPartnerCode.partnerCode} (${partnerDiscountPercent}%)`
+                : `Partner-Code ${resolvedPublicPartnerCode?.partnerCode} (${partnerDiscountPercent}%)`),
+          amount: authoritativePartnerDiscount,
+          percentage: partnerDiscountPercent,
+          ...(resolvedPublicPartnerCode ? { code: resolvedPublicPartnerCode.partnerCode } : {}),
         });
       }
       const submittedDiscountBreakdownTotal = roundMoney(
@@ -706,30 +779,22 @@ export const orderRouter = router({
       let partnerCommissionPercentSnapshot: number | null = resolvedPublicPartnerCode?.commissionPercent || null;
       let partnerCommissionBaseSnapshot: number | null = null;
 
-      // A partner number identifies a self-order and a credit redemption moves
-      // money. Neither may be authorized by a publicly known partner number.
-      // The session identity wins over all browser-provided partner fields.
-      const requiresPartnerSession = Boolean(partnerNumber) || creditUsed > 0;
-      const authenticatedPartner = requiresPartnerSession
-        ? await getAuthenticatedPartnerFromRequest(ctx.req)
-        : null;
-      if (requiresPartnerSession && !authenticatedPartner) {
-        throw new Error("PARTNER_GUTHABEN_AUTHENTIFIZIERUNG_ERFORDERLICH");
-      }
       if (authenticatedPartner) {
         if (partnerNumber && partnerNumber !== authenticatedPartner.partnerNumber) {
           throw new Error("PARTNER_GUTHABEN_PARTNER_MISMATCH");
         }
         partnerNumber = authenticatedPartner.partnerNumber;
-        partnerCode = authenticatedPartner.code;
+        // A self-order is attributed through the authenticated partner number,
+        // never by copying the legacy CSV code mirror onto the order.
+        partnerCode = null;
       }
 
       // Partner wird beim Checkout ausschließlich zugeordnet. Eine Gutschrift entsteht
       // erst nach bestätigtem Zahlungseingang im zentralen Partnerguthaben-Service.
-      const resolvePartnerForOrder = async (partner: { id: number; code: string }, reason: string) => {
-        if (!partnerCode) partnerCode = partner.code;
+      const resolvePartnerForOrder = async (partner: { id: number; code?: string | null }, reason: string) => {
+        if (!partnerCode && partner.code) partnerCode = partner.code;
         partnerSourceId = partner.id;
-        console.log(`[Orders] Partner zugeordnet: ${partner.code} (${reason}); Guthaben wird erst nach Zahlung gebucht.`);
+        console.log(`[Orders] Partner zugeordnet: ${partner.code || authenticatedPartner?.partnerNumber || partner.id} (${reason}); Guthaben wird erst nach Zahlung gebucht.`);
       };
 
       // Case 1: Partner CODE was provided (customer or partner entered the code)
@@ -742,20 +807,16 @@ export const orderRouter = router({
         await resolvePartnerForOrder({ id: resolvedPublicPartnerCode.partnerId, code: resolvedPublicPartnerCode.partnerCode }, "Code");
       }
 
-      // Case 2: authenticated partner self-order. The authentication helper has
-      // intentionally populated partnerCode above, so this must be keyed by the
-      // verified partner number rather than the absence of a code.
+      // Case 2: authenticated partner self-order. The session-owned partner is
+      // the only authority for the direct discount and its zero Creator payout.
       if (partnerNumber && authenticatedPartner) {
-        const { and: andOp } = await import("drizzle-orm");
-        const [partner] = await db.select().from(partners)
-          .where(andOp(eq(partners.partnerNumber, partnerNumber), eq(partners.isActive, 1)))
-          .limit(1);
-
-        if (partner) {
-          await resolvePartnerForOrder(partner, "Eigenbestellung");
-          partnerProgram = await getPartnerProgram(partner.id);
-          partnerCommissionPercentSnapshot = Number(partner.commissionPercent || 0);
-        }
+        await resolvePartnerForOrder({ id: authenticatedPartner.id, code: null }, "Eigenbestellung");
+        partnerProgram = authenticatedSelfOrderProgram;
+        // For Creators, the code discount plus the normal payout becomes a single
+        // direct self-order discount. No later payout/ledger commission may arise.
+        partnerCommissionPercentSnapshot = partnerProgram?.key === "creator"
+          ? 0
+          : Number(authenticatedPartner.commissionPercent || 0);
       }
 
       if (partnerProgram) {
@@ -1109,7 +1170,7 @@ export const orderRouter = router({
         partnerCommissionPolicySnapshot: partnerProgram?.commissionPolicy || null,
         partnerCustomerDiscountPolicySnapshot: partnerProgram?.customerDiscountPolicy || null,
         partnerCommissionPercentSnapshot: partnerCommissionPercentSnapshot?.toFixed(2) || null,
-        partnerCustomerDiscountPercentSnapshot: resolvedPublicPartnerCode?.customerDiscountPercent.toFixed(2) || null,
+        partnerCustomerDiscountPercentSnapshot: (selfOrderDiscountPercent ?? resolvedPublicPartnerCode?.customerDiscountPercent)?.toFixed(2) || null,
         partnerCommissionBaseSnapshot: partnerCommissionBaseSnapshot?.toFixed(2) || null,
         creditUsed: creditUsed.toFixed(2),
         kwkCreditUsed: (input.kwkCreditUsed || 0).toFixed(2),
