@@ -9,6 +9,8 @@
 1. **WaWi → Goodies**
    - Ein schlankes Formular legt einen realen Artikel plus Goodie-Katalogeintrag an.
    - Freie optionale Gruppe und Zusatz-/Variantenlabel; keine vordefinierten oder automatisch angelegten Kategorien.
+   - Die operative Hierarchie ist bewusst datengetrieben: `group_label` = **Bereich** (z. B. Textil), Artikelname = **Produktmodell** (z. B. Herren T-Shirt), `display_label` = **einzeln bestandsgeführte Variante** (z. B. Schwarz · L). Es gibt keine festen Kategorien im Code.
+   - Die WaWi zeigt Bereich → Produktmodell → Varianten und bietet direkt am Produktmodell „Variante anlegen“ an. Dabei werden Bereich, Modell, Preise und Vormerkungen vorausgefüllt; jede Variante bleibt trotzdem ein eigener Artikel mit eigener SKU und eigenem Bestand.
    - Anfangsbestand, Meldebestand, Einkaufspreis, Verkaufspreis, Notiz und optionale SKU.
    - Die SKU wird bei leerem Feld serverseitig erzeugt.
    - Bestand bleibt ausschließlich in `articles.stock` und wird im bestehenden `stock_history` geführt.
@@ -16,7 +18,7 @@
    - Hauptfoto und bis zu acht Galerie-Fotos können direkt hochgeladen werden (JPG/PNG/WebP, jeweils maximal 3 MB) oder als HTTPS-URL gepflegt werden. Die Originaldatei wird unverändert als Bildreferenz im Goodie-Artikel gespeichert; ein Bildwechsel löscht keine bestehende Goodie-Ausgabehistorie.
 
 2. **Packen → Goodies für diese Bestellung**
-   - Nur aktive Goodies mit Bestand werden gezeigt.
+   - Nur aktive Goodies mit Bestand werden gezeigt – gruppiert als Bereich → Produktmodell → auswählbare Varianten, inklusive Suche über Bereich, Modell, Variante und SKU.
    - Ein Klick schreibt atomar: Sperre auf Bestellung/Artikel, Bestandsabzug, `stock_history` und Goodie-Ausgabe.
    - Die Ausgabe gehört **nicht** zu `order_items`, beeinflusst keine Rechnung, Zahlung, Rabatt, Versand oder Bestellsumme.
    - Jede Auswahl hat eine clientseitig erzeugte `requestId`, die serverseitig eindeutig ist. Netzwerkwiederholungen oder parallele Klicks können daher nicht doppelt buchen.
