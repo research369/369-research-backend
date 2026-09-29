@@ -9,7 +9,7 @@
  * - Gültiger Code wird wiederverwendet, abgelaufener Code gibt Warnung zurück
  */
 import { z } from "zod";
-import { eq, and, lte, isNull, desc, or, inArray, ne } from "drizzle-orm";
+import { eq, and, lte, gte, isNull, desc, or, inArray, ne } from "drizzle-orm";
 import { router, adminProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
 import { ENV } from "./env.js";
@@ -22,6 +22,7 @@ import {
   customers,
   promoCodes,
 } from "../drizzle/schema.js";
+import { calculateFollowUpShipmentWindow } from "./followUpEligibility.js";
 
 const RESEND_API_URL = "https://api.resend.com/emails";
 const SHOP_BASE_URL = "https://www.369research.eu";
@@ -501,8 +502,10 @@ function computeCrossSellRecommendations(
 
 export const followUpRouter = router({
   /**
-   * Erstellt fehlende Follow-ups für alle versendeten Bestellungen
-   * die shipped_at + FOLLOWUP_CONFIG.reminderDaysAfterShipping Tage überschritten haben.
+   * Erstellt fehlende Follow-ups für versendete Bestellungen, die nach der
+   * Karenzzeit fällig sind und deren Versand maximal zehn Tage zurückliegt.
+   * Dadurch kann ein historischer Rückstau nicht wieder in die aktive Queue
+   * gelangen, wenn "Neue prüfen" nach einer Pause betätigt wird.
    * Wird beim Dashboard-Load aufgerufen (idempotent).
    * KEIN automatischer Code-Aufruf – Code wird erst bei "Nachricht generieren" erstellt.
    */
@@ -510,18 +513,21 @@ export const followUpRouter = router({
     const db = await getDb();
     if (!db) throw new Error("Database not available");
 
-    const cutoff = new Date(
-      Date.now() - FOLLOWUP_CONFIG.reminderDaysAfterShipping * 24 * 60 * 60 * 1000
+    const now = new Date();
+    const { dueBy, eligibleFrom } = calculateFollowUpShipmentWindow(
+      now,
+      FOLLOWUP_CONFIG.reminderDaysAfterShipping,
     );
 
-    // Alle versendeten Bestellungen mit shipped_at <= cutoff
+    // Nur versendete Bestellungen im begrenzten, fälligen Zeitfenster.
     const shippedOrders = await db
       .select({ orderId: orders.orderId, shippedAt: orders.shippedAt })
       .from(orders)
       .where(
         and(
           eq(orders.status, "versendet"),
-          lte(orders.shippedAt, cutoff)
+          gte(orders.shippedAt, eligibleFrom),
+          lte(orders.shippedAt, dueBy),
         )
       );
 
