@@ -58,6 +58,7 @@ import {
   type ResolvedPartnerCode,
 } from "./partnerProgramService.js";
 import { isFinanciallyPaidStatus } from "./paidFinancialStatus.js";
+import { reconcileFreeBacWaterForShopOrder } from "./freeBacWaterService.js";
 
 /**
  * Releases a pending KWK referral only after an order is known to be paid.
@@ -354,6 +355,20 @@ export const orderRouter = router({
       }
       if (authenticatedPartner && resolvedPromoCode) {
         throw new Error("PARTNER_AKTIONSCODE_AUSGESCHLOSSEN: Partnerbestellungen können nur den zentralen Shop-Dauerrabatt kombinieren.");
+      }
+      // The browser may show a free 3 ml BAC line for qualifying peptide vials,
+      // but it must never create one for cosmetics or other non-vial products.
+      // Rebuild that one generated gift from the catalogue before every public
+      // checkout is priced, stocked or persisted. Manual WaWi lines remain a
+      // separate, explicitly controlled workflow.
+      if (!isAuthenticatedWawiManualSale) {
+        const bacEligibilityCatalog = await db.select({
+          sku: articles.sku,
+          shopProductId: articles.shopProductId,
+          category: articles.category,
+          categories: articles.categories,
+        }).from(articles);
+        input.items = reconcileFreeBacWaterForShopOrder(input.items, bacEligibilityCatalog);
       }
       const coldShippingRequestedByWawi = isAuthenticatedWawiManualSale
         && input.coldShippingRequested === true;
