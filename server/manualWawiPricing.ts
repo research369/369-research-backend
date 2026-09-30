@@ -1,6 +1,20 @@
 import { roundMoney } from "./kwkCheckoutPricing.js";
 
 /**
+ * A manual WaWi discount is accounting metadata, never a customer-facing
+ * promotion code. This prevents labels such as "25%" or "Kostenloser Versand"
+ * from being resolved against the promo-code catalogue.
+ */
+export function normalizeDiscountCodeForOrderSource(
+  orderSource: string | null | undefined,
+  discountCode: string | null | undefined,
+): string | null {
+  if (orderSource === "wawi_manual") return null;
+  const normalized = discountCode?.trim();
+  return normalized ? normalized : null;
+}
+
+/**
  * Serverseitige Endberechnung für einen authentifizierten manuellen WaWi-Verkauf.
  *
  * Der Dauerrabatt wird ausschließlich aus der zentralen Serverkonfiguration

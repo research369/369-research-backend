@@ -41,7 +41,7 @@ import {
 } from "./kwkCheckoutPricing.js";
 import { verifyKwkToken } from "./kwkAuth.js";
 import { getActiveGlobalAutomaticDiscountFromDb } from "./globalAutomaticDiscountConfig.js";
-import { calculateAuthoritativeWawiManualOrder } from "./manualWawiPricing.js";
+import { calculateAuthoritativeWawiManualOrder, normalizeDiscountCodeForOrderSource } from "./manualWawiPricing.js";
 import { shouldSendOrderConfirmation } from "./orderConfirmationPolicy.js";
 import { resolveSubstitutionProductFamily } from "./orderItemIdentity.js";
 import { serializeKwkFraudFlags } from "./kwkReferralPayload.js";
@@ -206,6 +206,15 @@ export const orderRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
+      const isRequestedWawiManualSale = input.orderSource === "wawi_manual";
+      if (isRequestedWawiManualSale && !ctx.user) {
+        throw new Error("WAWI_ANMELDUNG_ERFORDERLICH: Bitte erneut anmelden, bevor ein manueller Verkauf angelegt wird.");
+      }
+      const isAuthenticatedWawiManualSale = isRequestedWawiManualSale && Boolean(ctx.user);
+      // The manual workflow records discounts in discountBreakdown; labels such
+      // as "25%" or "Kostenloser Versand" must never enter promo-code lookup.
+      input.discountCode = normalizeDiscountCodeForOrderSource(input.orderSource, input.discountCode);
+
       const qrAttribution = await resolveQrAttribution(input.qrAttributionToken);
 
       const requestedKwkCredit = roundMoney(input.kwkCreditUsed || 0);
@@ -341,18 +350,6 @@ export const orderRouter = router({
       // zwingend eine gültige WaWi-Sitzung. So kann ein öffentlicher Request nie
       // manuelle Preise erzwingen und eine fehlende Sitzung nie still zu einer
       // Preisüberschreibung führen.
-      const isRequestedWawiManualSale = input.orderSource === "wawi_manual";
-      if (isRequestedWawiManualSale && !ctx.user) {
-        throw new Error("WAWI_ANMELDUNG_ERFORDERLICH: Bitte erneut anmelden, bevor ein manueller Verkauf angelegt wird.");
-      }
-      const isAuthenticatedWawiManualSale = isRequestedWawiManualSale && Boolean(ctx.user);
-      // WaWi order pricing is deliberately a separate, manually authorized
-      // workflow. Do not consume a customer-facing one-time Follow-up code in
-      // that route; its existing manual discount controls stay untouched.
-      if (isAuthenticatedWawiManualSale && resolvedPromoCode) {
-        resolvedPromoCode = null;
-        resolvedPromoCodeRecord = null;
-      }
       if (authenticatedPartner && resolvedPromoCode) {
         throw new Error("PARTNER_AKTIONSCODE_AUSGESCHLOSSEN: Partnerbestellungen können nur den zentralen Shop-Dauerrabatt kombinieren.");
       }
