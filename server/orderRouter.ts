@@ -61,6 +61,7 @@ import { isFinanciallyPaidStatus } from "./paidFinancialStatus.js";
 import { reconcileFreeBacWaterForShopOrder } from "./freeBacWaterService.js";
 import { refreshCustomerOrderMetrics } from "./customerMetricsService.js";
 import { isCommercialOrder, isCompletedCommercialOrder } from "./commercialOrderMetrics.js";
+import { shouldKeepClientDiscountBreakdownSource } from "./discountBreakdownRules.js";
 
 /**
  * Releases a pending KWK referral only after an order is known to be paid.
@@ -642,9 +643,11 @@ export const orderRouter = router({
       // Bestellung sauber von Aktionscodes, Partnern und Guthaben getrennt.
       const submittedDiscountBreakdown = (input.discountBreakdown || [])
         .filter((entry) => entry.amount > 0
-          && entry.source !== "automatic_global_percent"
-          && !(resolvedPromoCode && entry.source === "promotion_code")
-          && !(resolvedPublicPartnerCode && entry.source === "partner_self_discount"))
+          && shouldKeepClientDiscountBreakdownSource(entry.source, {
+            hasResolvedPromotionCode: Boolean(resolvedPromoCode),
+            hasResolvedPublicPartnerCode: Boolean(resolvedPublicPartnerCode),
+            hasAuthenticatedPartnerSelfOrder: Boolean(authenticatedPartner),
+          }))
         .map((entry) => ({
           ...entry,
           amount: roundMoney(entry.amount),
