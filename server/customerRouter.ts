@@ -9,6 +9,7 @@ import { getDb } from "./db.js";
 import { customers, orders, orderItems, customerCommunications, emailTemplates, emailCampaigns, partners } from "../drizzle/schema.js";
 import { queueCustomerDuplicateReview } from "./customerIntegrityService.js";
 import { persistAddressValidation, validateGermanAddress } from "./addressValidationService.js";
+import { calculateCustomerOrderMetrics } from "./customerOrderMetrics.js";
 
 const RESEND_API_URL = "https://api.resend.com/emails";
 
@@ -157,6 +158,33 @@ export const customerRouter = router({
       }));
     }),
 
+  // One authoritative whole-CRM summary: every active order is counted exactly
+  // once, independently from duplicate identities or the current list filters.
+  summary: adminProcedure.query(async () => {
+    const db = await getDb();
+    if (!db) throw new Error("Database not available");
+
+    const [allCustomers, allOrders] = await Promise.all([
+      db.select({ id: customers.id, email: customers.email }).from(customers),
+      db.select({ customerId: orders.customerId, total: orders.total, status: orders.status }).from(orders),
+    ]);
+    const activeOrders = allOrders.filter((order) => order.status !== "storniert");
+    const customerIds = new Set(allCustomers.map((customer) => customer.id));
+    const linkedActiveOrders = activeOrders.filter((order) => order.customerId !== null && customerIds.has(order.customerId));
+    const unlinkedActiveOrders = activeOrders.filter((order) => order.customerId === null || !customerIds.has(order.customerId));
+
+    return {
+      totalCustomers: allCustomers.length,
+      customersWithEmail: allCustomers.filter((customer) => Boolean(customer.email?.trim())).length,
+      totalOrders: activeOrders.length,
+      totalRevenue: activeOrders.reduce((sum, order) => sum + parseFloat(order.total), 0),
+      linkedOrderCount: linkedActiveOrders.length,
+      linkedRevenue: linkedActiveOrders.reduce((sum, order) => sum + parseFloat(order.total), 0),
+      unlinkedOrderCount: unlinkedActiveOrders.length,
+      unlinkedRevenue: unlinkedActiveOrders.reduce((sum, order) => sum + parseFloat(order.total), 0),
+    };
+  }),
+
   // Get single customer with full history
   get: adminProcedure
     .input(z.object({ id: z.number() }))
@@ -167,33 +195,13 @@ export const customerRouter = router({
       const [customer] = await db.select().from(customers).where(eq(customers.id, input.id)).limit(1);
       if (!customer) throw new Error("Customer not found");
 
-      // Get orders linked by customerId, email, or phone
-      // Placeholder emails/phones are excluded from matching to avoid false positives
-      const PLACEHOLDER_EMAILS_GET = new Set([
-        'keine@angabe.de', 'noemail@noemail.de', 'no@email.de', 'noreply@noreply.de',
-        'placeholder@placeholder.de', 'test@test.de', 'info@info.de', 'otc@369research.eu',
-      ]);
-      const allOrders = await db.select().from(orders).orderBy(desc(orders.orderDate));
-      const emailKey = customer.email?.toLowerCase().trim() || '';
-      const phoneKey = customer.phone?.trim() || '';
-      const emailUsable = emailKey && !PLACEHOLDER_EMAILS_GET.has(emailKey);
-      const phoneUsable = phoneKey && phoneKey.length > 4;
-      const customerOrders = allOrders.filter(o => {
-        // Primary: direct customerId link
-        if (o.customerId === customer.id) return true;
-        // Secondary: email match (only if customer has a real email)
-        if (emailUsable && o.email.toLowerCase().trim() === emailKey) return true;
-        // Tertiary: phone match (only if customer has a real phone)
-        if (phoneUsable && o.phone.trim() === phoneKey) return true;
-        return false;
-      });
-      // Deduplicate by orderId
-      const seenIds = new Set<string>();
-      const uniqueCustomerOrders = customerOrders.filter(o => {
-        if (seenIds.has(o.orderId)) return false;
-        seenIds.add(o.orderId);
-        return true;
-      });
+      // A historical order belongs to precisely one customer record. Never infer
+      // history from a shared e-mail address or phone number here: that was the
+      // source of CRM total overcounts and misleading customer histories.
+      const uniqueCustomerOrders = await db.select()
+        .from(orders)
+        .where(eq(orders.customerId, customer.id))
+        .orderBy(desc(orders.orderDate));
 
       // Get items for these orders
       const orderIds = uniqueCustomerOrders.map(o => o.orderId);
@@ -833,15 +841,32 @@ export const customerRouter = router({
     // Build lookup maps from existing customers (ignore placeholder emails)
     const emailToCustomer: Record<string, typeof existingCustomers[0]> = {};
     const phoneToCustomer: Record<string, typeof existingCustomers[0]> = {};
+    const emailMatchCounts: Record<string, number> = {};
+    const phoneMatchCounts: Record<string, number> = {};
     for (const c of existingCustomers) {
       if (c.email) {
         const k = c.email.toLowerCase().trim();
-        if (!PLACEHOLDER_EMAILS.has(k)) emailToCustomer[k] = c;
+        if (!PLACEHOLDER_EMAILS.has(k)) {
+          emailToCustomer[k] = c;
+          emailMatchCounts[k] = (emailMatchCounts[k] || 0) + 1;
+        }
       }
       if (c.phone) {
         const k = normalizePhone(c.phone);
-        if (k.length >= 7) phoneToCustomer[k] = c;
+        if (k.length >= 7) {
+          phoneToCustomer[k] = c;
+          phoneMatchCounts[k] = (phoneMatchCounts[k] || 0) + 1;
+        }
       }
+    }
+    // A shared e-mail address or phone number is not evidence of identity. It
+    // must be reviewed manually rather than silently attributing an order to
+    // the last profile that happened to be inserted into a lookup map.
+    for (const [key, count] of Object.entries(emailMatchCounts)) {
+      if (count !== 1) delete emailToCustomer[key];
+    }
+    for (const [key, count] of Object.entries(phoneMatchCounts)) {
+      if (count !== 1) delete phoneToCustomer[key];
     }
 
     // Group orders by identity (email preferred, then phone, then single order)
@@ -987,72 +1012,16 @@ export const customerRouter = router({
     const allCustomers = await db.select().from(customers);
     const allOrders = await db.select().from(orders);
 
-    // Placeholder/dummy emails that should NOT be used for matching
-    const PLACEHOLDER_EMAILS = new Set([
-      'keine@angabe.de', 'noemail@noemail.de', 'no@email.de', 'noreply@noreply.de',
-      'placeholder@placeholder.de', 'test@test.de', 'info@info.de', 'otc@369research.eu',
-    ]);
-    // Placeholder phones
-    const PLACEHOLDER_PHONES = new Set(['0000000', '00000000000', '']);
-
-    // Build a map: email -> list of customerIds that use it
-    // If multiple customers share the same email, email-matching is ambiguous → skip it
-    const emailToCustomerIds: Record<string, number[]> = {};
-    for (const c of allCustomers) {
-      if (c.email && !PLACEHOLDER_EMAILS.has(c.email.toLowerCase().trim())) {
-        const key = c.email.toLowerCase().trim();
-        if (!emailToCustomerIds[key]) emailToCustomerIds[key] = [];
-        emailToCustomerIds[key].push(c.id);
-      }
-    }
-    // Same for phone
-    const phoneToCustomerIds: Record<string, number[]> = {};
-    for (const c of allCustomers) {
-      if (c.phone && !PLACEHOLDER_PHONES.has(c.phone.trim())) {
-        const key = c.phone.trim();
-        if (!phoneToCustomerIds[key]) phoneToCustomerIds[key] = [];
-        phoneToCustomerIds[key].push(c.id);
-      }
-    }
-
     let updated = 0;
     for (const customer of allCustomers) {
-      const emailKey = customer.email?.toLowerCase().trim() || '';
-      const phoneKey = customer.phone?.trim() || '';
-      // Only use email for matching if it's unique (not shared with other customers) and not a placeholder
-      const emailIsUsable = emailKey && !PLACEHOLDER_EMAILS.has(emailKey) && (emailToCustomerIds[emailKey]?.length ?? 0) === 1;
-      // Only use phone for matching if it's unique and not a placeholder
-      const phoneIsUsable = phoneKey && !PLACEHOLDER_PHONES.has(phoneKey) && (phoneToCustomerIds[phoneKey]?.length ?? 0) === 1;
+      const uniqueOrders = allOrders.filter((order) => order.customerId === customer.id);
 
-      const customerOrders = allOrders.filter(o => {
-        // Primary: direct customerId link (always reliable)
-        if (o.customerId === customer.id) return true;
-        // Secondary: unique email match
-        if (emailIsUsable && o.email.toLowerCase().trim() === emailKey) return true;
-        // Tertiary: unique phone match
-        if (phoneIsUsable && o.phone.trim() === phoneKey) return true;
-        return false;
-      });
-
-      // Deduplicate by orderId (avoid counting same order twice)
-      const seen = new Set<string>();
-      const uniqueOrders = customerOrders.filter(o => {
-        if (seen.has(o.orderId)) return false;
-        seen.add(o.orderId);
-        return true;
-      });
-
-      const PAID_STATUSES_REBUILD = new Set(['bezahlt', 'gepackt', 'versendet', 'zugestellt']);
-      const totalOrders = uniqueOrders.length;
-      const totalSpent = uniqueOrders.filter(o => PAID_STATUSES_REBUILD.has(o.status)).reduce((sum, o) => sum + parseFloat(o.total), 0);
-      const orderDates = uniqueOrders.map(o => o.orderDate).filter(Boolean) as Date[];
-      const firstOrderDate = orderDates.length > 0 ? new Date(Math.min(...orderDates.map(d => d.getTime()))) : null;
-      const lastOrderDate = orderDates.length > 0 ? new Date(Math.max(...orderDates.map(d => d.getTime()))) : null;
+      const metrics = calculateCustomerOrderMetrics(uniqueOrders);
       await db.update(customers).set({
-        totalOrders,
-        totalSpent: totalSpent.toFixed(2),
-        firstOrderDate,
-        lastOrderDate,
+        totalOrders: metrics.totalOrders,
+        totalSpent: metrics.totalSpent.toFixed(2),
+        firstOrderDate: metrics.firstOrderDate,
+        lastOrderDate: metrics.lastOrderDate,
         updatedAt: new Date(),
       }).where(eq(customers.id, customer.id));
       updated++;

@@ -59,6 +59,7 @@ import {
 } from "./partnerProgramService.js";
 import { isFinanciallyPaidStatus } from "./paidFinancialStatus.js";
 import { reconcileFreeBacWaterForShopOrder } from "./freeBacWaterService.js";
+import { refreshCustomerOrderMetrics } from "./customerMetricsService.js";
 
 /**
  * Releases a pending KWK referral only after an order is known to be paid.
@@ -1535,16 +1536,25 @@ export const orderRouter = router({
           const normPhone = normalizePhone(customerPhone);
           const PLACEHOLDER_EMAILS_MATCH = new Set(['keine@angabe.de', 'noemail@noemail.de', 'no@email.de', 'otc@369research.eu', '']);
           const emailUsableForMatch = customerEmail && !PLACEHOLDER_EMAILS_MATCH.has(customerEmail.toLowerCase());
+          // Never pick an arbitrary profile from a shared e-mail address or phone
+          // number. The selected profile is an immutable order attribution and is
+          // also the sole basis for CRM totals and customer history.
+          const emailMatchCandidates = emailUsableForMatch
+            ? allCustomers.filter(c => c.email?.toLowerCase().trim() === customerEmail)
+            : [];
+          const emailIsUnique = emailMatchCandidates.length === 1;
           // Phone matching: only use if the number is UNIQUE (exactly one customer has it)
-          // This prevents false positives when multiple customers share the same phone number
+          // This prevents false positives when multiple customers share the same phone number.
           const phoneMatchCandidates = normPhone.length >= 8
             ? allCustomers.filter(c => c.phone && normalizePhone(c.phone) === normPhone)
             : [];
           const phoneIsUnique = phoneMatchCandidates.length === 1;
-          existingCustomer = allCustomers.find(c =>
-            (emailUsableForMatch && c.email && c.email.toLowerCase() === customerEmail) ||
-            (phoneIsUnique && c.phone && normalizePhone(c.phone) === normPhone && normPhone.length >= 8)
-          );
+          existingCustomer = emailIsUnique
+            ? emailMatchCandidates[0]
+            : (phoneIsUnique ? phoneMatchCandidates[0] : undefined);
+          if (!emailIsUnique && emailMatchCandidates.length > 1) {
+            console.warn(`[Customers] E-mail ${customerEmail} matches ${emailMatchCandidates.length} customers – skipping e-mail-based match to avoid false assignment`);
+          }
           if (!phoneIsUnique && phoneMatchCandidates.length > 1) {
             console.warn(`[Customers] Phone ${normPhone} matches ${phoneMatchCandidates.length} customers – skipping phone-based match to avoid false assignment`);
           }
@@ -1563,9 +1573,6 @@ export const orderRouter = router({
             (existingCustomer.city || "") !== (input.customer.city || ""),
             (existingCustomer.country || "") !== (input.customer.country || ""),
           ].some(Boolean);
-          const newTotalOrders = existingCustomer.totalOrders + 1;
-          const newTotalSpent = parseFloat(existingCustomer.totalSpent) + input.total;
-
           await db.update(customers).set({
             name: fullName,
             firstName: input.customer.firstName,
@@ -1579,9 +1586,6 @@ export const orderRouter = router({
             zip: (input.customer.zip ?? "").trim(),
             city: input.customer.city,
             country: input.customer.country,
-            totalOrders: newTotalOrders,
-            totalSpent: newTotalSpent.toFixed(2),
-            lastOrderDate: new Date(),
             updatedAt: new Date(),
           }).where(eq(customers.id, existingCustomer.id));
 
@@ -1653,6 +1657,12 @@ export const orderRouter = router({
       }
 
       });
+
+      // This must run after the persistence transaction commits. Derived CRM
+      // fields are recalculated only from directly assigned, active orders.
+      if (customerId) {
+        await refreshCustomerOrderMetrics(customerId);
+      }
 
       // Nach Kundenverknüpfung wird der bereits gesicherte Nachweis zusätzlich der
       // Kundenakte zugeordnet, ohne seinen Inhalt oder seine Bestätigung zu verändern.
@@ -2381,16 +2391,9 @@ export const orderRouter = router({
       await db.update(orders)
         .set({ customerId: input.newCustomerId, updatedAt: new Date() })
         .where(eq(orders.orderId, input.orderId));
-      // Rebuild stats for both affected customers
-      for (const cid of [oldCustomerId, input.newCustomerId] as number[]) {
-        if (!cid) continue;
-        const custOrders = await db.select().from(orders).where(sql`${orders.customerId} = ${cid}`);
-        const totalOrders = custOrders.length;
-        const totalSpent = custOrders.reduce((s, o) => s + parseFloat(o.total), 0);
-        const dates = custOrders.map(o => o.orderDate).filter(Boolean) as Date[];
-        const firstOrderDate = dates.length > 0 ? new Date(Math.min(...dates.map(d => d.getTime()))) : null;
-        const lastOrderDate = dates.length > 0 ? new Date(Math.max(...dates.map(d => d.getTime()))) : null;
-        await db.update(customers).set({ totalOrders, totalSpent: totalSpent.toFixed(2), firstOrderDate, lastOrderDate, updatedAt: new Date() }).where(sql`${customers.id} = ${cid}`);
+      // Rebuild exact direct-order statistics for both affected profiles.
+      for (const cid of new Set([oldCustomerId, input.newCustomerId])) {
+        if (cid) await refreshCustomerOrderMetrics(cid);
       }
       console.log(`[Orders] Reassigned order ${input.orderId} from customer ${oldCustomerId} to ${input.newCustomerId}`);
       return { success: true, oldCustomerId, newCustomerId: input.newCustomerId };
