@@ -3,6 +3,7 @@ import { z } from "zod";
 import { router, adminProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
 import { customerIssueCases, customerTagDefinitions, customers, orders, shopSettings } from "../drizzle/schema.js";
+import { isCompletedCommercialOrder } from "./commercialOrderMetrics.js";
 
 const issueStatus = z.enum(["open", "in_progress", "resolved", "archived"]);
 const issueSeverity = z.enum(["low", "normal", "high", "critical"]);
@@ -35,8 +36,6 @@ export function deriveCustomerStatus(paidOrderCount: number, totalSpent: number,
   if (paidOrderCount === 1) return { key: "erstbesteller", label: "Erstbesteller", color: "sky" };
   return { key: "neukunde", label: "Neukunde", color: "slate" };
 }
-
-const PAID_STATUSES = new Set(["bezahlt", "gepackt", "versendet", "zugestellt"]);
 
 export const customerDossierRouter = router({
   tagDefinitions: adminProcedure.input(z.object({ activeOnly: z.boolean().optional().default(true) }).optional()).query(async ({ input }) => {
@@ -93,7 +92,7 @@ export const customerDossierRouter = router({
       const definition = definitionsByKey.get(key) || definitions.find((row) => row.label.toLocaleLowerCase("de-DE") === tag.toLocaleLowerCase("de-DE"));
       return { key: definition?.tagKey || key, label: definition?.label || tag, color: definition?.color || "slate" };
     });
-    const paidOrders = allOrders.filter((order) => PAID_STATUSES.has(order.status));
+    const paidOrders = allOrders.filter(isCompletedCommercialOrder);
     const totalSpent = paidOrders.reduce((sum, order) => sum + Number(order.total || 0), 0);
     const status = deriveCustomerStatus(paidOrders.length, totalSpent, rawTags);
     const openCases = allCases.filter((item) => item.status === "open" || item.status === "in_progress");

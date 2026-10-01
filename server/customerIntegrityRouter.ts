@@ -4,8 +4,7 @@ import { router, adminProcedure } from "./trpc.js";
 import { getDb, getPool } from "./db.js";
 import { customers, duplicateCheckRuns, duplicateFindings, orderItems, orders, shopSettings } from "../drizzle/schema.js";
 import { runDuplicateCheck } from "./customerIntegrityService.js";
-
-const PAID = new Set(["bezahlt", "gepackt", "versendet", "zugestellt"]);
+import { isCompletedCommercialOrder } from "./commercialOrderMetrics.js";
 
 function customerPreview(customer: typeof customers.$inferSelect | undefined) {
   if (!customer) return null;
@@ -44,7 +43,7 @@ export const customerIntegrityRouter = router({
     const [customer] = records;
     if (!customer) return null;
     const linked = (await db.select().from(orders).orderBy(desc(orders.orderDate))).filter((order) => order.customerId === customer.id);
-    const countable = linked.filter((order) => PAID.has(order.status));
+    const countable = linked.filter(isCompletedCommercialOrder);
     // Die ausführliche Bestellansicht bleibt absichtlich auf die jüngsten zehn
     // Aufträge begrenzt. Interne Notizen werden jedoch unabhängig davon aus der
     // vollständigen, bereits verknüpften Kundenhistorie geliefert: Eine neue

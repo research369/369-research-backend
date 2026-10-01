@@ -6,6 +6,7 @@ import { eq, desc, asc, like, and, sql, gte, lte, inArray } from "drizzle-orm";
 import { router, adminProcedure, productManagerProcedure, packingProcedure, publicProcedure } from "./trpc.js";
 import { getDb, getPool } from "./db.js";
 import { articles, stockHistory, orderItems, orders, articleTranslations, articleFaq } from "../drizzle/schema.js";
+import { isBillableOrderItem, isCompletedCommercialOrder } from "./commercialOrderMetrics.js";
 
 type PublicShopVariant = {
   dosage: string;
@@ -699,11 +700,11 @@ export const articleRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
-      // Get all paid/shipped/delivered orders
+      // Only commercial sales belong to sales/product analytics. Zero-total
+      // replacements, samples and goodwill orders remain in operations but
+      // must never inflate sales counts, revenue or product rankings.
       const allOrders = await db.select().from(orders);
-      const paidOrders = allOrders.filter(o =>
-        ["bezahlt", "gepackt", "versendet", "zugestellt"].includes(o.status)
-      );
+      const paidOrders = allOrders.filter(isCompletedCommercialOrder);
 
       // Date filter
       let filtered = paidOrders;
@@ -728,6 +729,7 @@ export const articleRouter = router({
       // Product stats
       const productMap = new Map<string, { name: string; quantity: number; revenue: number }>();
       for (const item of allItems) {
+        if (!isBillableOrderItem(item)) continue;
         const key = item.name;
         const existing = productMap.get(key) || { name: item.name, quantity: 0, revenue: 0 };
         existing.quantity += item.quantity;

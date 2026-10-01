@@ -60,6 +60,7 @@ import {
 import { isFinanciallyPaidStatus } from "./paidFinancialStatus.js";
 import { reconcileFreeBacWaterForShopOrder } from "./freeBacWaterService.js";
 import { refreshCustomerOrderMetrics } from "./customerMetricsService.js";
+import { isCommercialOrder, isCompletedCommercialOrder } from "./commercialOrderMetrics.js";
 
 /**
  * Releases a pending KWK referral only after an order is known to be paid.
@@ -1929,18 +1930,19 @@ export const orderRouter = router({
 
     const allOrders = await db.select().from(orders);
 
+    const commercialOrders = allOrders.filter(isCommercialOrder);
     const stats = {
-      total: allOrders.length,
-      offen: allOrders.filter(o => o.status === "offen").length,
-      bezahlt: allOrders.filter(o => o.status === "bezahlt").length,
-      gepackt: allOrders.filter(o => o.status === "gepackt").length,
-      versendet: allOrders.filter(o => o.status === "versendet").length,
-      zugestellt: allOrders.filter(o => o.status === "zugestellt").length,
+      total: commercialOrders.length,
+      offen: commercialOrders.filter(o => o.status === "offen").length,
+      bezahlt: commercialOrders.filter(o => o.status === "bezahlt").length,
+      gepackt: commercialOrders.filter(o => o.status === "gepackt").length,
+      versendet: commercialOrders.filter(o => o.status === "versendet").length,
+      zugestellt: commercialOrders.filter(o => o.status === "zugestellt").length,
       storniert: allOrders.filter(o => o.status === "storniert").length,
-      umsatzBezahlt: allOrders
-        .filter(o => ["bezahlt", "gepackt", "versendet", "zugestellt"].includes(o.status))
+      umsatzBezahlt: commercialOrders
+        .filter(isCompletedCommercialOrder)
         .reduce((sum, o) => sum + parseFloat(o.total), 0),
-      umsatzOffen: allOrders
+      umsatzOffen: commercialOrders
         .filter(o => o.status === "offen")
         .reduce((sum, o) => sum + parseFloat(o.total), 0),
     };

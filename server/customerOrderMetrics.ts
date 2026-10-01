@@ -1,3 +1,5 @@
+import { isCommercialOrder } from "./commercialOrderMetrics.js";
+
 export const CUSTOMER_ORDER_STATUSES = new Set([
   "offen",
   "bezahlt",
@@ -29,7 +31,8 @@ export function calculateCustomerOrderMetrics(
   orders: CustomerOrderMetricInput[],
 ): CustomerOrderMetrics {
   const included = orders.filter((order) =>
-    CUSTOMER_ORDER_STATUSES.has(String(order.status || "").trim().toLowerCase()),
+    CUSTOMER_ORDER_STATUSES.has(String(order.status || "").trim().toLowerCase())
+    && isCommercialOrder(order),
   );
   const dates = included
     .map((order) => order.orderDate)

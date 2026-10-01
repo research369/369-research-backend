@@ -10,6 +10,7 @@ import { customers, orders, orderItems, customerCommunications, emailTemplates, 
 import { queueCustomerDuplicateReview } from "./customerIntegrityService.js";
 import { persistAddressValidation, validateGermanAddress } from "./addressValidationService.js";
 import { calculateCustomerOrderMetrics } from "./customerOrderMetrics.js";
+import { isCommercialOrder, isCompletedCommercialOrder } from "./commercialOrderMetrics.js";
 
 const RESEND_API_URL = "https://api.resend.com/emails";
 
@@ -168,7 +169,7 @@ export const customerRouter = router({
       db.select({ id: customers.id, email: customers.email }).from(customers),
       db.select({ customerId: orders.customerId, total: orders.total, status: orders.status }).from(orders),
     ]);
-    const activeOrders = allOrders.filter((order) => order.status !== "storniert");
+    const activeOrders = allOrders.filter(isCommercialOrder);
     const customerIds = new Set(allCustomers.map((customer) => customer.id));
     const linkedActiveOrders = activeOrders.filter((order) => order.customerId !== null && customerIds.has(order.customerId));
     const unlinkedActiveOrders = activeOrders.filter((order) => order.customerId === null || !customerIds.has(order.customerId));
@@ -914,7 +915,7 @@ export const customerRouter = router({
         email: (o.email && !PLACEHOLDER_EMAILS.has(o.email.toLowerCase().trim())) ? o.email : null,
         phone: o.phone || null,
         orderCount: grpOrders.length,
-        totalSpent: grpOrders.filter(x => ['bezahlt','gepackt','versendet','zugestellt'].includes(x.status)).reduce((s, x) => s + parseFloat(x.total || '0'), 0).toFixed(2),
+        totalSpent: grpOrders.filter(isCompletedCommercialOrder).reduce((s, x) => s + parseFloat(x.total || '0'), 0).toFixed(2),
         city: o.city || null,
         country: o.country || null,
         sampleOrderId: o.orderId,
@@ -954,10 +955,7 @@ export const customerRouter = router({
 
       const emailKey = (o.email || '').toLowerCase().trim();
       const emailUsable = emailKey && !PLACEHOLDER_EMAILS.has(emailKey);
-      const PAID_STATUSES = new Set(['bezahlt', 'gepackt', 'versendet', 'zugestellt']);
-      const totalOrders = grpOrders.length;
-      const totalSpent = grpOrders.filter(x => PAID_STATUSES.has(x.status)).reduce((s, x) => s + parseFloat(x.total || '0'), 0);
-      const dates = grpOrders.map(x => x.orderDate).filter(Boolean).sort();
+      const metrics = calculateCustomerOrderMetrics(grpOrders);
 
       try {
         const [newCustomer] = await db.insert(customers).values({
@@ -974,10 +972,10 @@ export const customerRouter = router({
           city: o.city || null,
           country: o.country || null,
           source: 'backfill',
-          totalOrders,
-          totalSpent: totalSpent.toFixed(2),
-          firstOrderDate: dates[0] ?? null,
-          lastOrderDate: dates[dates.length - 1] ?? null,
+          totalOrders: metrics.totalOrders,
+          totalSpent: metrics.totalSpent.toFixed(2),
+          firstOrderDate: metrics.firstOrderDate,
+          lastOrderDate: metrics.lastOrderDate,
         }).returning();
 
         // Link all orders in this group to the new customer

@@ -24,6 +24,7 @@ import {
 } from "../drizzle/schema.js";
 import { calculateFollowUpShipmentWindow } from "./followUpEligibility.js";
 import { generateFollowUpProductCopies } from "./followUpProductCopy.js";
+import { isCommercialOrder } from "./commercialOrderMetrics.js";
 
 const RESEND_API_URL = "https://api.resend.com/emails";
 const SHOP_BASE_URL = "https://www.369research.eu";
@@ -526,7 +527,7 @@ export const followUpRouter = router({
 
     // Nur versendete Bestellungen im begrenzten, fälligen Zeitfenster.
     const shippedOrders = await db
-      .select({ orderId: orders.orderId, shippedAt: orders.shippedAt })
+      .select({ orderId: orders.orderId, shippedAt: orders.shippedAt, total: orders.total, status: orders.status })
       .from(orders)
       .where(
         and(
@@ -546,6 +547,7 @@ export const followUpRouter = router({
 
     let created = 0;
     for (const o of shippedOrders) {
+      if (!isCommercialOrder(o)) continue;
       if (existingOrderIds.has(o.orderId)) continue;
 
       if (!o.shippedAt) continue;
@@ -717,11 +719,13 @@ export const followUpRouter = router({
         .from(orderItems)
         .where(eq(orderItems.orderId, followUp.orderId));
 
-      // Vollständige Bestellhistorie des Kunden
+      // Vollständige Bestellhistorie des Kunden. Kostenlose Ersatz- und
+      // Kulanzaufträge bleiben sichtbar, steuern aber keine Kaufempfehlung.
       const allCustomerOrders = await getCustomerOrderHistory(db, originOrder);
+      const commercialOrders = allCustomerOrders.filter((o: any) => isCommercialOrder(o));
 
-      // Für jede Bestellung die Items laden
-      const allOrderIds = allCustomerOrders.map((o: any) => o.orderId);
+      // Nur Artikel aus tatsächlichen Käufen können Empfehlungen beeinflussen.
+      const allOrderIds = commercialOrders.map((o: any) => o.orderId);
       const allItems = allOrderIds.length > 0
         ? await db.select().from(orderItems).where(inArray(orderItems.orderId, allOrderIds))
         : [];
@@ -734,8 +738,7 @@ export const followUpRouter = router({
       }
 
       // Statistiken
-      const nonCancelledOrders = allCustomerOrders.filter((o: any) => o.status !== "storniert");
-      const totalSpent = nonCancelledOrders.reduce(
+      const totalSpent = commercialOrders.reduce(
         (sum: number, o: any) => sum + parseFloat(o.total || "0"),
         0
       );
@@ -775,7 +778,7 @@ export const followUpRouter = router({
           items: itemsByOrder.get(o.orderId) || [],
         })),
         stats: {
-          totalOrders: allCustomerOrders.length,
+          totalOrders: commercialOrders.length,
           totalSpent,
           boughtArticleIds: Array.from(boughtArticleIds),
         },

@@ -6,6 +6,7 @@ test("CRM metrics count only directly assigned active orders", () => {
   const metrics = calculateCustomerOrderMetrics([
     { total: "100.00", status: "bezahlt", orderDate: new Date("2026-01-04T10:00:00.000Z") },
     { total: "30.00", status: "offen", orderDate: new Date("2026-02-05T10:00:00.000Z") },
+    { total: "0.00", status: "versendet", orderDate: new Date("2026-02-08T10:00:00.000Z") },
     { total: "90.00", status: "storniert", orderDate: new Date("2026-03-06T10:00:00.000Z") },
   ]);
 
