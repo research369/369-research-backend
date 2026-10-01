@@ -38,6 +38,7 @@ import { qrRedirectRouter } from "./qrRedirectRouter.js";
 import { ensurePeps4petsCheckoutSchema, isPeps4petsCheckoutSchemaReady } from "./peps4petsCheckoutSchema.js";
 import { ensureGoodieSchema } from "./goodieSchema.js";
 import { ensureCustomerOrderBlockSchema } from "./customerOrderBlockService.js";
+import { ensureCustomerPromoAssignmentSchema } from "./customerPromoAssignmentService.js";
 
 const app = express();
 
@@ -322,6 +323,14 @@ async function start() {
     await ensureCustomerOrderBlockSchema();
   } catch (err) {
     console.warn("[Server] Customer order-block schema migration failed:", err);
+  }
+
+  // Persönliche Aktionscodes sind separat und nur bei einer bewussten
+  // Bestellausgabe aktiv; allgemeine Aktionscodes bleiben unverändert.
+  try {
+    await ensureCustomerPromoAssignmentSchema();
+  } catch (err) {
+    console.warn("[Server] Customer promo-assignment schema migration failed:", err);
   }
 
   // Goodies: additive inventory catalog and immutable packing assignments.

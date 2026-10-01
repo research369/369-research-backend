@@ -17,6 +17,7 @@ import {
   getActiveCustomerOrderBlocksForCustomers,
   revokeCustomerOrderBlock,
 } from "./customerOrderBlockService.js";
+import { getPersonalPromoAssignmentsForCustomerIds } from "./customerPromoAssignmentService.js";
 
 const RESEND_API_URL = "https://api.resend.com/emails";
 
@@ -238,6 +239,7 @@ export const customerRouter = router({
         .where(eq(customerCommunications.customerId, customer.id))
         .orderBy(desc(customerCommunications.createdAt));
       const orderBlock = await getActiveCustomerOrderBlockForCustomer(customer.id);
+      const personalPromoAssignments = await getPersonalPromoAssignmentsForCustomerIds([customer.id]);
 
       return {
         ...customer,
@@ -246,6 +248,7 @@ export const customerRouter = router({
         orders: ordersWithItems,
         communications,
         orderBlock,
+        personalPromoCodes: personalPromoAssignments.get(customer.id) ?? [],
       };
     }),
 
