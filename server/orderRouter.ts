@@ -1719,9 +1719,10 @@ export const orderRouter = router({
       // Eine zusätzliche interne Mail wäre redundant und führt zu 4 Mails pro Bestellung.
       // sendAdminOrderNotification wurde hier entfernt.
 
-      const paymentInstructions = input.paymentMethod === "bunq" || input.paymentMethod === "SEPA" || input.paymentMethod === "wise"
-        ? await getReleasedBankTransferInstructions()
-        : null;
+      // Bank transfer is always returned after a successful order, including
+      // optional direct/card payments. It is the reliable fallback if a payment
+      // link or card transaction cannot be processed.
+      const paymentInstructions = await getReleasedBankTransferInstructions();
 
       return {
         success: true,

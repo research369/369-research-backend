@@ -49,6 +49,18 @@ test("bestehende 369-Bestellmail bleibt auf kanonischer Referenz und ohne P4P-Pr
   assert.match(presentation.html, /369-10607/);
 });
 
+test("Bestellmail erklärt Überweisung als zuverlässigen Fallback für die optionale Kartenzahlung", async () => {
+  const presentation = await getOrderConfirmationPresentation({
+    ...baseOrder,
+    paymentMethod: "creditCard",
+  });
+
+  assert.ok(presentation);
+  assert.match(presentation.html, /Es tut uns leid/);
+  assert.match(presentation.html, /Kreditkartenzahlungen können in unserer Branche technisch nicht immer verarbeitet werden/);
+  assert.match(presentation.html, /Überweisung funktioniert zuverlässig/);
+});
+
 test("eine P4P-Bestellmail ohne externe Referenz wird nicht vorbereitet", async () => {
   assert.equal(await getOrderConfirmationPresentation({ ...baseOrder, storeKey: "peps4pets" }), null);
 });

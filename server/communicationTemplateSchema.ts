@@ -13,9 +13,11 @@ type SeedTemplate = {
 // These templates are stored in the CRM database and can be maintained in the
 // WaWi. The legacy values let this release upgrade only untouched originals.
 export const LEGACY_DE_ORDER_CONFIRMATION_BODY = "Hallo {{firstName}},\n\nvielen Dank für deine Bestellung bei 369 Research.\n\nBestellnummer: {{orderId}}\n{{items}}\n\nGesamtbetrag: {{total}}\n\nSobald deine Zahlung eingegangen ist, bereiten wir deine Bestellung für den Versand vor.\n\nBei Fragen erreichst du uns jederzeit unter {{supportEmail}}.\n\nViele Grüße\n369 Research";
-export const DE_ORDER_CONFIRMATION_BODY = "Hallo {{firstName}},\n\nvielen Dank für deine Bestellung bei 369 Research.\n\nBestellnummer: {{orderId}}\n{{items}}\n\nGesamtbetrag: {{total}}\n\nBitte überweise den Gesamtbetrag per SEPA- oder Echtzeitüberweisung auf eines der folgenden Konten:\n\n{{paymentDetails}}\n\nVerwendungszweck: {{orderId}}\n\nSobald deine Zahlung eingegangen ist, bereiten wir deine Bestellung für den Versand vor.\n\nBei Fragen erreichst du uns jederzeit unter {{supportEmail}}.\n\nViele Grüße\n369 Research";
+export const PREVIOUS_DE_ORDER_CONFIRMATION_BODY = "Hallo {{firstName}},\n\nvielen Dank für deine Bestellung bei 369 Research.\n\nBestellnummer: {{orderId}}\n{{items}}\n\nGesamtbetrag: {{total}}\n\nBitte überweise den Gesamtbetrag per SEPA- oder Echtzeitüberweisung auf eines der folgenden Konten:\n\n{{paymentDetails}}\n\nVerwendungszweck: {{orderId}}\n\nSobald deine Zahlung eingegangen ist, bereiten wir deine Bestellung für den Versand vor.\n\nBei Fragen erreichst du uns jederzeit unter {{supportEmail}}.\n\nViele Grüße\n369 Research";
+export const DE_ORDER_CONFIRMATION_BODY = "Hallo {{firstName}},\n\nvielen Dank für deine Bestellung bei 369 Research.\n\nBestellnummer: {{orderId}}\n{{items}}\n\nGesamtbetrag: {{total}}\n\nBitte überweise den Gesamtbetrag per SEPA- oder Echtzeitüberweisung auf eines der folgenden Konten:\n\n{{paymentDetails}}\n\nVerwendungszweck: {{orderId}}\n\nHinweis zur Kreditkarte: Der Zahlungslink ist ein zusätzliches Angebot. Es tut uns leid: Kreditkartenzahlungen können in unserer Branche technisch nicht immer verarbeitet werden. Falls der Link oder die Kartenzahlung nicht funktioniert, überweise den Betrag bitte einfach per SEPA- oder Echtzeitüberweisung auf eines der oben genannten Konten – Überweisung funktioniert zuverlässig.\n\nSobald deine Zahlung eingegangen ist, bereiten wir deine Bestellung für den Versand vor.\n\nBei Fragen erreichst du uns jederzeit unter {{supportEmail}}.\n\nViele Grüße\n369 Research";
 export const LEGACY_EN_ORDER_CONFIRMATION_BODY = "Hello {{firstName}},\n\nthank you for your order with 369 Research.\n\nOrder number: {{orderId}}\n{{items}}\n\nOrder total: {{total}}\n\nAs soon as your payment has been received, we will prepare your order for dispatch.\n\nFor any questions, please contact us at {{supportEmail}}.\n\nKind regards\n369 Research";
-export const EN_ORDER_CONFIRMATION_BODY = "Hello {{firstName}},\n\nthank you for your order with 369 Research.\n\nOrder number: {{orderId}}\n{{items}}\n\nOrder total: {{total}}\n\nPlease transfer the total amount by SEPA or instant bank transfer to one of the following accounts:\n\n{{paymentDetails}}\n\nPayment reference: {{orderId}}\n\nAs soon as your payment has been received, we will prepare your order for dispatch.\n\nFor any questions, please contact us at {{supportEmail}}.\n\nKind regards\n369 Research";
+export const PREVIOUS_EN_ORDER_CONFIRMATION_BODY = "Hello {{firstName}},\n\nthank you for your order with 369 Research.\n\nOrder number: {{orderId}}\n{{items}}\n\nOrder total: {{total}}\n\nPlease transfer the total amount by SEPA or instant bank transfer to one of the following accounts:\n\n{{paymentDetails}}\n\nPayment reference: {{orderId}}\n\nAs soon as your payment has been received, we will prepare your order for dispatch.\n\nFor any questions, please contact us at {{supportEmail}}.\n\nKind regards\n369 Research";
+export const EN_ORDER_CONFIRMATION_BODY = "Hello {{firstName}},\n\nthank you for your order with 369 Research.\n\nOrder number: {{orderId}}\n{{items}}\n\nOrder total: {{total}}\n\nPlease transfer the total amount by SEPA or instant bank transfer to one of the following accounts:\n\n{{paymentDetails}}\n\nPayment reference: {{orderId}}\n\nCard payment notice: The payment link is an additional option. We are sorry: card payments may not always be processed successfully in our industry. If the link or card payment does not work, please simply transfer the amount by SEPA or instant bank transfer to one of the accounts above – bank transfer works reliably.\n\nAs soon as your payment has been received, we will prepare your order for dispatch.\n\nFor any questions, please contact us at {{supportEmail}}.\n\nKind regards\n369 Research";
 
 const DE: Array<Omit<SeedTemplate, "channel" | "language">> = [
   {
@@ -230,7 +232,9 @@ export async function ensureCommunicationTemplateSchema(): Promise<void> {
   // overwritten, and each automatic change remains visible in the audit ledger.
   const orderConfirmationUpgrades = [
     { language: "de", legacyBody: LEGACY_DE_ORDER_CONFIRMATION_BODY, body: DE_ORDER_CONFIRMATION_BODY },
+    { language: "de", legacyBody: PREVIOUS_DE_ORDER_CONFIRMATION_BODY, body: DE_ORDER_CONFIRMATION_BODY },
     { language: "en", legacyBody: LEGACY_EN_ORDER_CONFIRMATION_BODY, body: EN_ORDER_CONFIRMATION_BODY },
+    { language: "en", legacyBody: PREVIOUS_EN_ORDER_CONFIRMATION_BODY, body: EN_ORDER_CONFIRMATION_BODY },
   ] as const;
   for (const upgrade of orderConfirmationUpgrades) {
     for (const channel of ["email", "whatsapp"] as const) {
@@ -255,7 +259,7 @@ export async function ensureCommunicationTemplateSchema(): Promise<void> {
       await pool.query(
         `INSERT INTO communication_template_audit (template_id, action, previous_value, next_value, changed_by)
          VALUES ($1, 'system_migration', $2::jsonb, $3::jsonb, $4)`,
-        [updated.id, JSON.stringify(previousValue), JSON.stringify(nextValue), "system:order-confirmation-payment-details-v2"],
+        [updated.id, JSON.stringify(previousValue), JSON.stringify(nextValue), "system:order-confirmation-card-fallback-v3"],
       );
     }
   }

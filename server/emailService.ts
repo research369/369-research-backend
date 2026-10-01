@@ -89,7 +89,7 @@ function buildBankDetailsHtml(instructions: Awaited<ReturnType<typeof getRelease
 
 function buildBankTransferIntroHtml(bankDetailsHtml: string): string {
   if (!bankDetailsHtml) return "";
-  return `<p style="margin:0 0 14px;font-size:13px;color:#374151;line-height:1.55;">Du kannst den Betrag per <strong>SEPA- oder Echtzeitüberweisung</strong> auf <strong>eine</strong> der folgenden Bankverbindungen überweisen.</p>`;
+  return `<p style="margin:0 0 14px;font-size:13px;color:#374151;line-height:1.55;">Du kannst den Betrag per <strong>SEPA- oder Echtzeitüberweisung</strong> auf <strong>eine</strong> der folgenden Bankverbindungen überweisen. Überweisung ist der zuverlässige Zahlungsweg.</p>`;
 }
 
 function buildOrderConfirmationHtml(data: OrderEmailData, bankDetailsHtml: string): string {
@@ -198,10 +198,10 @@ function buildOrderConfirmationHtml(data: OrderEmailData, bankDetailsHtml: strin
         <li>Nach Zahlungseingang wird deine Bestellung verpackt</li>
         <li>Du erhältst eine Versandbenachrichtigung mit Tracking-Nummer</li>
       </ol>
-      <div style="margin-top:16px;padding:12px;background:#dcfce7;border-radius:8px;font-size:13px;color:#166534;">
-        <strong>Alternativ per Kreditkarte</strong> (bis 500 €):<br>
+      <div style="margin-top:16px;padding:12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;font-size:13px;color:#9a3412;">
+        <strong>Optionaler Zahlungslink: Kreditkarte / iDEAL / Wero</strong> (bis 500 €):<br>
         <a href="https://bunq.me/369Research" style="color:#15803d;font-weight:700;">https://bunq.me/369Research</a><br>
-        <span style="font-size:12px;color:#4ade80;">Bitte den Betrag selbst eingeben und Bestellnummer als Verwendungszweck angeben.</span>
+        <span style="font-size:12px;color:#9a3412;">Es tut uns leid: Kreditkartenzahlungen können in unserer Branche technisch nicht immer verarbeitet werden. Falls der Link oder die Kartenzahlung nicht funktioniert, überweise den Betrag bitte einfach per SEPA- oder Echtzeitüberweisung auf eines der oben genannten Konten – Überweisung funktioniert zuverlässig. Bitte den Betrag selbst eingeben und die Bestellnummer als Verwendungszweck angeben.</span>
       </div>
     </div>
 
@@ -243,12 +243,12 @@ export async function getOrderConfirmationPresentation(data: OrderEmailData): Pr
 } | null> {
   const isPeps4petsOrder = data.storeKey === "peps4pets";
   let bankDetailsHtml = "";
-  if (["bunq", "SEPA", "wise"].includes(data.paymentMethod)) {
-    try {
-      bankDetailsHtml = buildBankDetailsHtml(await getReleasedBankTransferInstructions());
-    } catch (error) {
-      console.warn("[Email] Zahlungsinstruktionen konnten nicht geladen werden:", error);
-    }
+  try {
+    // Every confirmation releases the bank-transfer fallback. This is essential
+    // when an optional card / payment-link transaction cannot be processed.
+    bankDetailsHtml = buildBankDetailsHtml(await getReleasedBankTransferInstructions());
+  } catch (error) {
+    console.warn("[Email] Zahlungsinstruktionen konnten nicht geladen werden:", error);
   }
   const customerReference = isPeps4petsOrder ? data.externalOrderReference : data.orderId;
   if (isPeps4petsOrder && !customerReference) return null;
