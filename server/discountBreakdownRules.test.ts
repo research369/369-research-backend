@@ -8,7 +8,7 @@ const noAuthoritativeTerms = {
   hasAuthenticatedPartnerSelfOrder: false,
 };
 
-test("replaces the browser promotion preview with the authoritative public partner-code row", () => {
+test("rebuilds both browser previews when promo and public partner terms are server-authoritative", () => {
   assert.equal(shouldKeepClientDiscountBreakdownSource("promotion_code", {
     ...noAuthoritativeTerms,
     hasResolvedPublicPartnerCode: true,
@@ -19,18 +19,23 @@ test("replaces the browser promotion preview with the authoritative public partn
   }), false);
 });
 
-test("does not double-count the 10% partner discount for a pre-discounted bundle", () => {
-  const browserPreview = [{ source: "promotion_code", amount: 13.86 }];
+test("does not double-count promo or 15% partner discounts for a pre-discounted bundle", () => {
+  const browserPreview = [
+    { source: "promotion_code", amount: 10 },
+    { source: "partner_self_discount", amount: 13.5 },
+  ];
   const retainedPreviewTotal = browserPreview
     .filter((entry) => shouldKeepClientDiscountBreakdownSource(entry.source, {
       ...noAuthoritativeTerms,
+      hasResolvedPromotionCode: true,
       hasResolvedPublicPartnerCode: true,
     }))
     .reduce((sum, entry) => sum + entry.amount, 0);
-  const authoritativePartnerDiscount = 13.86;
+  const authoritativePromoDiscount = 10;
+  const authoritativePartnerDiscount = 13.5;
 
   assert.equal(retainedPreviewTotal, 0);
-  assert.equal(retainedPreviewTotal + authoritativePartnerDiscount, 13.86);
+  assert.equal(retainedPreviewTotal + authoritativePromoDiscount + authoritativePartnerDiscount, 23.5);
 });
 
 test("keeps an ordinary browser promotion until the server has resolved it", () => {

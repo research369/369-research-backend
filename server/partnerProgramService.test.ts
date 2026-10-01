@@ -95,6 +95,15 @@ test("calculates the customer discount only once on the post-promotion product b
   assert.equal(calculateProgramDiscount(10, 20, 10), 0);
 });
 
+test("stacks a public 15% partner code on an already reduced bundle and an ordinary promo", () => {
+  // 100 € is the bundle's current shop price. A 10 € public promotion applies
+  // first, then a 15% Creator code applies to the remaining 90 €. Shipping is
+  // intentionally outside this price helper and remains untouched.
+  const promoDiscount = 10;
+  assert.equal(calculateProgramDiscount(100, promoDiscount, 15), 13.5);
+  assert.equal(100 - promoDiscount - calculateProgramDiscount(100, promoDiscount, 15), 76.5);
+});
+
 test("converts a Creator's public discount plus payout into one self-order discount", () => {
   assert.equal(calculateSelfOrderDiscountPercent(creator, 10, 20), 30);
   assert.equal(calculateSelfOrderDiscountPercent(creator, 5, 12.5), 17.5);

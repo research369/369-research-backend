@@ -242,9 +242,6 @@ export const orderRouter = router({
         resolvedPublicPartnerCode = await resolveActivePartnerCode(input.partnerCode);
         if (!resolvedPublicPartnerCode) throw new Error("PARTNER_CODE_UNGUELTIG");
         input.partnerCode = resolvedPublicPartnerCode.partnerCode;
-        const authoritativeGlobalDiscount = activeGlobalDiscount
-          ? calculateAutomaticGlobalDiscount(input.subtotal, activeGlobalDiscount.percentage)
-          : 0;
         publicPartnerDiscountEligible = isDiscountAllowedForProgram(
           resolvedPublicPartnerCode.program,
           input.customer.email,
@@ -262,21 +259,20 @@ export const orderRouter = router({
             .limit(1);
           publicPartnerDiscountEligible = previousPaidOrder.length === 0;
         }
-        const authoritativePartnerDiscount = calculateProgramDiscount(
-          input.subtotal,
-          authoritativeGlobalDiscount,
-          publicPartnerDiscountEligible ? resolvedPublicPartnerCode.customerDiscountPercent : 0,
-        );
-        input.partnerDiscount = authoritativePartnerDiscount;
       }
 
       // A general promo code, including an individual Follow-up code, is also
-      // resolved server-side. The browser may display it, but can neither extend
-      // its validity nor choose its discount percentage.
+      // resolved server-side. It stacks sequentially with an independently
+      // supplied public Creator/Partner code: catalogue/sale price -> automatic
+      // shop discount -> promo code -> public partner code. Shipping is never
+      // discounted by the partner code. The browser cannot choose a rate.
       let resolvedPromoCode: PromoDefinition | null = null;
       let resolvedPromoCodeRecord: { id: number; code: string } | null = null;
       const normalizedPromotionCode = input.discountCode?.trim().toUpperCase() || "";
-      if (normalizedPromotionCode && !resolvedPublicPartnerCode) {
+      if (normalizedPromotionCode) {
+        if (resolvedPublicPartnerCode && normalizedPromotionCode === resolvedPublicPartnerCode.partnerCode.replace(/\s+/g, "").toUpperCase()) {
+          throw new Error("AKTIONSCODE_ENTSPRICHT_PARTNERCODE");
+        }
         const [promo] = await db.select().from(promoCodes)
           .where(and(eq(promoCodes.code, normalizedPromotionCode), eq(promoCodes.isActive, 1)))
           .limit(1);
@@ -421,17 +417,6 @@ export const orderRouter = router({
       // partner and authenticated self-order discount here, rather than trusting
       // a preview value computed in the browser before prices were reconstructed.
       if (resolvedPublicPartnerCode || authenticatedPartner || resolvedPromoCode) {
-        const authoritativePartnerDiscount = resolvedPublicPartnerCode
-          ? calculateProgramDiscount(
-              input.subtotal,
-              automaticGlobalDiscountAmount,
-              publicPartnerDiscountEligible ? resolvedPublicPartnerCode.customerDiscountPercent : 0,
-            )
-          : calculateProgramDiscount(
-              input.subtotal,
-              automaticGlobalDiscountAmount,
-              selfOrderDiscountPercent || 0,
-            );
         const authoritativePromoDiscount = resolvedPromoCode
           ? calculatePromoDiscount({
               subtotal: input.subtotal,
@@ -440,13 +425,25 @@ export const orderRouter = router({
               precedingProductDiscount: automaticGlobalDiscountAmount,
             })
           : 0;
+        const authoritativePartnerDiscount = resolvedPublicPartnerCode
+          ? calculateProgramDiscount(
+              input.subtotal,
+              automaticGlobalDiscountAmount + authoritativePromoDiscount,
+              publicPartnerDiscountEligible ? resolvedPublicPartnerCode.customerDiscountPercent : 0,
+            )
+          : authenticatedPartner
+            ? calculateProgramDiscount(
+                input.subtotal,
+                automaticGlobalDiscountAmount,
+                selfOrderDiscountPercent || 0,
+              )
+            : 0;
         input.partnerDiscount = resolvedPublicPartnerCode || authenticatedPartner
           ? authoritativePartnerDiscount
           : 0;
         if (!isAuthenticatedWawiManualSale) {
-          // A partner path is an explicit commercial program, not a browser
-          // supplied discount stack. Its sole allowed companion is the centrally
-          // configured automatic global promotion.
+          // Public codes use the same sequential stack as the visible checkout.
+          // Authenticated self-orders retain their existing independent policy.
           input.discount = roundMoney(automaticGlobalDiscountAmount + authoritativePartnerDiscount + authoritativePromoDiscount);
           input.total = roundMoney(input.subtotal - input.discount + input.shipping);
         }
