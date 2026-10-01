@@ -87,7 +87,15 @@ function buildBankDetailsHtml(instructions: Awaited<ReturnType<typeof getRelease
   `).join("<tr><td colspan=\"2\" style=\"border-top:1px solid #dbeafe;\"></td></tr>");
 }
 
+function buildBankTransferIntroHtml(bankDetailsHtml: string): string {
+  if (!bankDetailsHtml) return "";
+  return `<p style="margin:0 0 14px;font-size:13px;color:#374151;line-height:1.55;">Du kannst den Betrag per <strong>SEPA- oder Echtzeitüberweisung</strong> auf <strong>eine</strong> der folgenden Bankverbindungen überweisen.</p>`;
+}
+
 function buildOrderConfirmationHtml(data: OrderEmailData, bankDetailsHtml: string): string {
+  const nextPaymentStep = bankDetailsHtml
+    ? `Überweise <strong>${data.total.toFixed(2)} €</strong> auf eines der oben genannten Konten mit dem Verwendungszweck <strong>${data.orderId}</strong>`
+    : `Nutze die gewählte Zahlungsart und gib als Verwendungszweck <strong>${data.orderId}</strong> an`;
   const itemRows = data.items.map(item => {
     const sku = generateSKUFromName(item.name, item.dosage || item.variant);
     return `
@@ -159,10 +167,10 @@ function buildOrderConfirmationHtml(data: OrderEmailData, bankDetailsHtml: strin
     <!-- Payment Details -->
     <div style="background:#eff6ff;border:1px solid #bfdbfe;border-top:none;padding:24px;">
       <h3 style="font-size:16px;color:#1e40af;margin:0 0 12px;">Zahlungsinformationen</h3>
+      ${buildBankTransferIntroHtml(bankDetailsHtml)}
       <table style="width:100%;border-collapse:collapse;">
         <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">Zahlungsart</td><td style="padding:8px 12px;font-size:14px;font-weight:600;">${getPaymentMethodLabel(data.paymentMethod)}</td></tr>
         ${bankDetailsHtml}
-        <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">Empfänger</td><td style="padding:8px 12px;font-size:14px;font-weight:600;">369 Research</td></tr>
         <tr style="background:#dbeafe;">
           <td style="padding:12px;color:#1e40af;font-size:14px;font-weight:600;">Verwendungszweck</td>
           <td style="padding:12px;font-size:16px;font-weight:700;color:#1e40af;letter-spacing:1px;">${data.orderId}</td>
@@ -186,7 +194,7 @@ function buildOrderConfirmationHtml(data: OrderEmailData, bankDetailsHtml: strin
     <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-top:none;border-radius:0 0 12px 12px;padding:24px;">
       <h3 style="font-size:16px;color:#166534;margin:0 0 12px;">Nächste Schritte</h3>
       <ol style="margin:0;padding:0 0 0 20px;font-size:14px;color:#15803d;line-height:1.8;">
-        <li>Überweise <strong>${data.total.toFixed(2)} €</strong> mit dem Verwendungszweck <strong>${data.orderId}</strong></li>
+        <li>${nextPaymentStep}</li>
         <li>Nach Zahlungseingang wird deine Bestellung verpackt</li>
         <li>Du erhältst eine Versandbenachrichtigung mit Tracking-Nummer</li>
       </ol>
