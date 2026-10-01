@@ -62,6 +62,7 @@ import { reconcileFreeBacWaterForShopOrder } from "./freeBacWaterService.js";
 import { refreshCustomerOrderMetrics } from "./customerMetricsService.js";
 import { isCommercialOrder, isCompletedCommercialOrder } from "./commercialOrderMetrics.js";
 import { shouldKeepClientDiscountBreakdownSource } from "./discountBreakdownRules.js";
+import { assertNoActiveCheckoutBlock, CUSTOMER_ORDER_BLOCKED_CODE, findActiveCheckoutBlock } from "./customerOrderBlockService.js";
 
 /**
  * Releases a pending KWK referral only after an order is known to be paid.
@@ -800,6 +801,13 @@ export const orderRouter = router({
         throw new Error("Peps4pets-Bestellungen benötigen einen stabilen Checkout-Schlüssel");
       }
 
+      // Fast failure before any order number, stock movement or payment process.
+      // The transaction below repeats this check under the same advisory locks so
+      // an operator activating a block cannot race an in-flight checkout.
+      if (await findActiveCheckoutBlock(input.customer)) {
+        throw new Error(CUSTOMER_ORDER_BLOCKED_CODE);
+      }
+
       const existingP4pResponse = (existingOrder: typeof orders.$inferSelect) => ({
         success: true,
         orderId: existingOrder.orderId,
@@ -956,6 +964,11 @@ export const orderRouter = router({
       let customerIntegrityTrigger: "order_customer_created" | "order_customer_changed" | null = null;
       await db.transaction(async (tx) => {
       const db = tx;
+
+      // Contact-based only: neither name nor address can ever trigger this.
+      // The error is intentionally neutral and mapped to customer-facing copy
+      // in the shop; no reason or internal record is disclosed.
+      await assertNoActiveCheckoutBlock(db, input.customer);
 
       // Das KWK-Guthaben wird innerhalb derselben Transaktion wie die Bestellung
       // geprüft und reserviert. So kann kein rabattierter Auftrag ohne Gegenbuchung

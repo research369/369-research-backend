@@ -11,6 +11,12 @@ import { queueCustomerDuplicateReview } from "./customerIntegrityService.js";
 import { persistAddressValidation, validateGermanAddress } from "./addressValidationService.js";
 import { calculateCustomerOrderMetrics } from "./customerOrderMetrics.js";
 import { isCommercialOrder, isCompletedCommercialOrder } from "./commercialOrderMetrics.js";
+import {
+  activateCustomerOrderBlock,
+  getActiveCustomerOrderBlockForCustomer,
+  getActiveCustomerOrderBlocksForCustomers,
+  revokeCustomerOrderBlock,
+} from "./customerOrderBlockService.js";
 
 const RESEND_API_URL = "https://api.resend.com/emails";
 
@@ -151,11 +157,13 @@ export const customerRouter = router({
           if (partnerIds.includes(p.id)) partnerCodeMap[p.id] = p.code;
         }
       }
+      const activeOrderBlocks = await getActiveCustomerOrderBlocksForCustomers(allCustomers.map((customer) => customer.id));
       return allCustomers.map(c => ({
         ...c,
         totalSpent: parseFloat(c.totalSpent),
         tags: c.tags ? JSON.parse(c.tags) : [],
         acquiredByPartnerCode: c.acquiredByPartnerId ? (partnerCodeMap[c.acquiredByPartnerId] || null) : null,
+        orderBlock: activeOrderBlocks.get(c.id) ?? null,
       }));
     }),
 
@@ -229,6 +237,7 @@ export const customerRouter = router({
         .from(customerCommunications)
         .where(eq(customerCommunications.customerId, customer.id))
         .orderBy(desc(customerCommunications.createdAt));
+      const orderBlock = await getActiveCustomerOrderBlockForCustomer(customer.id);
 
       return {
         ...customer,
@@ -236,7 +245,37 @@ export const customerRouter = router({
         tags: customer.tags ? JSON.parse(customer.tags) : [],
         orders: ordersWithItems,
         communications,
+        orderBlock,
       };
+    }),
+
+  // An explicit block is always bound to the exact current e-mail and/or phone
+  // stored on this individual record. A name, tag, city or address is never
+  // used as a blocking criterion.
+  blockOrders: adminProcedure
+    .input(z.object({ customerId: z.number(), reason: z.string().trim().min(5).max(2_000) }))
+    .mutation(async ({ input, ctx }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+      const [customer] = await db.select().from(customers).where(eq(customers.id, input.customerId)).limit(1);
+      if (!customer) throw new Error("Kunde nicht gefunden");
+      const actor = ctx.user.name || ctx.user.username || "Master-Admin";
+      const orderBlock = await activateCustomerOrderBlock({
+        customerId: customer.id,
+        email: customer.email,
+        phone: customer.phone,
+        reason: input.reason,
+        actor,
+      });
+      return { success: true, orderBlock };
+    }),
+
+  unblockOrders: adminProcedure
+    .input(z.object({ customerId: z.number() }))
+    .mutation(async ({ input, ctx }) => {
+      const actor = ctx.user.name || ctx.user.username || "Master-Admin";
+      const changed = await revokeCustomerOrderBlock({ customerId: input.customerId, actor });
+      return { success: true, changed };
     }),
 
   // Create customer (manual)

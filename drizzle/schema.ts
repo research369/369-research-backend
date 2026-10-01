@@ -160,6 +160,26 @@ export type Customer = typeof customers.$inferSelect;
 export type InsertCustomer = typeof customers.$inferInsert;
 
 /**
+ * Explicit, contact-identifier-based order blocks. This stays separate from a
+ * customer record so a name, tag or address can never accidentally reject an
+ * unrelated checkout.
+ */
+export const customerOrderBlocks = pgTable("customer_order_blocks", {
+  id: serial("id").primaryKey(),
+  customerId: integer("customer_id").notNull().references(() => customers.id),
+  status: varchar("status", { length: 16 }).notNull().default("active"),
+  reason: text("reason").notNull(),
+  emailNormalized: varchar("email_normalized", { length: 320 }),
+  phoneNormalized: varchar("phone_normalized", { length: 32 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  createdBy: varchar("created_by", { length: 100 }).notNull(),
+  revokedAt: timestamp("revoked_at"),
+  revokedBy: varchar("revoked_by", { length: 100 }),
+});
+
+export type CustomerOrderBlock = typeof customerOrderBlocks.$inferSelect;
+
+/**
  * Customer dossier – configurable tag library plus immutable issue history.
  * Cases are resolved or archived, never deleted through the WaWi UI.
  */

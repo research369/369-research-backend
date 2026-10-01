@@ -37,6 +37,7 @@ import { ensureFollowUpTermsSchema } from "./followUpTermsSchema.js";
 import { qrRedirectRouter } from "./qrRedirectRouter.js";
 import { ensurePeps4petsCheckoutSchema, isPeps4petsCheckoutSchemaReady } from "./peps4petsCheckoutSchema.js";
 import { ensureGoodieSchema } from "./goodieSchema.js";
+import { ensureCustomerOrderBlockSchema } from "./customerOrderBlockService.js";
 
 const app = express();
 
@@ -313,6 +314,14 @@ async function start() {
     await ensureCustomerDossierSchema();
   } catch (err) {
     console.warn("[Server] Customer dossier schema migration failed:", err);
+  }
+
+  // Explizite Kundensperren sind strikt kontaktbasiert (E-Mail/Telefon), nie
+  // namens- oder tagbasiert. Die Prüfung läuft vor jeder Bestellpersistenz.
+  try {
+    await ensureCustomerOrderBlockSchema();
+  } catch (err) {
+    console.warn("[Server] Customer order-block schema migration failed:", err);
   }
 
   // Goodies: additive inventory catalog and immutable packing assignments.
