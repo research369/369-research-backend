@@ -10,12 +10,19 @@ type SeedTemplate = {
   sortOrder: number;
 };
 
+// These templates are stored in the CRM database and can be maintained in the
+// WaWi. The legacy values let this release upgrade only untouched originals.
+export const LEGACY_DE_ORDER_CONFIRMATION_BODY = "Hallo {{firstName}},\n\nvielen Dank für deine Bestellung bei 369 Research.\n\nBestellnummer: {{orderId}}\n{{items}}\n\nGesamtbetrag: {{total}}\n\nSobald deine Zahlung eingegangen ist, bereiten wir deine Bestellung für den Versand vor.\n\nBei Fragen erreichst du uns jederzeit unter {{supportEmail}}.\n\nViele Grüße\n369 Research";
+export const DE_ORDER_CONFIRMATION_BODY = "Hallo {{firstName}},\n\nvielen Dank für deine Bestellung bei 369 Research.\n\nBestellnummer: {{orderId}}\n{{items}}\n\nGesamtbetrag: {{total}}\n\nBitte überweise den Gesamtbetrag per SEPA- oder Echtzeitüberweisung auf eines der folgenden Konten:\n\n{{paymentDetails}}\n\nVerwendungszweck: {{orderId}}\n\nSobald deine Zahlung eingegangen ist, bereiten wir deine Bestellung für den Versand vor.\n\nBei Fragen erreichst du uns jederzeit unter {{supportEmail}}.\n\nViele Grüße\n369 Research";
+export const LEGACY_EN_ORDER_CONFIRMATION_BODY = "Hello {{firstName}},\n\nthank you for your order with 369 Research.\n\nOrder number: {{orderId}}\n{{items}}\n\nOrder total: {{total}}\n\nAs soon as your payment has been received, we will prepare your order for dispatch.\n\nFor any questions, please contact us at {{supportEmail}}.\n\nKind regards\n369 Research";
+export const EN_ORDER_CONFIRMATION_BODY = "Hello {{firstName}},\n\nthank you for your order with 369 Research.\n\nOrder number: {{orderId}}\n{{items}}\n\nOrder total: {{total}}\n\nPlease transfer the total amount by SEPA or instant bank transfer to one of the following accounts:\n\n{{paymentDetails}}\n\nPayment reference: {{orderId}}\n\nAs soon as your payment has been received, we will prepare your order for dispatch.\n\nFor any questions, please contact us at {{supportEmail}}.\n\nKind regards\n369 Research";
+
 const DE: Array<Omit<SeedTemplate, "channel" | "language">> = [
   {
     key: "order_confirmation",
     title: "Bestellbestätigung",
     subject: "Bestellbestätigung {{orderId}}",
-    body: "Hallo {{firstName}},\n\nvielen Dank für deine Bestellung bei 369 Research.\n\nBestellnummer: {{orderId}}\n{{items}}\n\nGesamtbetrag: {{total}}\n\nSobald deine Zahlung eingegangen ist, bereiten wir deine Bestellung für den Versand vor.\n\nBei Fragen erreichst du uns jederzeit unter {{supportEmail}}.\n\nViele Grüße\n369 Research",
+    body: DE_ORDER_CONFIRMATION_BODY,
     sortOrder: 10,
   },
   {
@@ -81,7 +88,7 @@ const EN: Array<Omit<SeedTemplate, "channel" | "language">> = [
     key: "order_confirmation",
     title: "Order confirmation",
     subject: "Order confirmation {{orderId}}",
-    body: "Hello {{firstName}},\n\nthank you for your order with 369 Research.\n\nOrder number: {{orderId}}\n{{items}}\n\nOrder total: {{total}}\n\nAs soon as your payment has been received, we will prepare your order for dispatch.\n\nFor any questions, please contact us at {{supportEmail}}.\n\nKind regards\n369 Research",
+    body: EN_ORDER_CONFIRMATION_BODY,
     sortOrder: 10,
   },
   {
@@ -217,6 +224,40 @@ export async function ensureCommunicationTemplateSchema(): Promise<void> {
        ON CONFLICT (template_key, channel, language) DO NOTHING`,
       [template.key, template.channel, template.language, template.title, template.subject, template.body, template.sortOrder],
     );
+  }
+
+  // Upgrade only the exact untouched original. Custom admin wording is never
+  // overwritten, and each automatic change remains visible in the audit ledger.
+  const orderConfirmationUpgrades = [
+    { language: "de", legacyBody: LEGACY_DE_ORDER_CONFIRMATION_BODY, body: DE_ORDER_CONFIRMATION_BODY },
+    { language: "en", legacyBody: LEGACY_EN_ORDER_CONFIRMATION_BODY, body: EN_ORDER_CONFIRMATION_BODY },
+  ] as const;
+  for (const upgrade of orderConfirmationUpgrades) {
+    for (const channel of ["email", "whatsapp"] as const) {
+      const result = await pool.query(
+        `UPDATE communication_templates
+         SET body_template = $1, version = version + 1, updated_at = NOW()
+         WHERE template_key = 'order_confirmation'
+           AND channel = $2
+           AND language = $3
+           AND body_template = $4
+         RETURNING id, title, subject_template, is_active, sort_order, version, created_at, updated_at`,
+        [upgrade.body, channel, upgrade.language, upgrade.legacyBody],
+      );
+      const updated = result.rows[0];
+      if (!updated) continue;
+      const previousValue = {
+        ...updated,
+        body_template: upgrade.legacyBody,
+        version: Number(updated.version) - 1,
+      };
+      const nextValue = { ...updated, body_template: upgrade.body };
+      await pool.query(
+        `INSERT INTO communication_template_audit (template_id, action, previous_value, next_value, changed_by)
+         VALUES ($1, 'system_migration', $2::jsonb, $3::jsonb, $4)`,
+        [updated.id, JSON.stringify(previousValue), JSON.stringify(nextValue), "system:order-confirmation-payment-details-v2"],
+      );
+    }
   }
 
   console.log("[CRM] Zweisprachige Kommunikationsvorlagen bereit");
