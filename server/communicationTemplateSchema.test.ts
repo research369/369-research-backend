@@ -7,6 +7,8 @@ import {
   LEGACY_EN_ORDER_CONFIRMATION_BODY,
   PREVIOUS_DE_ORDER_CONFIRMATION_BODY,
   PREVIOUS_EN_ORDER_CONFIRMATION_BODY,
+  LEGACY_EN_WHATSAPP_SHIPPING_REGISTERED_BODY,
+  EN_WHATSAPP_SHIPPING_REGISTERED_BODY,
 } from "./communicationTemplateSchema.js";
 
 test("CRM-Bestellbestätigungen enthalten freigegebene Zahlungsplatzhalter", () => {
@@ -30,4 +32,16 @@ test("CRM-Upgrade erkennt ausschließlich die unangetasteten Altvorlagen", () =>
   assert.notEqual(LEGACY_EN_ORDER_CONFIRMATION_BODY, EN_ORDER_CONFIRMATION_BODY);
   assert.notEqual(PREVIOUS_DE_ORDER_CONFIRMATION_BODY, DE_ORDER_CONFIRMATION_BODY);
   assert.notEqual(PREVIOUS_EN_ORDER_CONFIRMATION_BODY, EN_ORDER_CONFIRMATION_BODY);
+});
+
+test("englische CRM-Versand-WhatsApp nutzt den aktuellen Ressourcen- und KWK-Standard", () => {
+  assert.match(EN_WHATSAPP_SHIPPING_REGISTERED_BODY, /\*Your parcel is registered for dispatch\*/);
+  assert.match(EN_WHATSAPP_SHIPPING_REGISTERED_BODY, /{{trackingNumber}}/);
+  assert.match(EN_WHATSAPP_SHIPPING_REGISTERED_BODY, /{{penCalculatorUrl}}/);
+  assert.match(EN_WHATSAPP_SHIPPING_REGISTERED_BODY, /{{plugAndPlayUrl}}/);
+  assert.match(EN_WHATSAPP_SHIPPING_REGISTERED_BODY, /{{whatsappChannelUrl}}/);
+  assert.match(EN_WHATSAPP_SHIPPING_REGISTERED_BODY, /https:\/\/www\.369research\.eu\/kwk\/register/);
+  assert.match(EN_WHATSAPP_SHIPPING_REGISTERED_BODY, /\*10% off\* for your referred new customer/);
+  assert.doesNotMatch(EN_WHATSAPP_SHIPPING_REGISTERED_BODY, /\/r\//);
+  assert.notEqual(LEGACY_EN_WHATSAPP_SHIPPING_REGISTERED_BODY, EN_WHATSAPP_SHIPPING_REGISTERED_BODY);
 });
