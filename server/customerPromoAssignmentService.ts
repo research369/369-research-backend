@@ -108,11 +108,7 @@ const assignmentSelect = `
  * the old CHECK constraint is removed so a current order may issue a code
  * without an e-mail address or telephone number.
  */
-export async function ensureCustomerPromoAssignmentSchema(): Promise<void> {
-  const pool = await getPool();
-  if (!pool) throw new Error("Datenbankverbindung für persönliche Aktionscodes nicht verfügbar");
-
-  await pool.query(`
+export const CUSTOMER_PROMO_ASSIGNMENT_SCHEMA_SQL = `
     CREATE TABLE IF NOT EXISTS customer_promo_assignments (
       id SERIAL PRIMARY KEY,
       promo_code_id INTEGER NOT NULL UNIQUE REFERENCES promo_codes(id) ON DELETE RESTRICT,
@@ -128,29 +124,44 @@ export async function ensureCustomerPromoAssignmentSchema(): Promise<void> {
     CREATE INDEX IF NOT EXISTS customer_promo_assignments_customer_idx
       ON customer_promo_assignments (customer_id, created_at DESC);
 
+    -- The first release created this exact legacy constraint. Drop it directly
+    -- and idempotently so a previously failed migration repairs itself on the
+    -- next boot. PostgreSQL's catalog calls the name column "conname", not
+    -- "constraint_name".
+    ALTER TABLE customer_promo_assignments
+      DROP CONSTRAINT IF EXISTS customer_promo_assignments_check;
+
+    -- Also remove an equivalent contact-binding CHECK from installations where
+    -- PostgreSQL assigned or retained a different constraint name. The loop is
+    -- intentionally narrow: it only considers checks that reference the old
+    -- e-mail or telephone provenance columns, never arbitrary table checks.
     DO $$
     DECLARE
       legacy_constraint_name text;
     BEGIN
-      SELECT constraint_name
-        INTO legacy_constraint_name
-        FROM pg_constraint
-       WHERE conrelid = 'customer_promo_assignments'::regclass
-         AND contype = 'c'
-         AND (
-           pg_get_constraintdef(oid) ILIKE '%email_normalized%'
-           OR pg_get_constraintdef(oid) ILIKE '%phone_normalized%'
-         )
-       LIMIT 1;
-
-      IF legacy_constraint_name IS NOT NULL THEN
+      FOR legacy_constraint_name IN
+        SELECT conname
+          FROM pg_constraint
+         WHERE conrelid = 'customer_promo_assignments'::regclass
+           AND contype = 'c'
+           AND (
+             pg_get_constraintdef(oid) ILIKE '%email_normalized%'
+             OR pg_get_constraintdef(oid) ILIKE '%phone_normalized%'
+           )
+      LOOP
         EXECUTE format(
           'ALTER TABLE customer_promo_assignments DROP CONSTRAINT %I',
           legacy_constraint_name
         );
-      END IF;
+      END LOOP;
     END $$;
-  `);
+  `;
+
+export async function ensureCustomerPromoAssignmentSchema(): Promise<void> {
+  const pool = await getPool();
+  if (!pool) throw new Error("Datenbankverbindung für persönliche Aktionscodes nicht verfügbar");
+
+  await pool.query(CUSTOMER_PROMO_ASSIGNMENT_SCHEMA_SQL);
 
   console.log("[CustomerPromoAssignments] Schema ready (provenance-only, no contact binding)");
 }
