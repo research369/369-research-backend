@@ -64,10 +64,7 @@ import { isCommercialOrder, isCompletedCommercialOrder } from "./commercialOrder
 import { shouldKeepClientDiscountBreakdownSource } from "./discountBreakdownRules.js";
 import { assertNoActiveCheckoutBlock, CUSTOMER_ORDER_BLOCKED_CODE, findActiveCheckoutBlock } from "./customerOrderBlockService.js";
 import {
-  getEffectivePersonalPromoUseLimit,
-  getPersonalPromoAssignmentForCodeInTransaction,
   getPersonalPromoAssignmentsForOrderIds,
-  matchesPersonalPromoContact,
 } from "./customerPromoAssignmentService.js";
 
 /**
@@ -275,7 +272,6 @@ export const orderRouter = router({
       // discounted by the partner code. The browser cannot choose a rate.
       let resolvedPromoCode: PromoDefinition | null = null;
       let resolvedPromoCodeRecord: { id: number; code: string } | null = null;
-      let personalPromoUseLimit = 0;
       const normalizedPromotionCode = input.discountCode?.trim().toUpperCase() || "";
       if (normalizedPromotionCode) {
         if (resolvedPublicPartnerCode && normalizedPromotionCode === resolvedPublicPartnerCode.partnerCode.replace(/\s+/g, "").toUpperCase()) {
@@ -977,27 +973,6 @@ export const orderRouter = router({
       // in the shop; no reason or internal record is disclosed.
       await assertNoActiveCheckoutBlock(db, input.customer);
 
-      // A personal action code can only be redeemed by the exact e-mail and/or
-      // phone captured when it was issued. This runs inside the order
-      // transaction, locks the assignment and therefore cannot be bypassed by
-      // a simultaneous checkout. General promo codes have no assignment and
-      // continue through the existing flow unchanged.
-      if (resolvedPromoCodeRecord) {
-        const personalAssignment = await getPersonalPromoAssignmentForCodeInTransaction(db, resolvedPromoCodeRecord.id);
-        if (personalAssignment) {
-          if (!matchesPersonalPromoContact(personalAssignment, input.customer)) {
-            throw new Error("AKTIONSCODE_UNGUELTIG");
-          }
-          personalPromoUseLimit = getEffectivePersonalPromoUseLimit(
-            personalAssignment.maxUses,
-            personalAssignment.maxUsesPerCustomer,
-          );
-          if (personalPromoUseLimit > 0 && personalAssignment.currentUses >= personalPromoUseLimit) {
-            throw new Error("AKTIONSCODE_UNGUELTIG");
-          }
-        }
-      }
-
       // Das KWK-Guthaben wird innerhalb derselben Transaktion wie die Bestellung
       // geprüft und reserviert. So kann kein rabattierter Auftrag ohne Gegenbuchung
       // entstehen und die vom Browser gesendete Account-ID wird nicht vertraut.
@@ -1334,9 +1309,6 @@ export const orderRouter = router({
       // update makes a single-use Follow-up code race-safe and prevents the
       // previous browser-side post-order increment from double counting.
       if (resolvedPromoCodeRecord) {
-        const personalUseGuard = personalPromoUseLimit > 0
-          ? sql`${promoCodes.currentUses} < ${personalPromoUseLimit}`
-          : undefined;
         const consumed = await db.update(promoCodes)
           .set({
             currentUses: sql`${promoCodes.currentUses} + 1`,
@@ -1349,7 +1321,6 @@ export const orderRouter = router({
               eq(promoCodes.maxUses, 0),
               sql`${promoCodes.currentUses} < ${promoCodes.maxUses}`,
             ),
-            personalUseGuard,
           ))
           .returning({ id: promoCodes.id });
         if (consumed.length !== 1) {

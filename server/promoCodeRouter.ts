@@ -14,12 +14,9 @@ import { router, publicProcedure, adminProcedure } from "./trpc.js";
 import { getDb, getPool } from "./db.js";
 import { promoCodes, partnerCodeUsage } from "../drizzle/schema.js";
 import {
-  getEffectivePersonalPromoUseLimit,
+  buildPersonalPromoAssignment,
   getPersonalPromoAssignmentForCode,
   getPersonalPromoAssignmentsForPromoCodeIds,
-  getPersonalPromoContact,
-  hasPersonalPromoContact,
-  matchesPersonalPromoContact,
 } from "./customerPromoAssignmentService.js";
 
 /**
@@ -46,7 +43,6 @@ const personalPromoInput = z.object({
   fixedAmount: z.number().min(0).optional(),
   minOrder: z.number().min(0).optional(),
   maxUses: z.number().int().min(0).optional(),
-  maxUsesPerCustomer: z.number().int().min(0).optional(),
   validFrom: z.string().optional(),
   validUntil: z.string().optional(),
   restrictedProducts: z.array(z.string().trim().min(1).max(120)).max(100).optional(),
@@ -58,7 +54,6 @@ function buildPromoDescription(input: z.infer<typeof personalPromoInput>): strin
   const cleanDescription = input.description?.trim() || `Persönlicher Aktionscode ${input.code.trim().toUpperCase()}`;
   const metadata: Record<string, unknown> = {};
   if (input.restrictedProducts?.length) metadata.restrict = input.restrictedProducts;
-  if ((input.maxUsesPerCustomer || 0) > 0) metadata.maxPerCustomer = input.maxUsesPerCustomer;
   if (input.freeShippingRegions?.length) metadata.freeShipping = input.freeShippingRegions;
   return Object.keys(metadata).length > 0 ? `${cleanDescription} | ${JSON.stringify(metadata)}` : cleanDescription;
 }
@@ -133,8 +128,8 @@ export const promoCodeRouter = router({
     }),
 
   // Create an individual promo code from an existing order. The code remains a
-  // regular promo code for pricing, but is additionally bound to the order's
-  // exact customer contact so a forwarded code cannot be redeemed by somebody else.
+  // regular promo code for pricing; the assignment stores only the issuance
+  // history. Possession of a valid code is sufficient for redemption.
   createForOrder: adminProcedure
     .input(personalPromoInput)
     .mutation(async ({ input, ctx }) => {
@@ -173,19 +168,12 @@ export const promoCodeRouter = router({
           throw new Error("Für diese Bestellung ist kein eindeutiger Kundendatensatz verknüpft. Bitte zuerst den Kunden zuordnen.");
         }
 
-        const customerResult = await client.query<{
-          id: number;
-          email: string | null;
-          phone: string | null;
-        }>(
-          `SELECT id, email, phone FROM customers WHERE id = $1 FOR UPDATE`,
+        const customerResult = await client.query<{ id: number }>(
+          `SELECT id FROM customers WHERE id = $1 FOR UPDATE`,
           [order.customerId],
         );
         const customer = customerResult.rows[0];
         if (!customer) throw new Error("Kundendatensatz nicht gefunden");
-        if (!hasPersonalPromoContact(customer)) {
-          throw new Error("Für den persönlichen Aktionscode wird eine gültige E-Mail-Adresse oder Telefonnummer im Kundendatensatz benötigt");
-        }
 
         const existing = await client.query(`SELECT id FROM promo_codes WHERE code = $1 LIMIT 1`, [code]);
         if (existing.rowCount && existing.rowCount > 0) throw new Error(`Code "${code}" existiert bereits`);
@@ -211,12 +199,17 @@ export const promoCodeRouter = router({
         const promoCodeId = insertPromo.rows[0]?.id;
         if (!promoCodeId) throw new Error("Aktionscode konnte nicht angelegt werden");
 
-        const contact = getPersonalPromoContact(customer);
+        const assignment = buildPersonalPromoAssignment({
+          promoCodeId,
+          customerId: customer.id,
+          originOrderId: order.orderId,
+          createdBy: actor,
+        });
         await client.query(
           `INSERT INTO customer_promo_assignments
-             (promo_code_id, customer_id, origin_order_id, email_normalized, phone_normalized, max_uses_per_customer, created_by)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-          [promoCodeId, customer.id, order.orderId, contact.emailNormalized, contact.phoneNormalized, input.maxUsesPerCustomer || 0, actor],
+             (promo_code_id, customer_id, origin_order_id, created_by)
+           VALUES ($1, $2, $3, $4)`,
+          [assignment.promoCodeId, assignment.customerId, assignment.originOrderId, assignment.createdBy],
         );
 
         const issueNote = `[Persönlicher Aktionscode ausgegeben]\nCode: ${code} · ${describePersonalPromoForNote({ ...input, code })}\nAusgabe vorgesehen für Versand-WhatsApp`;
@@ -332,8 +325,6 @@ export const promoCodeRouter = router({
     .input(z.object({
       code: z.string(),
       orderTotal: z.number().optional(), // for minOrder check
-      email: z.string().optional(),
-      phone: z.string().optional(),
     }))
     .query(async ({ input }) => {
       const db = await getDb();
@@ -366,16 +357,8 @@ export const promoCodeRouter = router({
 
       const personalAssignment = await getPersonalPromoAssignmentForCode(code.id);
       if (personalAssignment) {
-        if (!hasPersonalPromoContact(input)) {
-          return { valid: false, reason: "Bitte gib zuerst die bei deinem Code hinterlegte E-Mail-Adresse oder Telefonnummer ein", discountPercent: 0, fixedAmount: 0 };
-        }
-        if (!matchesPersonalPromoContact(personalAssignment, input)) {
-          return { valid: false, reason: "Aktionscode nicht verfügbar", discountPercent: 0, fixedAmount: 0 };
-        }
-        const personalUseLimit = getEffectivePersonalPromoUseLimit(code.maxUses, personalAssignment.maxUsesPerCustomer);
-        if (personalUseLimit > 0 && code.currentUses >= personalUseLimit) {
-          return { valid: false, reason: "Code wurde bereits zu oft eingelöst", discountPercent: 0, fixedAmount: 0 };
-        }
+        // Deliberately no contact comparison: the assignment is issuance
+        // history only. Global code limits above remain authoritative.
       }
 
       // Check minimum order
@@ -391,6 +374,7 @@ export const promoCodeRouter = router({
         fixedAmount: code.discountType === "fixed" ? parseFloat(code.fixedAmount || "0") : 0,
         discountType: code.discountType,
         description: code.description,
+        isOrderIssuedCode: Boolean(personalAssignment),
       };
     }),
 

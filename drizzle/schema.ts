@@ -819,18 +819,14 @@ export type InsertPromoCode = typeof promoCodes.$inferInsert;
 
 /**
  * A personal action code remains a regular promo code with its existing
- * commercial terms. This separate, additive assignment binds it explicitly to
- * one customer/contact and remembers the originating order without changing
- * the behavior of general promo codes.
+ * commercial terms. This separate, additive assignment records its origin in
+ * the WaWi only; redemption is never bound to customer contact data.
  */
 export const customerPromoAssignments = pgTable("customer_promo_assignments", {
   id: serial("id").primaryKey(),
   promoCodeId: integer("promo_code_id").notNull().unique().references(() => promoCodes.id),
   customerId: integer("customer_id").notNull().references(() => customers.id),
   originOrderId: varchar("origin_order_id", { length: 32 }).notNull().references(() => orders.orderId),
-  emailNormalized: varchar("email_normalized", { length: 320 }),
-  phoneNormalized: varchar("phone_normalized", { length: 32 }),
-  maxUsesPerCustomer: integer("max_uses_per_customer").notNull().default(0),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   createdBy: varchar("created_by", { length: 100 }).notNull(),
 }, (t) => ({

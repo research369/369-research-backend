@@ -1,28 +1,21 @@
 import { sql, type SQL } from "drizzle-orm";
 import { getPool } from "./db.js";
-import { normalizeBlockedEmail, normalizeBlockedPhone } from "./customerOrderBlockService.js";
 
 /**
- * Persönliche Aktionscodes sind immer zusätzlich zu promo_codes verknüpft.
- * Allgemeine Aktionscodes erhalten keinen Eintrag in dieser Tabelle und
- * behalten dadurch unverändert ihr bisheriges Verhalten.
+ * Persönliche Aktionscodes sind reguläre promo_codes mit zusätzlicher
+ * Ausstellungs-Historie. Die Zuordnung dokumentiert ausschließlich, aus
+ * welcher Bestellung und Kundenakte der Code vergeben wurde.
+ *
+ * Die Einlösung ist bewusst nicht an E-Mail, Telefonnummer, Namen oder
+ * Lieferadresse gebunden: Wer einen gültigen Code besitzt, kann ihn gemäß
+ * seiner allgemeinen Codebedingungen einlösen.
  */
-export const PERSONAL_PROMO_CODE_NOT_AUTHORIZED = "AKTIONSCODE_UNGUELTIG";
-
-export type PersonalPromoContact = {
-  email?: string | null;
-  phone?: string | null;
-};
-
 export type PersonalPromoAssignmentSummary = {
   id: number;
   promoCodeId: number;
   customerId: number;
   customerName: string;
   originOrderId: string;
-  emailNormalized: string | null;
-  phoneNormalized: string | null;
-  maxUsesPerCustomer: number;
   createdAt: Date;
   createdBy: string;
   code: string;
@@ -40,52 +33,35 @@ export type PersonalPromoAssignmentSummary = {
 };
 
 type PersonalPromoAssignmentRow = Omit<PersonalPromoAssignmentSummary,
-  "percentage" | "fixedAmount" | "minOrder" | "maxUses" | "currentUses" | "maxUsesPerCustomer" | "validUntilExact" | "isActive"
+  "percentage" | "fixedAmount" | "minOrder" | "maxUses" | "currentUses" | "validUntilExact" | "isActive"
 > & {
   percentage: string | number | null;
   fixedAmount: string | number | null;
   minOrder: string | number | null;
   maxUses: number | null;
   currentUses: number | null;
-  maxUsesPerCustomer: number | null;
   validUntilExact: number | null;
   isActive: number | null;
 };
 
-export function getPersonalPromoContact(input: PersonalPromoContact) {
-  return {
-    emailNormalized: normalizeBlockedEmail(input.email),
-    phoneNormalized: normalizeBlockedPhone(input.phone),
-  };
-}
-
-export function hasPersonalPromoContact(input: PersonalPromoContact): boolean {
-  const contact = getPersonalPromoContact(input);
-  return Boolean(contact.emailNormalized || contact.phoneNormalized);
-}
+export type NewPersonalPromoAssignment = {
+  promoCodeId: number;
+  customerId: number;
+  originOrderId: string;
+  createdBy: string;
+};
 
 /**
- * A code is personal when any contact identifier captured during issuance
- * matches the checkout contact. Names and delivery addresses are intentionally
- * never used; neither may broaden an assignment.
+ * Deliberately contains provenance only. Contact fields must never be added
+ * here: possession of a valid issued code is sufficient for redemption.
  */
-export function matchesPersonalPromoContact(
-  assignment: Pick<PersonalPromoAssignmentSummary, "emailNormalized" | "phoneNormalized">,
-  input: PersonalPromoContact,
-): boolean {
-  const contact = getPersonalPromoContact(input);
-  return Boolean(
-    (contact.emailNormalized && assignment.emailNormalized === contact.emailNormalized)
-    || (contact.phoneNormalized && assignment.phoneNormalized === contact.phoneNormalized),
-  );
-}
-
-/** 0 means unlimited. For a personal code, both configured limits must hold. */
-export function getEffectivePersonalPromoUseLimit(maxUses: number | null | undefined, maxUsesPerCustomer: number | null | undefined): number {
-  const limits = [maxUses, maxUsesPerCustomer]
-    .map((value) => Number(value || 0))
-    .filter((value) => Number.isFinite(value) && value > 0);
-  return limits.length > 0 ? Math.min(...limits) : 0;
+export function buildPersonalPromoAssignment(input: NewPersonalPromoAssignment): NewPersonalPromoAssignment {
+  return {
+    promoCodeId: input.promoCodeId,
+    customerId: input.customerId,
+    originOrderId: input.originOrderId,
+    createdBy: input.createdBy,
+  };
 }
 
 function mapAssignment(row: PersonalPromoAssignmentRow): PersonalPromoAssignmentSummary {
@@ -96,7 +72,6 @@ function mapAssignment(row: PersonalPromoAssignmentRow): PersonalPromoAssignment
     minOrder: Number(row.minOrder || 0),
     maxUses: Number(row.maxUses || 0),
     currentUses: Number(row.currentUses || 0),
-    maxUsesPerCustomer: Number(row.maxUsesPerCustomer || 0),
     validUntilExact: Number(row.validUntilExact || 0),
     isActive: Number(row.isActive || 0),
   };
@@ -108,9 +83,6 @@ const assignmentSelect = `
          assignment.customer_id AS "customerId",
          customers.name AS "customerName",
          assignment.origin_order_id AS "originOrderId",
-         assignment.email_normalized AS "emailNormalized",
-         assignment.phone_normalized AS "phoneNormalized",
-         assignment.max_uses_per_customer AS "maxUsesPerCustomer",
          assignment.created_at AS "createdAt",
          assignment.created_by AS "createdBy",
          promo.code,
@@ -130,7 +102,12 @@ const assignmentSelect = `
     JOIN promo_codes promo ON promo.id = assignment.promo_code_id
 `;
 
-/** Additive, idempotent persistent storage for issued personal action codes. */
+/**
+ * Additive, idempotent persistent storage for issued personal action codes.
+ * Existing installations can retain legacy contact columns without using them;
+ * the old CHECK constraint is removed so a current order may issue a code
+ * without an e-mail address or telephone number.
+ */
 export async function ensureCustomerPromoAssignmentSchema(): Promise<void> {
   const pool = await getPool();
   if (!pool) throw new Error("Datenbankverbindung für persönliche Aktionscodes nicht verfügbar");
@@ -141,12 +118,8 @@ export async function ensureCustomerPromoAssignmentSchema(): Promise<void> {
       promo_code_id INTEGER NOT NULL UNIQUE REFERENCES promo_codes(id) ON DELETE RESTRICT,
       customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE RESTRICT,
       origin_order_id VARCHAR(32) NOT NULL REFERENCES orders(order_id) ON DELETE RESTRICT,
-      email_normalized VARCHAR(320),
-      phone_normalized VARCHAR(32),
-      max_uses_per_customer INTEGER NOT NULL DEFAULT 0 CHECK (max_uses_per_customer >= 0),
       created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      created_by VARCHAR(100) NOT NULL,
-      CHECK (email_normalized IS NOT NULL OR phone_normalized IS NOT NULL)
+      created_by VARCHAR(100) NOT NULL
     );
 
     CREATE INDEX IF NOT EXISTS customer_promo_assignments_origin_order_idx
@@ -155,16 +128,31 @@ export async function ensureCustomerPromoAssignmentSchema(): Promise<void> {
     CREATE INDEX IF NOT EXISTS customer_promo_assignments_customer_idx
       ON customer_promo_assignments (customer_id, created_at DESC);
 
-    CREATE INDEX IF NOT EXISTS customer_promo_assignments_email_idx
-      ON customer_promo_assignments (email_normalized)
-      WHERE email_normalized IS NOT NULL;
+    DO $$
+    DECLARE
+      legacy_constraint_name text;
+    BEGIN
+      SELECT constraint_name
+        INTO legacy_constraint_name
+        FROM pg_constraint
+       WHERE conrelid = 'customer_promo_assignments'::regclass
+         AND contype = 'c'
+         AND (
+           pg_get_constraintdef(oid) ILIKE '%email_normalized%'
+           OR pg_get_constraintdef(oid) ILIKE '%phone_normalized%'
+         )
+       LIMIT 1;
 
-    CREATE INDEX IF NOT EXISTS customer_promo_assignments_phone_idx
-      ON customer_promo_assignments (phone_normalized)
-      WHERE phone_normalized IS NOT NULL;
+      IF legacy_constraint_name IS NOT NULL THEN
+        EXECUTE format(
+          'ALTER TABLE customer_promo_assignments DROP CONSTRAINT %I',
+          legacy_constraint_name
+        );
+      END IF;
+    END $$;
   `);
 
-  console.log("[CustomerPromoAssignments] Schema ready");
+  console.log("[CustomerPromoAssignments] Schema ready (provenance-only, no contact binding)");
 }
 
 async function queryAssignments(query: string, values: unknown[]): Promise<PersonalPromoAssignmentSummary[]> {
@@ -214,8 +202,8 @@ export async function getPersonalPromoAssignmentsForPromoCodeIds(promoCodeIds: n
 }
 
 /**
- * Query from inside the checkout transaction. FOR UPDATE serializes a personal
- * code's validation and its guarded consumption with a concurrent checkout.
+ * Query from inside the checkout transaction. It remains available for safe
+ * provenance reads, but performs no contact match or personal use-limit check.
  */
 export async function getPersonalPromoAssignmentForCodeInTransaction(
   db: { execute: (query: SQL) => Promise<unknown> },
@@ -226,10 +214,6 @@ export async function getPersonalPromoAssignmentForCodeInTransaction(
   return rows.length > 0 ? mapAssignment(rows[0]) : null;
 }
 
-/**
- * Public preview uses the same contact match as checkout. It never exposes the
- * identity that owns the code, only the neutral validity result.
- */
 export async function getPersonalPromoAssignmentForCode(promoCodeId: number): Promise<PersonalPromoAssignmentSummary | null> {
   const rows = await queryAssignments(`${assignmentSelect} WHERE assignment.promo_code_id = $1 LIMIT 1`, [promoCodeId]);
   return rows[0] ?? null;
