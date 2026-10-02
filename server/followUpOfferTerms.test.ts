@@ -4,7 +4,7 @@ import {
   calculateFollowUpCodeExpiry,
   normalizeFollowUpOfferTerms,
 } from "./followUpRouter.js";
-import { isPromoCodeExpired } from "./promoCodeRouter.js";
+import { isPromoCodeExpired, isValidPersonalPromoCode } from "./promoCodeRouter.js";
 
 test("individual follow-up terms accept a custom discount and long validity", () => {
   const terms = normalizeFollowUpOfferTerms({
@@ -33,4 +33,12 @@ test("legacy WaWi promotion codes remain valid through their expiry date", () =>
   const expiry = new Date("2026-10-02T00:00:00.000Z");
   assert.equal(isPromoCodeExpired({ validUntil: expiry, validUntilExact: 0 }, new Date("2026-10-02T23:59:59.999Z")), false);
   assert.equal(isPromoCodeExpired({ validUntil: expiry, validUntilExact: 0 }, new Date("2026-10-03T00:00:00.000Z")), true);
+});
+
+test("order-issued promotion codes are six digits without a text prefix", () => {
+  assert.equal(isValidPersonalPromoCode("483921"), true);
+  assert.equal(isValidPersonalPromoCode(" 483921 "), true);
+  assert.equal(isValidPersonalPromoCode("DANKE-483921"), false);
+  assert.equal(isValidPersonalPromoCode("48392"), false);
+  assert.equal(isValidPersonalPromoCode("4839217"), false);
 });

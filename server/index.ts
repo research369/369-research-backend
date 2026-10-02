@@ -39,6 +39,7 @@ import { ensurePeps4petsCheckoutSchema, isPeps4petsCheckoutSchemaReady } from ".
 import { ensureGoodieSchema } from "./goodieSchema.js";
 import { ensureCustomerOrderBlockSchema } from "./customerOrderBlockService.js";
 import { ensureCustomerPromoAssignmentSchema } from "./customerPromoAssignmentService.js";
+import { ensurePersonalPromoExpiryReminderSchema, syncPersonalPromoExpiryReminders } from "./personalPromoExpiryReminderService.js";
 
 const app = express();
 
@@ -331,6 +332,16 @@ async function start() {
     await ensureCustomerPromoAssignmentSchema();
   } catch (err) {
     console.warn("[Server] Customer promo-assignment schema migration failed:", err);
+  }
+
+  // Persönliche Bestellcodes erhalten ausschließlich intern eine Erinnerung,
+  // sobald ihre Gültigkeit in zehn Tagen endet. Es wird nichts an Kunden gesendet.
+  try {
+    await ensurePersonalPromoExpiryReminderSchema();
+    const created = await syncPersonalPromoExpiryReminders();
+    console.log(`[Server] Personal promo expiry reminders ready${created ? ` (${created} backfilled)` : ""}`);
+  } catch (err) {
+    console.warn("[Server] Personal promo expiry-reminder schema migration failed:", err);
   }
 
   // Goodies: additive inventory catalog and immutable packing assignments.

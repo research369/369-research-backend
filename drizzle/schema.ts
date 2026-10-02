@@ -837,6 +837,33 @@ export type CustomerPromoAssignment = typeof customerPromoAssignments.$inferSele
 export type InsertCustomerPromoAssignment = typeof customerPromoAssignments.$inferInsert;
 
 /**
+ * Internal WaWi reminders for codes issued directly from an order. This is
+ * intentionally separate from sales_followups: an order can retain its normal
+ * cross-sell follow-up while a code-expiry reminder remains independently due.
+ */
+export const personalPromoExpiryReminders = pgTable("personal_promo_expiry_reminders", {
+  id: serial("id").primaryKey(),
+  promoCodeId: integer("promo_code_id").notNull().unique().references(() => promoCodes.id),
+  customerId: integer("customer_id").notNull().references(() => customers.id),
+  originOrderId: varchar("origin_order_id", { length: 32 }).notNull().references(() => orders.orderId),
+  code: varchar("code", { length: 50 }).notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  dueAt: timestamp("due_at").notNull(),
+  status: varchar("status", { length: 16 }).notNull().default("pending"),
+  completedAt: timestamp("completed_at"),
+  skippedAt: timestamp("skipped_at"),
+  completedBy: varchar("completed_by", { length: 100 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (t) => ({
+  statusDueIdx: index("personal_promo_expiry_reminders_status_due_idx").on(t.status, t.dueAt),
+  customerCreatedIdx: index("personal_promo_expiry_reminders_customer_idx").on(t.customerId, t.createdAt),
+  orderCreatedIdx: index("personal_promo_expiry_reminders_order_idx").on(t.originOrderId, t.createdAt),
+}));
+export type PersonalPromoExpiryReminder = typeof personalPromoExpiryReminders.$inferSelect;
+export type InsertPersonalPromoExpiryReminder = typeof personalPromoExpiryReminders.$inferInsert;
+
+/**
  * Partner code usage – tracks which emails have used a partner code
  * Each email can only use a partner code ONCE (first purchase only)
  */

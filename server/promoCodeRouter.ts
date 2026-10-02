@@ -18,6 +18,7 @@ import {
   getPersonalPromoAssignmentForCode,
   getPersonalPromoAssignmentsForPromoCodeIds,
 } from "./customerPromoAssignmentService.js";
+import { createPersonalPromoExpiryReminder } from "./personalPromoExpiryReminderService.js";
 
 /**
  * Standard WaWi codes retain their established end-of-day expiry. Follow-up
@@ -35,9 +36,14 @@ export function isPromoCodeExpired(
   return now > expiry;
 }
 
+/** Personal codes issued from an order are intentionally simple six-digit numbers. */
+export function isValidPersonalPromoCode(value: string): boolean {
+  return /^\d{6}$/.test(value.trim());
+}
+
 const personalPromoInput = z.object({
   orderId: z.string().trim().min(1).max(32),
-  code: z.string().trim().min(2).max(50),
+  code: z.string().trim().refine(isValidPersonalPromoCode, "Der persönliche Aktionscode muss genau sechs Ziffern enthalten"),
   discountType: z.enum(["percent", "fixed"]),
   percentage: z.number().min(0).max(100).optional(),
   fixedAmount: z.number().min(0).optional(),
@@ -139,14 +145,11 @@ export const promoCodeRouter = router({
       if (input.discountType === "fixed" && (!input.fixedAmount || input.fixedAmount <= 0)) {
         throw new Error("Fester Betrag muss größer als 0 sein");
       }
-      if (input.freeShippingRegions?.length === 0) {
-        throw new Error("Bitte mindestens eine Versandregion auswählen");
-      }
 
       const pool = await getPool();
       if (!pool) throw new Error("Datenbank nicht verfügbar");
       const client = await pool.connect();
-      const code = input.code.trim().toUpperCase();
+      const code = input.code.trim();
       const actor = ctx.user.name || ctx.user.username || "Master-Admin";
 
       try {
@@ -211,6 +214,14 @@ export const promoCodeRouter = router({
            VALUES ($1, $2, $3, $4)`,
           [assignment.promoCodeId, assignment.customerId, assignment.originOrderId, assignment.createdBy],
         );
+
+        await createPersonalPromoExpiryReminder(client, {
+          promoCodeId,
+          customerId: customer.id,
+          originOrderId: order.orderId,
+          code,
+          validUntil: input.validUntil ? new Date(input.validUntil) : null,
+        });
 
         const issueNote = `[Persönlicher Aktionscode ausgegeben]\nCode: ${code} · ${describePersonalPromoForNote({ ...input, code })}\nAusgabe vorgesehen für Versand-WhatsApp`;
         const nextNote = order.internalNote?.trim() ? `${order.internalNote.trim()}\n\n${issueNote}` : issueNote;

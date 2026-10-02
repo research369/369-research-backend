@@ -43,6 +43,7 @@ const BACKUP_GROUPS: BackupGroup[] = [
       "orders", "order_items", "order_item_batches", "packing_photo_history",
       "invoices", "customer_communications", "customer_issue_cases",
       "communication_events", "sales_followups", "sales_followup_products",
+      "customer_promo_assignments", "personal_promo_expiry_reminders",
     ],
   },
   {

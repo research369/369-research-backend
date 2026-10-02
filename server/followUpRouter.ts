@@ -21,10 +21,12 @@ import {
   articles,
   customers,
   promoCodes,
+  personalPromoExpiryReminders,
 } from "../drizzle/schema.js";
 import { calculateFollowUpShipmentWindow } from "./followUpEligibility.js";
 import { generateFollowUpProductCopies } from "./followUpProductCopy.js";
 import { isCommercialOrder } from "./commercialOrderMetrics.js";
+import { syncPersonalPromoExpiryReminders } from "./personalPromoExpiryReminderService.js";
 
 const RESEND_API_URL = "https://api.resend.com/emails";
 const SHOP_BASE_URL = "https://www.369research.eu";
@@ -519,6 +521,10 @@ export const followUpRouter = router({
     const db = await getDb();
     if (!db) throw new Error("Database not available");
 
+    // Backfill only codes issued from orders. This is an internal queue action;
+    // it never sends WhatsApp or e-mail to a customer.
+    await syncPersonalPromoExpiryReminders();
+
     const now = new Date();
     const { dueBy, eligibleFrom } = calculateFollowUpShipmentWindow(
       now,
@@ -591,35 +597,29 @@ export const followUpRouter = router({
       if (!db) throw new Error("Database not available");
 
       const now = new Date();
+      await syncPersonalPromoExpiryReminders(now);
 
       const allFollowUps = await db
         .select()
         .from(salesFollowups)
         .orderBy(desc(salesFollowups.dueAt));
 
-      // Filtern
-      const filtered = allFollowUps.filter((f: any) => {
-        if (input.status === "all") return true;
-        return f.status === input.status;
-      });
+      const filtered = allFollowUps.filter((f: any) => input.status === "all" || f.status === input.status);
 
-      if (filtered.length === 0) return [];
-
-      // Bestelldaten laden
       const orderIds = filtered.map((f: any) => f.orderId);
-      const orderList = await db
-        .select()
-        .from(orders)
-        .where(inArray(orders.orderId, orderIds));
+      const orderList = orderIds.length > 0
+        ? await db.select().from(orders).where(inArray(orders.orderId, orderIds))
+        : [];
       const orderMap = new Map(orderList.map((o: any) => [o.orderId, o]));
 
-      return filtered.map((f: any) => {
+      const crossSellFollowUps = filtered.map((f: any) => {
         const order = orderMap.get(f.orderId) || {};
         const isOverdue = f.status === "pending" && new Date(f.dueAt) < now;
         const codeExpired = f.discountCode && f.codeExpiresAt
           ? new Date(f.codeExpiresAt) < now
           : false;
         return {
+          reminderType: "cross_sell" as const,
           id: f.id,
           orderId: f.orderId,
           status: f.status,
@@ -647,6 +647,108 @@ export const followUpRouter = router({
           shippedAt: order.shippedAt,
         };
       });
+
+      const reminderRows = await db
+        .select({ reminder: personalPromoExpiryReminders, order: orders, promoCode: promoCodes })
+        .from(personalPromoExpiryReminders)
+        .leftJoin(orders, eq(personalPromoExpiryReminders.originOrderId, orders.orderId))
+        .leftJoin(promoCodes, eq(personalPromoExpiryReminders.promoCodeId, promoCodes.id))
+        .orderBy(desc(personalPromoExpiryReminders.dueAt));
+
+      const personalPromoReminders = reminderRows
+        .filter(({ reminder, promoCode }) => {
+          if (input.status !== "all" && reminder.status !== input.status) return false;
+          // A redeemed, deactivated or deleted code needs no open expiry task.
+          const maxUses = Number(promoCode?.maxUses || 0);
+          const currentUses = Number(promoCode?.currentUses || 0);
+          if (reminder.status === "pending" && (!promoCode || promoCode.isActive !== 1 || (maxUses > 0 && currentUses >= maxUses))) return false;
+          // Pending reminders enter the WaWi only at their ten-day window.
+          return reminder.status !== "pending" || new Date(reminder.dueAt) <= now;
+        })
+        .map(({ reminder, order }) => ({
+          reminderType: "personal_promo_expiry" as const,
+          id: reminder.id,
+          orderId: reminder.originOrderId,
+          status: reminder.status,
+          dueAt: reminder.dueAt,
+          completedAt: reminder.completedAt,
+          skippedAt: reminder.skippedAt,
+          isOverdue: reminder.status === "pending" && new Date(reminder.dueAt) < now,
+          reminderStage: 1,
+          discountCode: null,
+          discountPercent: 0,
+          codeValidityHours: 0,
+          codeExpiresAt: null,
+          codeExpired: new Date(reminder.expiresAt) < now,
+          messageGeneratedAt: null,
+          orderDate: order?.orderDate || null,
+          total: order?.total ? parseFloat(order.total) : 0,
+          customerName: `${order?.firstName || ""} ${order?.lastName || ""}`.trim(),
+          customerEmail: order?.email || "",
+          customerPhone: order?.phone || "",
+          customerId: reminder.customerId,
+          discountCodeUsed: order?.discountCode || null,
+          partnerCode: order?.partnerCode || null,
+          trackingNumber: order?.trackingNumber || null,
+          shippedAt: order?.shippedAt || null,
+          promoCode: reminder.code,
+          promoCodeExpiresAt: reminder.expiresAt,
+        }));
+
+      return [...crossSellFollowUps, ...personalPromoReminders]
+        .sort((left, right) => new Date(right.dueAt).getTime() - new Date(left.dueAt).getTime());
+    }),
+
+  /** Loads an internal reminder for a code issued from an order. */
+  getPersonalPromoExpiryReminderDetail: adminProcedure
+    .input(z.object({ id: z.number() }))
+    .query(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      const [row] = await db
+        .select({ reminder: personalPromoExpiryReminders, order: orders })
+        .from(personalPromoExpiryReminders)
+        .leftJoin(orders, eq(personalPromoExpiryReminders.originOrderId, orders.orderId))
+        .where(eq(personalPromoExpiryReminders.id, input.id))
+        .limit(1);
+      if (!row) throw new Error("Aktionscode-Erinnerung nicht gefunden");
+
+      return {
+        ...row.reminder,
+        customerName: `${row.order?.firstName || ""} ${row.order?.lastName || ""}`.trim(),
+        customerEmail: row.order?.email || "",
+        customerPhone: row.order?.phone || "",
+        orderDate: row.order?.orderDate || null,
+        orderTotal: row.order?.total || "0",
+      };
+    }),
+
+  markPersonalPromoExpiryReminderDone: adminProcedure
+    .input(z.object({ id: z.number(), completedBy: z.string().optional() }))
+    .mutation(async ({ input, ctx }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+      await db.update(personalPromoExpiryReminders).set({
+        status: "done",
+        completedAt: new Date(),
+        completedBy: input.completedBy || ctx.user?.username || "admin",
+        updatedAt: new Date(),
+      }).where(eq(personalPromoExpiryReminders.id, input.id));
+      return { ok: true };
+    }),
+
+  markPersonalPromoExpiryReminderSkipped: adminProcedure
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+      await db.update(personalPromoExpiryReminders).set({
+        status: "skipped",
+        skippedAt: new Date(),
+        updatedAt: new Date(),
+      }).where(eq(personalPromoExpiryReminders.id, input.id));
+      return { ok: true };
     }),
 
   /**
