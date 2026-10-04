@@ -40,6 +40,7 @@ import { ensureGoodieSchema } from "./goodieSchema.js";
 import { ensureCustomerOrderBlockSchema } from "./customerOrderBlockService.js";
 import { ensureCustomerPromoAssignmentSchema } from "./customerPromoAssignmentService.js";
 import { ensurePersonalPromoExpiryReminderSchema, syncPersonalPromoExpiryReminders } from "./personalPromoExpiryReminderService.js";
+import { ensureCustomerDataChangeSchema } from "./customerDataChangeService.js";
 
 const app = express();
 
@@ -324,6 +325,15 @@ async function start() {
     await ensureCustomerOrderBlockSchema();
   } catch (err) {
     console.warn("[Server] Customer order-block schema migration failed:", err);
+  }
+
+  // Bestätigte Checkout-Datenänderungen bleiben als additive, unveränderliche
+  // Historie erhalten; weder alte Bestellungen noch fremde Kundenakten werden
+  // dadurch überschrieben.
+  try {
+    await ensureCustomerDataChangeSchema();
+  } catch (err) {
+    console.warn("[Server] Customer data-change schema migration failed:", err);
   }
 
   // Persönliche Aktionscodes sind separat und nur bei einer bewussten

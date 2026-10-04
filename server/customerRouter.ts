@@ -413,8 +413,9 @@ export const customerRouter = router({
         ));
       }
 
-      // ── Sync address/contact data to all linked orders ──
-      // Only sync fields that are actually address/contact related (not tags, notes, source)
+      // ── Ergänze nur fehlende Kontaktfelder in verknüpften Bestellungen ──
+      // Eine Bestellung ist der historische Versand- und Rechnungs-Snapshot.
+      // Spätere Stammdatenänderungen dürfen sie niemals überschreiben.
       const orderSyncFields: Record<string, any> = {};
       if (data.firstName !== undefined) orderSyncFields.firstName = data.firstName || null;
       if (data.lastName !== undefined) orderSyncFields.lastName = data.lastName || null;
@@ -440,18 +441,22 @@ export const customerRouter = router({
             if (!order) continue;
 
             const orderUpdate: Record<string, any> = {};
-            // Always sync ALL address/contact fields from customer to order (full overwrite)
-            if (data.firstName !== undefined) orderUpdate.firstName = data.firstName || null;
-            if (data.lastName !== undefined) orderUpdate.lastName = data.lastName || null;
-            if (data.phone !== undefined) orderUpdate.phone = data.phone || null;
-            if (data.email !== undefined) orderUpdate.email = data.email || null;
-            if (data.company !== undefined) orderUpdate.company = data.company || null;
-            if (data.street !== undefined) orderUpdate.street = data.street || null;
-            if (data.houseNumber !== undefined) orderUpdate.houseNumber = data.houseNumber || null;
-            if (data.zip !== undefined) orderUpdate.zip = data.zip || null;
-            if (data.city !== undefined) orderUpdate.city = data.city || null;
-            if (data.country !== undefined) orderUpdate.country = data.country || null;
-            if (data.dhlPostNumber !== undefined) orderUpdate.dhlPostNumber = data.dhlPostNumber || null;
+            const onlyIfMissing = (field: string, value: unknown) => {
+              if (value === undefined || value === null || String(value).trim() === "") return;
+              const existing = (order as any)[field];
+              if (existing === null || existing === undefined || String(existing).trim() === "") orderUpdate[field] = value;
+            };
+            onlyIfMissing("firstName", data.firstName);
+            onlyIfMissing("lastName", data.lastName);
+            onlyIfMissing("phone", data.phone);
+            onlyIfMissing("email", data.email);
+            onlyIfMissing("company", data.company);
+            onlyIfMissing("street", data.street);
+            onlyIfMissing("houseNumber", data.houseNumber);
+            onlyIfMissing("zip", data.zip);
+            onlyIfMissing("city", data.city);
+            onlyIfMissing("country", data.country);
+            onlyIfMissing("dhlPostNumber", data.dhlPostNumber);
 
             if (Object.keys(orderUpdate).length > 0) {
               await db.update(orders).set(orderUpdate).where(eq(orders.orderId, orderId));

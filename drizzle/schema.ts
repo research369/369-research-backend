@@ -160,6 +160,28 @@ export type Customer = typeof customers.$inferSelect;
 export type InsertCustomer = typeof customers.$inferInsert;
 
 /**
+ * Immutable history of a customer-confirmed checkout change. The canonical
+ * customer profile may move forward, but the old and submitted snapshots stay
+ * visible forever and the historical order itself is never rewritten.
+ */
+export const customerDataChangeEvents = pgTable("customer_data_change_events", {
+  id: serial("id").primaryKey(),
+  customerId: integer("customer_id").notNull(),
+  orderId: varchar("order_id", { length: 32 }).notNull(),
+  matchMethod: varchar("match_method", { length: 24 }).notNull(),
+  previousSnapshotJson: text("previous_snapshot_json").notNull(),
+  submittedSnapshotJson: text("submitted_snapshot_json").notNull(),
+  changedFieldsJson: text("changed_fields_json").notNull(),
+  customerConfirmedAt: timestamp("customer_confirmed_at").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (t) => ({
+  customerCreatedIdx: index("customer_data_change_events_customer_idx").on(t.customerId, t.createdAt),
+  orderCreatedIdx: index("customer_data_change_events_order_idx").on(t.orderId, t.createdAt),
+}));
+
+export type CustomerDataChangeEvent = typeof customerDataChangeEvents.$inferSelect;
+
+/**
  * Explicit, contact-identifier-based order blocks. This stays separate from a
  * customer record so a name, tag or address can never accidentally reject an
  * unrelated checkout.

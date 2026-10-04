@@ -66,6 +66,16 @@ import { assertNoActiveCheckoutBlock, CUSTOMER_ORDER_BLOCKED_CODE, findActiveChe
 import {
   getPersonalPromoAssignmentsForOrderIds,
 } from "./customerPromoAssignmentService.js";
+import {
+  CUSTOMER_DATA_CHANGE_RECONFIRMATION_CODE,
+  consumeCustomerDataChangeConfirmation,
+  getChangedCustomerDataFields,
+  persistConfirmedCustomerDataChange,
+  resolveCheckoutCustomerDataChange,
+  toCustomerDataSnapshot,
+  toCustomerUpdateFromSnapshot,
+  type CheckoutCustomerDataChangeResolution,
+} from "./customerDataChangeService.js";
 
 /**
  * Releases a pending KWK referral only after an order is known to be paid.
@@ -194,6 +204,9 @@ const createOrderSchema = z.object({
   addressValidationOverride: z.object({
     confirmed: z.literal(true),
   }).optional(),
+  // Kurzlebiger, serverseitig gespeicherter Nachweis aus der Checkout-Vorschau.
+  // Er ist nur bei einem eindeutigen Kontaktmatch mit abweichenden Daten nötig.
+  customerDataChangeConfirmationToken: z.string().min(32).max(128).optional(),
 });
 
 const updateStatusSchema = z.object({
@@ -221,6 +234,21 @@ export const orderRouter = router({
       // The manual workflow records discounts in discountBreakdown; labels such
       // as "25%" or "Kostenloser Versand" must never enter promo-code lookup.
       input.discountCode = normalizeDiscountCodeForOrderSource(input.orderSource, input.discountCode);
+
+      // Public checkout may only attach to a customer through one unique, real
+      // contact identifier. No name or address is ever used as an identity key.
+      // The resolution is repeated and locked inside the order transaction
+      // before an existing customer profile can be updated.
+      const checkoutCustomerDataChangeResolution: CheckoutCustomerDataChangeResolution | null = !isAuthenticatedWawiManualSale
+        && input.orderSource === "shop"
+        ? resolveCheckoutCustomerDataChange(
+          await db.select().from(customers),
+          {
+            ...input.customer,
+            dhlPostNumber: input.customer.dhlPostNumber || null,
+          },
+        )
+        : null;
 
       const qrAttribution = await resolveQrAttribution(input.qrAttributionToken);
 
@@ -968,10 +996,41 @@ export const orderRouter = router({
       await db.transaction(async (tx) => {
       const db = tx;
 
+      let transactionCustomerDataChangeResolution = checkoutCustomerDataChangeResolution;
+
       // Contact-based only: neither name nor address can ever trigger this.
       // The error is intentionally neutral and mapped to customer-facing copy
       // in the shop; no reason or internal record is disclosed.
       await assertNoActiveCheckoutBlock(db, input.customer);
+
+      // Repeat the public-checkout match while holding the affected customer
+      // row. A token cannot be replayed for a changed record or used to update
+      // a different customer after a concurrent profile edit.
+      if (transactionCustomerDataChangeResolution?.kind === "matched") {
+        await db.execute(sql`
+          SELECT id FROM customers
+          WHERE id = ${transactionCustomerDataChangeResolution.customer.id}
+          FOR UPDATE
+        `);
+        const [currentCustomer] = await db.select().from(customers)
+          .where(eq(customers.id, transactionCustomerDataChangeResolution.customer.id))
+          .limit(1);
+        const freshResolution = currentCustomer
+          ? resolveCheckoutCustomerDataChange([currentCustomer], {
+            ...input.customer,
+            dhlPostNumber: input.customer.dhlPostNumber || null,
+          })
+          : null;
+        if (freshResolution?.kind !== "matched" || freshResolution.customer.id !== transactionCustomerDataChangeResolution.customer.id) {
+          throw new Error(CUSTOMER_DATA_CHANGE_RECONFIRMATION_CODE);
+        }
+        transactionCustomerDataChangeResolution = freshResolution;
+        await consumeCustomerDataChangeConfirmation(
+          db,
+          input.customerDataChangeConfirmationToken,
+          freshResolution,
+        );
+      }
 
       // Das KWK-Guthaben wird innerhalb derselben Transaktion wie die Bestellung
       // geprüft und reserviert. So kann kein rabattierter Auftrag ohne Gegenbuchung
@@ -1530,85 +1589,82 @@ export const orderRouter = router({
       }
 
       // ── Auto-create or link customer ──
-      try {
-        const customerEmail = (input.customer.email || "").toLowerCase().trim();
-        const customerPhone = input.customer.phone.trim();
-        const fullName = `${input.customer.firstName} ${input.customer.lastName}`;
+      // Shop orders use the preflighted public resolution only. This forbids
+      // a name/address match, conflicts and ambiguous contacts from silently
+      // changing or attaching an unrelated existing customer.
+      const customerEmail = (input.customer.email || "").toLowerCase().trim();
+      const customerPhone = input.customer.phone.trim();
+      const fullName = `${input.customer.firstName} ${input.customer.lastName}`.trim();
+      let existingCustomer: any = null;
 
-        // If existingCustomerId is provided (from KI-Erfassung manual match), use it directly
-        let existingCustomer: any = null;
-        if (input.existingCustomerId) {
-          const [found] = await db.select().from(customers).where(eq(customers.id, input.existingCustomerId));
-          if (found) {
-            existingCustomer = found;
-            console.log(`[Customers] Using manually matched customer ID=${input.existingCustomerId} (${found.name})`);
-          }
+      if (isAuthenticatedWawiManualSale && input.existingCustomerId) {
+        const [found] = await db.select().from(customers).where(eq(customers.id, input.existingCustomerId));
+        if (found) {
+          existingCustomer = found;
+          console.log(`[Customers] Using manually matched customer ID=${input.existingCustomerId} (${found.name})`);
         }
+      } else if (transactionCustomerDataChangeResolution?.kind === "matched") {
+        existingCustomer = transactionCustomerDataChangeResolution.customer;
+      }
 
-        if (!existingCustomer) {
-          // Try to find existing customer by email or phone
-          const allCustomers = await db.select().from(customers);
-          // Normalize phone for comparison
-          const normalizePhone = (p: string) => p.replace(/[\s\-\.\(\)]/g, '');
-          const normPhone = normalizePhone(customerPhone);
-          const PLACEHOLDER_EMAILS_MATCH = new Set(['keine@angabe.de', 'noemail@noemail.de', 'no@email.de', 'otc@369research.eu', '']);
-          const emailUsableForMatch = customerEmail && !PLACEHOLDER_EMAILS_MATCH.has(customerEmail.toLowerCase());
-          // Never pick an arbitrary profile from a shared e-mail address or phone
-          // number. The selected profile is an immutable order attribution and is
-          // also the sole basis for CRM totals and customer history.
-          const emailMatchCandidates = emailUsableForMatch
-            ? allCustomers.filter(c => c.email?.toLowerCase().trim() === customerEmail)
-            : [];
-          const emailIsUnique = emailMatchCandidates.length === 1;
-          // Phone matching: only use if the number is UNIQUE (exactly one customer has it)
-          // This prevents false positives when multiple customers share the same phone number.
-          const phoneMatchCandidates = normPhone.length >= 8
-            ? allCustomers.filter(c => c.phone && normalizePhone(c.phone) === normPhone)
-            : [];
-          const phoneIsUnique = phoneMatchCandidates.length === 1;
-          existingCustomer = emailIsUnique
-            ? emailMatchCandidates[0]
-            : (phoneIsUnique ? phoneMatchCandidates[0] : undefined);
-          if (!emailIsUnique && emailMatchCandidates.length > 1) {
-            console.warn(`[Customers] E-mail ${customerEmail} matches ${emailMatchCandidates.length} customers – skipping e-mail-based match to avoid false assignment`);
-          }
-          if (!phoneIsUnique && phoneMatchCandidates.length > 1) {
-            console.warn(`[Customers] Phone ${normPhone} matches ${phoneMatchCandidates.length} customers – skipping phone-based match to avoid false assignment`);
-          }
-        }
+      if (!existingCustomer && isAuthenticatedWawiManualSale) {
+        // Manual WaWi orders retain their established unique-contact fallback.
+        // It uses the same strict resolver, but never turns a name or address
+        // into a customer identity.
+        const manualResolution = resolveCheckoutCustomerDataChange(
+          await db.select().from(customers),
+          { ...input.customer, dhlPostNumber: input.customer.dhlPostNumber || null },
+        );
+        if (manualResolution.kind === "matched") existingCustomer = manualResolution.customer;
+      }
 
-        if (existingCustomer) {
-          // Update existing customer with latest data
-          customerId = existingCustomer.id;
-          const identityChanged = [
-            existingCustomer.name !== fullName,
-            (existingCustomer.phone || "") !== (customerPhone || existingCustomer.phone || ""),
-            (existingCustomer.email || "").toLowerCase() !== (customerEmail || existingCustomer.email || "").toLowerCase(),
-            (existingCustomer.street || "") !== (input.customer.street || ""),
-            (existingCustomer.houseNumber || "") !== (input.customer.houseNumber || ""),
-            (existingCustomer.zip || "") !== ((input.customer.zip ?? "").trim()),
-            (existingCustomer.city || "") !== (input.customer.city || ""),
-            (existingCustomer.country || "") !== (input.customer.country || ""),
-          ].some(Boolean);
+      if (existingCustomer) {
+        customerId = existingCustomer.id;
+        const confirmedPublicChange = transactionCustomerDataChangeResolution?.kind === "matched"
+          && transactionCustomerDataChangeResolution.customer.id === existingCustomer.id
+          && transactionCustomerDataChangeResolution.requiresConfirmation
+          ? transactionCustomerDataChangeResolution
+          : null;
+        if (confirmedPublicChange) {
+          await db.update(customers)
+            .set(toCustomerUpdateFromSnapshot(confirmedPublicChange.submittedSnapshot))
+            .where(eq(customers.id, existingCustomer.id));
+          await persistConfirmedCustomerDataChange(db, {
+            customerId: existingCustomer.id,
+            orderId,
+            matchedBy: confirmedPublicChange.matchedBy,
+            previousSnapshot: confirmedPublicChange.previousSnapshot,
+            submittedSnapshot: confirmedPublicChange.submittedSnapshot,
+            changedFields: confirmedPublicChange.changedFields,
+          });
+          customerIntegrityTrigger = "order_customer_changed";
+          console.log(`[CustomerDataChange] Confirmed checkout update for customer #${existingCustomer.customerNumber} in order ${orderId}`);
+        } else if (isAuthenticatedWawiManualSale) {
+          // The established authenticated WaWi workflow remains unchanged. The
+          // public shop path above is deliberately the only changed behavior.
+          const manuallyChanged = getChangedCustomerDataFields(
+            toCustomerDataSnapshot(existingCustomer),
+            toCustomerDataSnapshot({ ...input.customer, dhlPostNumber: input.customer.dhlPostNumber || null }),
+          ).length > 0;
           await db.update(customers).set({
             name: fullName,
             firstName: input.customer.firstName,
             lastName: input.customer.lastName,
             phone: customerPhone || existingCustomer.phone,
             email: customerEmail || existingCustomer.email,
-            // Bei Packstation: company NICHT mit Postnummer überschreiben
             company: input.customer.deliveryType === "packstation" ? existingCustomer.company : (input.customer.company || existingCustomer.company),
             street: input.customer.street,
             houseNumber: input.customer.houseNumber,
             zip: (input.customer.zip ?? "").trim(),
             city: input.customer.city,
             country: input.customer.country,
+            dhlPostNumber: input.customer.dhlPostNumber || existingCustomer.dhlPostNumber,
             updatedAt: new Date(),
           }).where(eq(customers.id, existingCustomer.id));
-
-          customerIntegrityTrigger = identityChanged ? "order_customer_changed" : null;
-          console.log(`[Customers] Linked order ${orderId} to existing customer #${existingCustomer.customerNumber} (${fullName})`);
-        } else {
+          customerIntegrityTrigger = manuallyChanged ? "order_customer_changed" : null;
+        }
+        console.log(`[Customers] Linked order ${orderId} to existing customer #${existingCustomer.customerNumber} (${fullName})`);
+      } else {
           // Generate next customer number (starting at 1210)
           const maxResult = await db.execute(sql`SELECT COALESCE(MAX(CAST(customer_number AS INTEGER)), 1209) as max_num FROM customers WHERE customer_number ~ '^[0-9]+$'`);
           const rows = maxResult as any;
@@ -1641,6 +1697,7 @@ export const orderRouter = router({
             zip: (input.customer.zip ?? "").trim(),
             city: input.customer.city,
             country: input.customer.country,
+            dhlPostNumber: input.customer.dhlPostNumber || null,
             source: "shop",
             acquiredBy,
             acquiredByPartnerId,
@@ -1653,25 +1710,22 @@ export const orderRouter = router({
           customerId = newCustomer.id;
           customerIntegrityTrigger = "order_customer_created";
           console.log(`[Customers] Created new customer #${nextNum} (${fullName}) for order ${orderId}`);
-        }
+      }
 
-        // Link order to customer
-        if (customerId) {
-          await db.update(orders).set({ customerId }).where(eq(orders.orderId, orderId));
-          if (customerIntegrityTrigger) {
-            try {
-              await queueCustomerDuplicateReview(customerId, customerIntegrityTrigger, "order.create");
-            } catch (error) {
-              console.warn("[Customer Integrity] Prüfung nach Bestell-Kundenabgleich fehlgeschlagen (nicht blockierend):", error);
-            }
+      // Link order to customer
+      if (customerId) {
+        await db.update(orders).set({ customerId }).where(eq(orders.orderId, orderId));
+        if (customerIntegrityTrigger) {
+          try {
+            await queueCustomerDuplicateReview(customerId, customerIntegrityTrigger, "order.create");
+          } catch (error) {
+            console.warn("[Customer Integrity] Prüfung nach Bestell-Kundenabgleich fehlgeschlagen (nicht blockierend):", error);
           }
         }
-
-        // NOTE: Communication log is written AFTER successful email send (see below)
-        // Do NOT log here to avoid false-positive idempotency check
-      } catch (err) {
-        console.warn("[Customers] Failed to auto-create/link customer:", err);
       }
+
+      // NOTE: Communication log is written AFTER successful email send (see below)
+      // Do NOT log here to avoid false-positive idempotency check
 
       });
 
