@@ -1,0 +1,18 @@
+name: Jarvy read access
+on:
+  pull_request:
+    paths: ['server/**', 'drizzle/**', 'package*.json', '.github/workflows/jarvy-read-access.yml']
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npx tsx --test server/jarvyReadRouter.test.ts
