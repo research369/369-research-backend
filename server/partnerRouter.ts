@@ -41,6 +41,7 @@ import {
   splitPartnerCodes,
 } from "./partnerProgramService.js";
 import { persistAddressValidation, validateGermanAddress } from "./addressValidationService.js";
+import { PARTNER_SUPPORT_CONTACT, PARTNER_TECHNICAL_CONTACT } from "./partnerContactProfile.js";
 // ─── Partner Auth Helpers ─────────────────────────────────────────
 // Middleware for partner-authenticated procedures
 const isPartner = middleware(async ({ ctx, next }) => {
@@ -1652,6 +1653,7 @@ export const partnerRouter = router({
         <p style="color:#64748b;font-size:12px;margin:16px 0 0;">Gueltig fuer 15 Minuten</p>
       </div>
       <p style="color:#64748b;font-size:13px;margin:0;">Falls du keinen Reset angefordert hast, ignoriere diese E-Mail.</p>
+      <p style="color:#64748b;font-size:12px;margin:16px 0 0;">Technische Hilfe: <a href="mailto:${PARTNER_TECHNICAL_CONTACT.email}" style="color:#60a5fa;">${PARTNER_TECHNICAL_CONTACT.email}</a></p>
     </div>
   </div>
 </body>
@@ -1666,7 +1668,8 @@ export const partnerRouter = router({
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            from: "369 Research <noreply@mail.369research.eu>",
+            from: PARTNER_TECHNICAL_CONTACT.from,
+            reply_to: PARTNER_TECHNICAL_CONTACT.replyTo,
             to: [partner.email],
             subject: "Passwort zuruecksetzen – 369 Research Partner Portal",
             html: emailHtml,
@@ -1836,7 +1839,8 @@ export const partnerRouter = router({
     <!-- Footer -->
     <div style="background:#0d1117;border:1px solid #1e3a5f;border-top:none;border-radius:0 0 12px 12px;padding:20px;text-align:center;">
       <p style="margin:0;font-size:12px;color:#475569;">369 Research \u00b7 Precision. Purity. Performance.</p>
-      <p style="margin:4px 0 0;font-size:12px;color:#475569;">Bei Fragen: WhatsApp +4915510063537</p>
+      <p style="margin:4px 0 0;font-size:12px;color:#475569;">Allgemeine Partnerfragen: <a href="mailto:${PARTNER_SUPPORT_CONTACT.email}" style="color:#93c5fd;">${PARTNER_SUPPORT_CONTACT.email}</a></p>
+      <p style="margin:4px 0 0;font-size:12px;color:#475569;">Technische Probleme im Partner-Portal: <a href="mailto:${PARTNER_TECHNICAL_CONTACT.email}" style="color:#93c5fd;">${PARTNER_TECHNICAL_CONTACT.email}</a></p>
     </div>
   </div>
 </body>
@@ -1853,7 +1857,8 @@ export const partnerRouter = router({
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          from: "369 Research <noreply@mail.369research.eu>",
+          from: PARTNER_SUPPORT_CONTACT.from,
+          reply_to: PARTNER_SUPPORT_CONTACT.replyTo,
           to: [partner.email],
           subject: `Deine Zugangsdaten – 369 Research Partner Portal`,
           html,
