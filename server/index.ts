@@ -43,6 +43,8 @@ import { ensurePersonalPromoExpiryReminderSchema, syncPersonalPromoExpiryReminde
 import { ensureCustomerDataChangeSchema } from "./customerDataChangeService.js";
 import { ensureCommunicationLanguageSchema } from "./communicationLanguageService.js";
 
+import { jarvyReadRouter } from "./jarvyReadRouter.js";
+
 const app = express();
 
 // Railway must be able to observe a live process while the application performs
@@ -138,6 +140,8 @@ app.use(resendWebhookRouter);
 // First-party marketing QR redirects. Only `/r/*` is mounted here; `/i/*` remains
 // reserved for the prepared individual product/serial URLs.
 app.use(qrRedirectRouter);
+
+app.use("/api/jarvy-read", jarvyReadRouter);
 
 // Manueller Backup-Trigger (gesichert mit WAWI_INTERNAL_KEY)
 app.post("/api/backup/trigger", async (req: any, res: any) => {
