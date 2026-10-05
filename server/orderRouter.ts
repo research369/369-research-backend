@@ -76,6 +76,8 @@ import {
   toCustomerUpdateFromSnapshot,
   type CheckoutCustomerDataChangeResolution,
 } from "./customerDataChangeService.js";
+import { normalizeCommunicationLanguage } from "./communicationLanguageService.js";
+import { buildPackingWhatsAppMessage } from "./packingWhatsAppMessage.js";
 
 /**
  * Releases a pending KWK referral only after an order is known to be paid.
@@ -127,6 +129,8 @@ const createOrderSchema = z.object({
   // Der öffentliche Shop bleibt der Standard. Der WaWi-Herkunftsmarker wird
   // ausschließlich für eine bereits authentifizierte interne Sitzung akzeptiert.
   orderSource: z.enum(["shop", "wawi_manual"]).optional().default("shop"),
+  // The checkout explicitly chooses the language for all automatic customer messages.
+  communicationLanguage: z.enum(["de", "en"]).optional().default("de"),
   // Nur für manuelle WaWi-Aufträge: eine Kunden-Bestellbestätigung wird
   // ausschließlich nach sichtbarer, expliziter Freigabe versendet. Shop-Checkout
   // bleibt davon bewusst unberührt und weiterhin vollständig automatisch.
@@ -225,6 +229,7 @@ export const orderRouter = router({
         .mutation(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
+      const communicationLanguage = normalizeCommunicationLanguage(input.communicationLanguage);
 
       const isRequestedWawiManualSale = input.orderSource === "wawi_manual";
       if (isRequestedWawiManualSale && !ctx.user) {
@@ -1319,6 +1324,7 @@ export const orderRouter = router({
         zip: (input.customer.zip ?? "").trim(), // trim() verhindert DHL-Fehler
         city: input.customer.city,
         country: input.customer.country,
+        communicationLanguage,
         // Bei DHL-Abholorten: company NICHT mit Postnummer befüllen
         company: input.customer.deliveryType === "packstation" || input.customer.deliveryType === "postfiliale" ? null : (input.customer.company || null),
         deliveryType: input.customer.deliveryType || "home",
@@ -1627,7 +1633,10 @@ export const orderRouter = router({
           : null;
         if (confirmedPublicChange) {
           await db.update(customers)
-            .set(toCustomerUpdateFromSnapshot(confirmedPublicChange.submittedSnapshot))
+            .set({
+              ...toCustomerUpdateFromSnapshot(confirmedPublicChange.submittedSnapshot),
+              communicationLanguage,
+            })
             .where(eq(customers.id, existingCustomer.id));
           await persistConfirmedCustomerDataChange(db, {
             customerId: existingCustomer.id,
@@ -1659,9 +1668,15 @@ export const orderRouter = router({
             city: input.customer.city,
             country: input.customer.country,
             dhlPostNumber: input.customer.dhlPostNumber || existingCustomer.dhlPostNumber,
+            communicationLanguage,
             updatedAt: new Date(),
           }).where(eq(customers.id, existingCustomer.id));
           customerIntegrityTrigger = manuallyChanged ? "order_customer_changed" : null;
+        } else {
+          // A shop customer can choose the communication language independently
+          // from address/contact changes. It is never inferred from the URL later.
+          await db.update(customers).set({ communicationLanguage, updatedAt: new Date() })
+            .where(eq(customers.id, existingCustomer.id));
         }
         console.log(`[Customers] Linked order ${orderId} to existing customer #${existingCustomer.customerNumber} (${fullName})`);
       } else {
@@ -1698,6 +1713,7 @@ export const orderRouter = router({
             city: input.customer.city,
             country: input.customer.country,
             dhlPostNumber: input.customer.dhlPostNumber || null,
+            communicationLanguage,
             source: "shop",
             acquiredBy,
             acquiredByPartnerId,
@@ -1763,6 +1779,7 @@ export const orderRouter = router({
         try {
           const emailSent = await sendOrderConfirmationEmail({
             orderId: orderId,
+            communicationLanguage,
             storeKey: input.storeKey,
             externalOrderReference,
             customer: input.customer,
@@ -1979,6 +1996,7 @@ export const orderRouter = router({
           if (order) {
             emailResult = await sendShippingNotificationEmail({
               orderId: input.orderId,
+              communicationLanguage: normalizeCommunicationLanguage(order.communicationLanguage),
               customerEmail: order.email,
               customerName: order.firstName,
               trackingNumber: input.trackingNumber,
@@ -2427,6 +2445,7 @@ export const orderRouter = router({
       if (input.sendEmail && order.email) {
         const emailResult = await sendPackingNotificationEmail({
           orderId: order.orderId,
+          communicationLanguage: normalizeCommunicationLanguage(order.communicationLanguage),
           customerEmail: order.email,
           customerName,
         });
@@ -2440,7 +2459,11 @@ export const orderRouter = router({
 
       // WhatsApp-Nachricht generieren (Vorschau für Frontend)
       const phone = order.phone || "";
-      const waMessage = `Hallo ${customerName} \ud83d\udc4b\n\ndein Paket f\u00fcr Bestellung *${order.orderId}* wird gerade gepackt und f\u00fcr den Versand vorbereitet! \ud83d\udce6\ud83d\udd2c\n\nSobald dein Paket auf dem Weg zu dir ist, bekommst du von uns eine weitere Nachricht mit deiner Sendungsnummer. \ud83d\ude9a\ud83d\udcec\n\nVielen Dank f\u00fcr dein Vertrauen! \ud83d\ude4f\n\n369 Research \ud83d\udd2c`;
+      const waMessage = buildPackingWhatsAppMessage({
+        customerName,
+        orderId: order.orderId,
+        communicationLanguage: order.communicationLanguage,
+      });
 
       console.log(`[Orders] Packing notification for ${order.orderId}: email=${input.sendEmail}, phone=${phone}`);
       return {

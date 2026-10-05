@@ -61,6 +61,23 @@ test("Bestellmail erklärt Überweisung als zuverlässigen Fallback für die opt
   assert.match(presentation.html, /Überweisung funktioniert zuverlässig/);
 });
 
+test("englische Kommunikation erzeugt eine vollständige englische Bestellbestätigung", async () => {
+  const presentation = await getOrderConfirmationPresentation({
+    ...baseOrder,
+    communicationLanguage: "en",
+    paymentMethod: "creditCard",
+  });
+
+  assert.ok(presentation);
+  assert.equal(presentation.subject, "Order confirmation 369-10607 – 369 Research");
+  assert.match(presentation.html, /<html lang="en">/);
+  assert.match(presentation.html, /Important payment notice/);
+  assert.match(presentation.html, /Payment information/);
+  assert.match(presentation.html, /Card payment \(Bunq\)/);
+  assert.match(presentation.html, /card payments cannot always be processed technically in our industry/);
+  assert.doesNotMatch(presentation.html, /Bestellbestätigung/);
+});
+
 test("eine P4P-Bestellmail ohne externe Referenz wird nicht vorbereitet", async () => {
   assert.equal(await getOrderConfirmationPresentation({ ...baseOrder, storeKey: "peps4pets" }), null);
 });

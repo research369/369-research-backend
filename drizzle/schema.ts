@@ -136,6 +136,8 @@ export const customers = pgTable("customers", {
   city: varchar("city", { length: 100 }),
   country: varchar("country", { length: 100 }),
   dhlPostNumber: varchar("dhl_post_number", { length: 20 }), // DHL-Postnummer für Packstation
+  // Current customer preference. Each order additionally stores its own immutable snapshot.
+  communicationLanguage: varchar("communication_language", { length: 2 }).notNull().default("de"),
 
   // CRM fields
   tags: text("tags"), // JSON array of tags, e.g. ["VIP", "Stammkunde", "B2B"]
@@ -472,6 +474,8 @@ export const orders = pgTable("orders", {
   city: varchar("city", { length: 100 }).notNull(),
   country: varchar("country", { length: 100 }).notNull(),
   company: varchar("company", { length: 200 }),
+  // Immutable communication-language snapshot used for all automatic order messages.
+  communicationLanguage: varchar("communication_language", { length: 2 }).notNull().default("de"),
 
   // Delivery type: 'home' (default) or 'packstation'
   deliveryType: varchar("delivery_type", { length: 20 }).notNull().default("home"),

@@ -41,6 +41,7 @@ import { ensureCustomerOrderBlockSchema } from "./customerOrderBlockService.js";
 import { ensureCustomerPromoAssignmentSchema } from "./customerPromoAssignmentService.js";
 import { ensurePersonalPromoExpiryReminderSchema, syncPersonalPromoExpiryReminders } from "./personalPromoExpiryReminderService.js";
 import { ensureCustomerDataChangeSchema } from "./customerDataChangeService.js";
+import { ensureCommunicationLanguageSchema } from "./communicationLanguageService.js";
 
 const app = express();
 
@@ -334,6 +335,14 @@ async function start() {
     await ensureCustomerDataChangeSchema();
   } catch (err) {
     console.warn("[Server] Customer data-change schema migration failed:", err);
+  }
+
+  // Automatic customer messages use only the explicitly selected DE/EN language.
+  // Historic records remain on the safe German default.
+  try {
+    await ensureCommunicationLanguageSchema();
+  } catch (err) {
+    console.warn("[Server] Communication-language schema migration failed:", err);
   }
 
   // Persönliche Aktionscodes sind separat und nur bei einer bewussten

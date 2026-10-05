@@ -37,6 +37,7 @@ const customerSchema = z.object({
   source: z.string().optional(),
   notes: z.string().optional(),
   dhlPostNumber: z.string().optional(), // DHL-Postnummer für Packstation-Lieferungen
+  communicationLanguage: z.enum(["de", "en"]).optional(),
   // Nur nach sichtbarer Warnung möglich; wird serverseitig erneut geprüft.
   addressValidationOverride: z.object({ confirmed: z.literal(true) }).optional(),
 });
@@ -325,6 +326,7 @@ export const customerRouter = router({
         tags: input.tags || null,
         source: input.source || "manual",
         notes: input.notes || null,
+        communicationLanguage: input.communicationLanguage || "de",
       });
 
       // SELECT after INSERT - more robust than RETURNING (works on all DB systems)
@@ -392,6 +394,7 @@ export const customerRouter = router({
       if (data.source !== undefined) updateData.source = data.source || null;
       if (data.notes !== undefined) updateData.notes = data.notes || null;
       if (data.dhlPostNumber !== undefined) updateData.dhlPostNumber = data.dhlPostNumber || null;
+      if (data.communicationLanguage !== undefined) updateData.communicationLanguage = data.communicationLanguage;
 
       await db.update(customers).set(updateData).where(eq(customers.id, id));
 
