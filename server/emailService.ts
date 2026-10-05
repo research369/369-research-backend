@@ -534,7 +534,7 @@ export async function sendPackingNotificationEmail(data: {
       </div>
       <p style="font-size:13px;color:#6b7280;margin-top:20px;text-align:center;">${copy.support}</p>
     </div>
-    <div style="text-align:center;padding:16px;font-size:12px;color:#9ca3af;">369 Research · Forschungsmaterialien</div>
+    <div style="text-align:center;padding:16px;font-size:12px;color:#9ca3af;">369 Research · ${language === "en" ? "Research materials" : "Forschungsmaterialien"}</div>
   </div>
 </body>
 </html>`;
@@ -629,7 +629,7 @@ export async function sendShippingNotificationEmail(data: {
       ${buildShippingResearchResourcesHtml(language)}
       <p style="font-size:13px;color:#6b7280;margin-top:20px;">${copy.support}</p>
     </div>
-    <div style="text-align:center;padding:16px;font-size:12px;color:#9ca3af;">369 Research · Forschungsmaterialien</div>
+    <div style="text-align:center;padding:16px;font-size:12px;color:#9ca3af;">369 Research · ${language === "en" ? "Research materials" : "Forschungsmaterialien"}</div>
   </div>
 </body>
 </html>`;
