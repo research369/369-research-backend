@@ -52,7 +52,7 @@ export const dashboardRouter = router({
       const { where, params } = buildOrderFilter(input);
       const commercial = commercialCondition();
 
-      const [periodResult, dailyResult, paymentResult, statusResult, globalResult, inventoryResult, lowStockResult, productNamesResult] = await Promise.all([
+      const [periodResult, dailyResult, paymentResult, statusResult, globalResult, inventoryResult, lowStockResult, productNamesResult, shopStatusResult] = await Promise.all([
         pool.query(`
           SELECT
             COUNT(*)::int AS "orderCount",
@@ -117,11 +117,21 @@ export const dashboardRouter = router({
           LIMIT 100
         `),
         pool.query(`SELECT DISTINCT name FROM order_items ORDER BY name ASC LIMIT 1_000`),
+        // The status is displayed in the WaWi dashboard header. Keeping this
+        // small read in the aggregate response eliminates a second startup
+        // request without changing the public shop-status endpoint.
+        pool.query(`
+          SELECT value, updated_at AS "updatedAt"
+          FROM shop_settings
+          WHERE key = 'shop_open'
+          LIMIT 1
+        `),
       ]);
 
       const [period] = periodResult.rows;
       const [global] = globalResult.rows;
       const [inventory] = inventoryResult.rows;
+      const [shopStatus] = shopStatusResult.rows;
       const cancelledResult = await pool.query(`SELECT COUNT(*)::int AS count FROM orders o WHERE ${where} AND o.status = 'storniert'`, params);
 
       return {
@@ -159,6 +169,10 @@ export const dashboardRouter = router({
           })),
         },
         productNames: productNamesResult.rows.map((row) => String(row.name)),
+        shopStatus: {
+          shopOpen: shopStatus ? shopStatus.value === "true" : true,
+          updatedAt: shopStatus?.updatedAt ? new Date(shopStatus.updatedAt).toISOString() : null,
+        },
       };
     }),
 

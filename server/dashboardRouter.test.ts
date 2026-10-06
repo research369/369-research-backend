@@ -12,6 +12,8 @@ describe("WaWi dashboard read model", () => {
     assert.match(source, /SUM\(o\.total::numeric\)/);
     assert.match(source, /LIMIT \$3/);
     assert.match(source, /JOIN order_items i ON i\.order_id = o\.order_id/);
+    assert.match(source, /FROM shop_settings/);
+    assert.match(source, /shopStatus:/);
   });
 
   it("declares additive performance indexes for order items and stock movement timelines", async () => {
