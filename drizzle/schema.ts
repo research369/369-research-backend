@@ -112,7 +112,10 @@ export const stockHistory = pgTable("stock_history", {
   userName: varchar("user_name", { length: 100 }),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+}, (t) => ({
+  createdAtIdx: index("stock_history_created_at_idx").on(t.createdAt),
+  articleCreatedAtIdx: index("stock_history_article_created_at_idx").on(t.articleId, t.createdAt),
+}));
 
 export type StockHistoryEntry = typeof stockHistory.$inferSelect;
 export type InsertStockHistory = typeof stockHistory.$inferInsert;
@@ -621,7 +624,9 @@ export const orderItems = pgTable("order_items", {
   isPlugPlay: boolean("is_plug_play").notNull().default(false),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+}, (t) => ({
+  orderIdIdx: index("order_items_order_id_idx").on(t.orderId),
+}));
 
 export type OrderItem = typeof orderItems.$inferSelect;
 export type InsertOrderItem = typeof orderItems.$inferInsert;

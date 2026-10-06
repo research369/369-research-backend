@@ -42,6 +42,7 @@ import { ensureCustomerPromoAssignmentSchema } from "./customerPromoAssignmentSe
 import { ensurePersonalPromoExpiryReminderSchema, syncPersonalPromoExpiryReminders } from "./personalPromoExpiryReminderService.js";
 import { ensureCustomerDataChangeSchema } from "./customerDataChangeService.js";
 import { ensureCommunicationLanguageSchema } from "./communicationLanguageService.js";
+import { ensureWawiPerformanceIndexes } from "./wawiPerformanceSchema.js";
 
 import { jarvyReadRouter } from "./jarvyReadRouter.js";
 
@@ -427,6 +428,15 @@ async function start() {
     console.log("[Server] Peps4pets checkout schema ready");
   } catch (err) {
     console.warn("[Server] Peps4pets checkout schema migration failed:", err);
+  }
+
+  // Additive, lock-bounded indexes speed up dashboard reads without changing
+  // stock, order or checkout records. A short lock timeout protects operations.
+  try {
+    await ensureWawiPerformanceIndexes();
+    console.log("[Server] WaWi performance indexes ready");
+  } catch (err) {
+    console.warn("[Server] WaWi performance indexes skipped:", err);
   }
 
   // Seed admin user on first start

@@ -27,6 +27,7 @@ import { customerDossierRouter } from "./customerDossierRouter.js";
 import { qrCampaignRouter } from "./qrCampaignRouter.js";
 import { goodieRouter } from "./goodieRouter.js";
 import { customerDataChangeRouter } from "./customerDataChangeRouter.js";
+import { dashboardRouter } from "./dashboardRouter.js";
 
 export const appRouter = router({
   order: orderRouter,
@@ -53,6 +54,7 @@ export const appRouter = router({
   qrCampaign: qrCampaignRouter,
   goodie: goodieRouter,
   customerDataChange: customerDataChangeRouter,
+  dashboard: dashboardRouter,
 });
 
 export type AppRouter = typeof appRouter;
