@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { router, adminProcedure } from "./trpc.js";
 import { getPool } from "./db.js";
+import { normalizeDashboardProductNames } from "./dashboardProductNames.js";
 
 const dateRangeSchema = z.object({
   from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -116,7 +117,13 @@ export const dashboardRouter = router({
           ORDER BY stock ASC, name ASC
           LIMIT 100
         `),
-        pool.query(`SELECT DISTINCT name FROM order_items ORDER BY name ASC LIMIT 1_000`),
+        pool.query(`
+          SELECT DISTINCT BTRIM(name) AS name
+          FROM order_items
+          WHERE NULLIF(BTRIM(name), '') IS NOT NULL
+          ORDER BY name ASC
+          LIMIT 1_000
+        `),
         // The status is displayed in the WaWi dashboard header. Keeping this
         // small read in the aggregate response eliminates a second startup
         // request without changing the public shop-status endpoint.
@@ -168,7 +175,7 @@ export const dashboardRouter = router({
             id: asNumber(row.id), sku: String(row.sku), name: String(row.name), stock: asNumber(row.stock), minStock: asNumber(row.minStock), sellingPrice: asNumber(row.sellingPrice),
           })),
         },
-        productNames: productNamesResult.rows.map((row) => String(row.name)),
+        productNames: normalizeDashboardProductNames(productNamesResult.rows),
         shopStatus: {
           shopOpen: shopStatus ? shopStatus.value === "true" : true,
           updatedAt: shopStatus?.updatedAt ? new Date(shopStatus.updatedAt).toISOString() : null,
