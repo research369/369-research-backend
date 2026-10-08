@@ -76,3 +76,7 @@ one execution made one order and stock deduction; replay/concurrent execution,
 price drift and actor revocation were checked. No external requests. The CI
 workflow runs this rehearsal against a disposable PostgreSQL service.
 Production activation and real customer acceptance remain open.
+
+Products with implicit nasal-set components or Plug-and-Play fulfilment stay in
+the native WaWi until every component/service can be included in the approved
+Jarvy preview. The integration rehearsal rejects that path without an order.

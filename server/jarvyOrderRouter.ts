@@ -52,6 +52,9 @@ jarvyOrderRouter.post('/:operation',async(req,res)=>{
   for(const line of request.items){
    const a=(await pool.query('SELECT sku,name,shop_product_id,selling_price,sale_price,stock,variants FROM articles WHERE sku=$1 AND is_active=1',[line.sku])).rows[0];if(!a)throw Error('article_not_found');
    if(a.stock<line.quantity)throw Error('stock_unavailable');
+   // These products trigger implicit components or special fulfilment in the native pipeline.
+   // Until those components are part of Jarvy's approval, keep their native WaWi flow.
+   if(/nasenspray|nasal|plug[\s&-]*play|patrone/i.test([a.name,a.sku,JSON.stringify(a.variants??[])].join(' ')))throw Error('article_requires_wawi');
    // SKU selects one inventory article. Multi-variant parents require the exact inventory SKU.
    if(Array.isArray(a.variants)&&a.variants.length>1)throw Error('exact_inventory_sku_required');
    const price=Number(a.sale_price)>0?Number(a.sale_price):Number(a.selling_price);if(!Number.isFinite(price)||price<=0)throw Error('article_price_unavailable');
@@ -75,7 +78,7 @@ jarvyOrderRouter.post('/:operation',async(req,res)=>{
    const result=await pool.query('SELECT state,order_id FROM jarvy_order_receipts WHERE id=$1',[receiptId]).then(r=>r.rows[0]).catch(()=>undefined);res.json(result??{state:'unknown'});return;
   }
   const code=error instanceof z.ZodError?'invalid_order':error instanceof Error?error.message:'unavailable';
-  const safe=/^(actor_unavailable|customer_email_missing|customer_not_found|customer_address_requires_wawi|article_not_found|stock_unavailable|exact_inventory_sku_required|article_price_unavailable|draft_changed|receipt_mismatch|already_claimed|invalid_order)$/.test(code)?code:'order_validation_failed';
+  const safe=/^(article_requires_wawi|actor_unavailable|customer_email_missing|customer_not_found|customer_address_requires_wawi|article_not_found|stock_unavailable|exact_inventory_sku_required|article_price_unavailable|draft_changed|receipt_mismatch|already_claimed|invalid_order)$/.test(code)?code:'order_validation_failed';
   res.status(409).json({error:safe});
  }
 });
