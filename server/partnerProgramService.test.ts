@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildLegacyPartnerCodeTerms,
+  calculatePublicPartnerCustomerDiscount,
   calculateProgramDiscount,
   calculateSelfOrderDiscountPercent,
   canRedeemShopCredit,
@@ -93,6 +94,22 @@ test("calculates the customer discount only once on the post-promotion product b
   assert.equal(calculateProgramDiscount(100, 20, 10), 8);
   assert.equal(calculateProgramDiscount(100, 0, 10), 10);
   assert.equal(calculateProgramDiscount(10, 20, 10), 0);
+});
+
+test("keeps a partner code as attribution only on a manual WaWi sale", () => {
+  assert.equal(calculatePublicPartnerCustomerDiscount({
+    subtotal: 185,
+    priorProductDiscount: 18.5,
+    percentage: 10,
+    isAuthenticatedWawiManualSale: true,
+  }), 0);
+
+  assert.equal(calculatePublicPartnerCustomerDiscount({
+    subtotal: 185,
+    priorProductDiscount: 18.5,
+    percentage: 10,
+    isAuthenticatedWawiManualSale: false,
+  }), 16.65);
 });
 
 test("stacks a public 15% partner code on an already reduced bundle and an ordinary promo", () => {

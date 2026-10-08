@@ -327,6 +327,23 @@ export function calculateProgramDiscount(subtotal: number, priorProductDiscount:
   return Math.round((base * percent / 100) * 100) / 100;
 }
 
+/**
+ * A partner code attached to a WaWi-created sale is attribution only. The
+ * operator already chooses every price reduction explicitly in that workflow,
+ * so the public customer discount must never be added a second time. The code
+ * remains on the order and therefore still supports the normal post-payment
+ * commission/credit settlement.
+ */
+export function calculatePublicPartnerCustomerDiscount(input: {
+  subtotal: number;
+  priorProductDiscount: number;
+  percentage: number;
+  isAuthenticatedWawiManualSale: boolean;
+}): number {
+  if (input.isAuthenticatedWawiManualSale) return 0;
+  return calculateProgramDiscount(input.subtotal, input.priorProductDiscount, input.percentage);
+}
+
 export async function resolveActivePartnerCode(rawCode: string): Promise<ResolvedPartnerCode | null> {
   const code = normalizePartnerCode(rawCode);
   if (!code) return null;

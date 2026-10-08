@@ -16,6 +16,7 @@ import { getPool } from "./db.js";
 import { checkDatabaseReadiness } from "./databaseReadiness.js";
 import type { Context } from "./trpc.js";
 import { startBackupScheduler } from "./backupService.js";
+import { reconcilePaidKwkCredits } from "./kwkCreditReconciliation.js";
 import { dhlExpressRouter } from "./dhlExpressRouter.js";
 import { trackingRouter } from "./trackingRouter.js";
 import { checkoutErrorRouter, ensureCheckoutFailureSchema } from "./checkoutErrorRouter.js";
@@ -1293,6 +1294,14 @@ start().then(() => {
   // The email archive scheduler is permanently disabled in backupService, so
   // this remains a safe no-op while preserving the platform-snapshot policy.
   startBackupScheduler();
+  // Historical KWK positions are reconciled only after the shop is ready, so
+  // they never prolong startup. The ledger operation is order-locked and
+  // idempotent; it releases only pending credits with a stored paid timestamp.
+  void reconcilePaidKwkCredits().then((result) => {
+    console.log(`[KWK] Zahlungsabgleich abgeschlossen: ${result.released} freigegeben, ${result.skipped} übersprungen, ${result.failed} Fehler`);
+  }).catch((err) => {
+    console.error("[KWK] Zahlungsabgleich fehlgeschlagen (non-fatal):", err);
+  });
 }).catch((err) => {
   startupState = "failed";
   console.error("[Server] Initialization failed; liveness remains available and business routes stay blocked:", err);
