@@ -49,6 +49,7 @@ import { serializeKwkFraudFlags } from "./kwkReferralPayload.js";
 import { getAuthenticatedPartnerFromRequest } from "./partnerAuth.js";
 import { isPromoCodeExpired } from "./promoCodeRouter.js";
 import {
+  calculatePublicPartnerCustomerDiscount,
   calculateProgramDiscount,
   calculateSelfOrderDiscountPercent,
   getPartnerProgram,
@@ -464,11 +465,12 @@ export const orderRouter = router({
             })
           : 0;
         const authoritativePartnerDiscount = resolvedPublicPartnerCode
-          ? calculateProgramDiscount(
-              input.subtotal,
-              automaticGlobalDiscountAmount + authoritativePromoDiscount,
-              publicPartnerDiscountEligible ? resolvedPublicPartnerCode.customerDiscountPercent : 0,
-            )
+          ? calculatePublicPartnerCustomerDiscount({
+              subtotal: input.subtotal,
+              priorProductDiscount: automaticGlobalDiscountAmount + authoritativePromoDiscount,
+              percentage: publicPartnerDiscountEligible ? resolvedPublicPartnerCode.customerDiscountPercent : 0,
+              isAuthenticatedWawiManualSale,
+            })
           : authenticatedPartner
             ? calculateProgramDiscount(
                 input.subtotal,
