@@ -45,3 +45,34 @@ Jarvy darf bei fehlendem Zugang keine erfundenen Ergebnisse liefern.
 Sechs Tests: Auth, Parametergrenzen, SQL-Parameterbindung, Aggregationsumfang,
 exakte Kundenzuordnung, HTTP-Verweigerung. TypeScript-Prüfung bestanden.
 Reale Kundenabfrage und Produktionsfreigabe noch offen.
+
+## Customer order extension — 2026-10-08, prepared, not deployed
+
+The owner requested customer orders in the WaWi. Supplier purchases belong in
+email/WhatsApp, not this endpoint. `/api/jarvy-orders` uses a separate
+`JARVY_WRITE_KEY` (minimum 40 characters, must differ from the read key) and an
+existing admin selected by `JARVY_WAWI_ACTOR_ID`, or by the existing
+`ADMIN_USERNAME` when no ID is configured. Revoking the admin role blocks writes.
+
+`POST /preview` accepts an existing customer ID, exact inventory SKUs/quantities,
+payment method, optional internal note and explicit confirmation-email flag.
+The actual order pipeline validates and prices the draft without allocating an
+order number or changing stock. Customer profile changes, substitution, stock
+bypass, partner/credit terms and ambiguous variants are excluded. Incomplete or
+Packstation addresses must first be corrected through the WaWi. This is not a
+supplier purchase endpoint and does not initiate payment.
+
+`POST /execute` requires a UUID receipt, the original request and the exact
+preview hash. BEDO Control supplies these only after personal approval of the
+bound draft (click or voice). Actor, customer and article changes are checked
+again. Receipt, order and stock commit atomically; an uncertain outcome cannot
+be retried under the same ID. `/status` can inspect that receipt. The additive
+receipt table from migration 0024 is initialized after authenticated admin access.
+No write key means the entire endpoint remains disabled.
+
+Validation: 16 focused tests, TypeScript check and a fresh isolated PostgreSQL
+rehearsal of the real pipeline passed locally. Preview made no order/stock write;
+one execution made one order and stock deduction; replay/concurrent execution,
+price drift and actor revocation were checked. No external requests. The CI
+workflow runs this rehearsal against a disposable PostgreSQL service.
+Production activation and real customer acceptance remain open.

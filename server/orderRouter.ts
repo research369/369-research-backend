@@ -5,6 +5,7 @@
  */
 
 import { z } from "zod";
+import {orderHash} from "./jarvyOrderContract.js";
 import { eq, desc, inArray, and, or, getTableColumns } from "drizzle-orm";
 import { router, publicProcedure, adminProcedure } from "./trpc.js";
 import { getDb, getPool } from "./db.js";
@@ -775,6 +776,7 @@ export const orderRouter = router({
 
       // ── Hilfsfunktion: Checkout-Fehler als Backup speichern + E-Mail an Admin ──
       const saveFailedOrder = async (errorMsg: string, attemptedOrderId?: string) => {
+        if(ctx.jarvyOrder)return;
         try {
           const pool = await getPool();
           if (pool) {
@@ -842,6 +844,15 @@ export const orderRouter = router({
       // an operator activating a block cannot race an in-flight checkout.
       if (await findActiveCheckoutBlock(input.customer)) {
         throw new Error(CUSTOMER_ORDER_BLOCKED_CODE);
+      }
+
+      // The dedicated Jarvy endpoint uses this same validation/pricing path.
+      // Preview stops before sequence allocation, stock/order writes and messages.
+      if (ctx.jarvyOrder) {
+        if (!isAuthenticatedWawiManualSale || !ctx.user || input.stockOverride || input.partnerCode || input.partnerNumber || input.kwkCode || input.qrAttributionToken || input.storeKey !== '369research') throw new Error('JARVY_ORDER_SCOPE');
+        const preview={input,discountBreakdown};
+        if(ctx.jarvyOrder.mode==='preview') return {jarvyPreview:preview,hash:orderHash(preview)};
+        if(ctx.jarvyOrder.expectedHash!==orderHash(preview))throw new Error('JARVY_ORDER_CHANGED');
       }
 
       const existingP4pResponse = (existingOrder: typeof orders.$inferSelect) => ({
@@ -1000,6 +1011,16 @@ export const orderRouter = router({
       let customerIntegrityTrigger: "order_customer_created" | "order_customer_changed" | null = null;
       await db.transaction(async (tx) => {
       const db = tx;
+      if(ctx.jarvyOrder?.mode==='execute') {
+        const actor=await db.execute(sql`SELECT id FROM users WHERE id=${ctx.user!.id} AND role='admin' FOR SHARE`);
+        if(!actor.rows.length)throw new Error('JARVY_ACTOR_REVOKED');
+        const receipt=await db.execute(sql`UPDATE jarvy_order_receipts SET order_id=${orderId},state='succeeded' WHERE id=${ctx.jarvyOrder.receiptId} AND state='executing' AND payload_hash=${ctx.jarvyOrder.expectedHash} AND order_id IS NULL RETURNING id`);
+        if(!(receipt as any).rows?.length && !(Array.isArray(receipt)&&receipt.length))throw new Error('JARVY_ORDER_ALREADY_CLAIMED');
+        await db.execute(sql`SELECT id FROM customers WHERE id=${input.existingCustomerId!} FOR UPDATE`);
+        const fresh=await db.select().from(customers).where(eq(customers.id,input.existingCustomerId!)).limit(1);
+        const c=fresh[0];
+        if(!c||['firstName','lastName','email','phone','street','houseNumber','zip','city','country','company'].some(k=>String((c as any)[k]??'')!==String((input.customer as any)[k]??'')))throw new Error('JARVY_CUSTOMER_CHANGED');
+      }
 
       let transactionCustomerDataChangeResolution = checkoutCustomerDataChangeResolution;
 
@@ -1107,12 +1128,13 @@ export const orderRouter = router({
       }
 
             // ── Stock check: verify all peptide items are in stock before creating order ──
+      if(ctx.jarvyOrder)await db.select({id:articles.id}).from(articles).where(inArray(articles.sku,input.items.map(i=>i.shopProductId!))).orderBy(articles.id).for('update');
       const allArticlesForCheck = await db.select().from(articles).where(eq(articles.isActive, 1));
       const outOfStockItems: string[] = [];
       const ambiguousVariantItems: string[] = [];
 
       // Smart Substitution: prüfen ob Feature aktiv ist
-      const substitutionActive = await isSubstitutionEnabled();
+      const substitutionActive = !ctx.jarvyOrder && await isSubstitutionEnabled();
 
       // Helper: find articles matching a shop item by direct variant SKU or canonical
       // shop product ID plus dosage. Bundle items carry the selected variant SKU; it must
@@ -1127,6 +1149,11 @@ export const orderRouter = router({
       const dosageMatches = (article: typeof allArticlesForCheck[number], dosageNorm: string): boolean =>
         !dosageNorm || getArticleDosage(article) === dosageNorm;
       const findMatchingArticles = (item: { name: string; dosage?: string; shopProductId?: string }, allArts: typeof allArticlesForCheck) => {
+        if(ctx.jarvyOrder) {
+          const exact=allArts.filter(a=>a.sku===item.shopProductId);
+          if(exact.length!==1||exact[0].name!==item.name)throw new Error('JARVY_ARTICLE_CHANGED');
+          return exact;
+        }
         const dosageNorm = (item.dosage || '').toLowerCase().trim();
         const itemShopId = (item.shopProductId || '').toLowerCase().trim();
 
@@ -1281,7 +1308,10 @@ export const orderRouter = router({
             const deduct = Math.min(remainingToDeduct, article.stock ?? 0);
             if (deduct > 0) {
               const newStock = (article.stock ?? 0) - deduct;
-              await db.update(articles).set({ stock: newStock, updatedAt: new Date() }).where(eq(articles.id, article.id));
+              if(ctx.jarvyOrder) {
+                const changed=await db.execute(sql`UPDATE articles SET stock=stock-${deduct},updated_at=now() WHERE id=${article.id} AND is_active=1 AND stock>=${deduct} AND (CASE WHEN sale_price>0 THEN sale_price ELSE selling_price END)=${item.price} RETURNING id`);
+                if(!changed.rows.length)throw new Error('JARVY_ARTICLE_CHANGED');
+              }else await db.update(articles).set({ stock: newStock, updatedAt: new Date() }).where(eq(articles.id, article.id));
               await db.insert(stockHistory).values({
                 articleId: article.id,
                 quantityChange: -deduct,
@@ -1648,7 +1678,7 @@ export const orderRouter = router({
           });
           customerIntegrityTrigger = "order_customer_changed";
           console.log(`[CustomerDataChange] Confirmed checkout update for customer #${existingCustomer.customerNumber} in order ${orderId}`);
-        } else if (isAuthenticatedWawiManualSale) {
+        } else if (isAuthenticatedWawiManualSale && !ctx.jarvyOrder) {
           // The established authenticated WaWi workflow remains unchanged. The
           // public shop path above is deliberately the only changed behavior.
           const manuallyChanged = getChangedCustomerDataFields(

@@ -3,6 +3,7 @@ import superjson from "superjson";
 import type { Request, Response } from "express";
 
 export interface Context {
+  jarvyOrder?: import('./jarvyOrderContract.js').JarvyOrderContext;
   req: Request;
   res: Response;
   user: {

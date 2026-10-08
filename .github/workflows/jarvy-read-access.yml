@@ -1,4 +1,4 @@
-name: Jarvy read access
+name: Jarvy WaWi access
 on:
   pull_request:
     paths: ['server/**', 'drizzle/**', 'package*.json', '.github/workflows/jarvy-read-access.yml']
@@ -7,6 +7,15 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ['55446:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -15,4 +24,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx tsc --noEmit
-      - run: npx tsx --test server/jarvyReadRouter.test.ts
+      - run: npx tsx --test server/jarvyReadRouter.test.ts server/jarvyOrderContract.test.ts server/manualWawiPricing.test.ts server/orderConfirmationPolicy.test.ts server/orderItemIdentity.test.ts
+      - run: npx drizzle-kit export --dialect postgresql --schema ./drizzle/schema.ts > /tmp/jarvy-wawi-schema.sql
+      - run: npx tsx server/jarvyOrderRehearsal.ts
+        env:
+          JARVY_ISOLATED_ORDER_REHEARSAL: 'true'

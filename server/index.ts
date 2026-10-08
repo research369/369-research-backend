@@ -44,6 +44,7 @@ import { ensureCustomerDataChangeSchema } from "./customerDataChangeService.js";
 import { ensureCommunicationLanguageSchema } from "./communicationLanguageService.js";
 import { ensureWawiPerformanceIndexes } from "./wawiPerformanceSchema.js";
 
+import {jarvyOrderRouter} from "./jarvyOrderRouter.js";
 import { jarvyReadRouter } from "./jarvyReadRouter.js";
 
 const app = express();
@@ -143,6 +144,7 @@ app.use(resendWebhookRouter);
 app.use(qrRedirectRouter);
 
 app.use("/api/jarvy-read", jarvyReadRouter);
+app.use("/api/jarvy-orders", jarvyOrderRouter);
 
 // Manueller Backup-Trigger (gesichert mit WAWI_INTERNAL_KEY)
 app.post("/api/backup/trigger", async (req: any, res: any) => {
