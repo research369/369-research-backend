@@ -11,7 +11,6 @@ process.env.RESEND_API_KEY='';process.env.BUNQ_API_KEY='';process.env.JARVY_WRIT
 const db=new pg.Pool({connectionString});
 assert.equal((await db.query("SELECT count(*)::int n FROM information_schema.tables WHERE table_schema='public'")).rows[0].n,0,'Fresh empty database required');
 await db.query(await readFile('/tmp/jarvy-wawi-schema.sql','utf8'));
-await db.query(await readFile('drizzle/migrations/0024_jarvy_order_receipts.sql','utf8'));
 await db.query("CREATE SEQUENCE rehearsal_order_seq; CREATE FUNCTION next_order_id() RETURNS text LANGUAGE sql AS $$ SELECT 'TEST-' || nextval('rehearsal_order_seq')::text $$;");
 await db.query("INSERT INTO users(username,password_hash,role) VALUES('isolated-operator','not-a-login','admin')");
 await db.query("INSERT INTO customers(name,first_name,last_name,email,phone,street,house_number,zip,city,country) VALUES('Test Person','Test','Person','test@example.test','000','Teststraße','1','1010','Wien','AT')");
