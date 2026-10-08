@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { getPool } from './db.js';
 
 const inputSchema = z.object({
-  operation: z.enum(['orders','order','customers','customer','sales_summary','purchases','purchase']),
+  operation: z.enum(['orders','order','customers','customer','sales_summary','purchases','purchase','articles']),
   search: z.string().trim().min(2).max(120).optional(),
   id: z.string().min(1).max(64).optional(),
   customerId: z.number().int().positive().optional(),
@@ -49,6 +49,9 @@ export function buildJarvyReadQuery(i:JarvyReadInput):{text:string;values:unknow
     else text=`SELECT count(*)::int AS all_orders, count(*) FILTER(WHERE status='storniert')::int AS cancelled_orders, coalesce(sum(total) FILTER(WHERE status<>'storniert' AND total>0),0)::text AS active_order_value_eur, coalesce(sum(total) FILTER(WHERE status IN ('bezahlt','gepackt','versendet','zugestellt','abgeholt') AND total>0),0)::text AS paid_status_order_value_eur, coalesce(sum(total) FILTER(WHERE status='offen' AND total>0),0)::text AS open_order_value_eur FROM orders${clauses()}`;
   }else if(i.operation==='order'){
     text=`SELECT ${orderColumns}, phone, street, house_number, zip, city, country, company, left(internal_note,2000) AS internal_note FROM orders WHERE order_id=${p(i.id)} LIMIT 1`;
+  }else if(i.operation==='articles'){
+    where.push('is_active=1');match(['sku','name','shop_product_id']);
+    text=`SELECT id,sku,name,category,shop_product_id,selling_price,sale_price,stock,variants FROM articles${clauses()} ORDER BY name,id${page()}`;
   }else if(i.operation==='customers'){
     match(['customer_number','name','email','phone','company']);text=`SELECT ${customerColumns} FROM customers${clauses()} ORDER BY id DESC${page()}`;
   }else if(i.operation==='customer'){

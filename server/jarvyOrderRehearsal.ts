@@ -1,0 +1,45 @@
+/** Explicit opt-in integration probe. Only a fresh, isolated loopback PostgreSQL is accepted. */
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {randomUUID} from 'node:crypto';
+import {createServer} from 'node:http';
+import express from 'express';
+import pg from 'pg';
+if(process.env.JARVY_ISOLATED_ORDER_REHEARSAL!=='true')throw Error('Isolated rehearsal not enabled');
+const connectionString='postgresql://postgres@127.0.0.1:55446/postgres';process.env.DATABASE_URL=connectionString;
+process.env.RESEND_API_KEY='';process.env.BUNQ_API_KEY='';process.env.JARVY_WRITE_KEY='rehearsal-only-'.repeat(5);process.env.JARVY_READ_KEY='different-read-key-'.repeat(5);process.env.JARVY_WAWI_ACTOR_ID='1';
+const db=new pg.Pool({connectionString});
+assert.equal((await db.query("SELECT count(*)::int n FROM information_schema.tables WHERE table_schema='public'")).rows[0].n,0,'Fresh empty database required');
+await db.query(await readFile('/tmp/jarvy-wawi-schema.sql','utf8'));
+await db.query(await readFile('drizzle/migrations/0024_jarvy_order_receipts.sql','utf8'));
+await db.query("CREATE SEQUENCE rehearsal_order_seq; CREATE FUNCTION next_order_id() RETURNS text LANGUAGE sql AS $$ SELECT 'TEST-' || nextval('rehearsal_order_seq')::text $$;");
+await db.query("INSERT INTO users(username,password_hash,role) VALUES('isolated-operator','not-a-login','admin')");
+await db.query("INSERT INTO customers(name,first_name,last_name,email,phone,street,house_number,zip,city,country) VALUES('Test Person','Test','Person','test@example.test','000','Teststraße','1','1010','Wien','AT')");
+await db.query("INSERT INTO articles(sku,name,selling_price,stock,is_active) VALUES('TEST-BOTTLE','Test Bottle',10,20,1)");
+const {jarvyOrderRouter}=await import('./jarvyOrderRouter.js');const {closeDb}=await import('./db.js');
+const app=express();app.use(express.json());app.use('/api/jarvy-orders',jarvyOrderRouter);const server=createServer(app);await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
+const url='http://127.0.0.1:'+(server.address() as any).port+'/api/jarvy-orders';
+const originalFetch=globalThis.fetch;let outbound=0;
+globalThis.fetch=(async(input:any,init:any)=>{if(!String(input).startsWith(url)){outbound++;throw Error('External requests disabled in rehearsal');}return originalFetch(input,init);}) as typeof fetch;
+const post=async(op:string,b:unknown,key=process.env.JARVY_WRITE_KEY)=>{const r=await fetch(url+'/'+op,{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+key},body:JSON.stringify(b)});return {status:r.status,data:await r.json()};};
+try{
+ const request={customerId:1,items:[{sku:'TEST-BOTTLE',quantity:2}],paymentMethod:'SEPA'};
+ assert.equal((await post('preview',request,process.env.JARVY_READ_KEY)).status,401);
+ const preview=await post('preview',request);assert.equal(preview.status,200,JSON.stringify(preview.data));
+ assert.equal((await db.query('SELECT count(*)::int n FROM orders')).rows[0].n,0);
+ assert.equal((await db.query('SELECT stock FROM articles WHERE id=1')).rows[0].stock,20);
+ const body={id:randomUUID(),request,expected_hash:preview.data.hash};
+ const first=await post('execute',body);assert.equal(first.status,200,JSON.stringify(first.data));assert.equal(first.data.state,'succeeded',JSON.stringify(first.data));
+ assert.equal((await post('execute',body)).data.order_id,first.data.order_id);
+ assert.equal((await db.query('SELECT count(*)::int n FROM orders')).rows[0].n,1);
+ assert.equal((await db.query('SELECT stock FROM articles WHERE id=1')).rows[0].stock,18);
+ const order=(await db.query('SELECT total,status,customer_id FROM orders')).rows[0];assert.equal(Number(order.total),35);assert.equal(order.status,'offen');assert.equal(order.customer_id,1);
+ const p2=await post('preview',request);await db.query('UPDATE articles SET selling_price=11 WHERE id=1');assert.equal((await post('execute',{id:randomUUID(),request,expected_hash:p2.data.hash})).data.error,'draft_changed');
+ assert.equal((await db.query('SELECT count(*)::int n FROM orders')).rows[0].n,1);
+ const p3=await post('preview',request);const concurrent={id:randomUUID(),request,expected_hash:p3.data.hash};
+ const together=await Promise.all([post('execute',concurrent),post('execute',concurrent)]);assert.ok(together.some(r=>r.data.state==='succeeded'));
+ assert.equal((await db.query('SELECT count(*)::int n FROM orders')).rows[0].n,2);assert.equal((await db.query('SELECT stock FROM articles WHERE id=1')).rows[0].stock,16);
+ const p4=await post('preview',request);await db.query("UPDATE users SET role='user' WHERE id=1");assert.equal((await post('execute',{id:randomUUID(),request,expected_hash:p4.data.hash})).data.error,'actor_unavailable');
+ assert.equal(outbound,0,'No mail, payment or other external request');
+ console.log(JSON.stringify({isolated_postgres:true,real_order_pipeline:true,preview_no_order_or_stock_write:true,one_order_one_deduction:true,replay_same_order:true,concurrent_execute_once:true,revoked_actor_denied:true,price_drift_denied:true,external_requests:outbound}));
+}finally{globalThis.fetch=originalFetch;server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));await closeDb();await db.end();}

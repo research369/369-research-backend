@@ -46,3 +46,8 @@ test('HTTP route denies missing credentials and every write-shaped operation bef
     assert.equal((await fetch(url,{method:'POST',headers,body:'{"operation":"delete"}'})).status,400);
   }finally{server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));delete process.env.JARVY_READ_KEY;}
 });
+
+ test('article search returns bounded active catalog rows for exact order selection',()=>{
+ const q=buildJarvyReadQuery(parseJarvyReadInput({operation:'articles',search:'Bottle',limit:5}));
+ assert.match(q.text,/is_active=1/);assert.match(q.text,/selling_price/);assert.deepEqual(q.values,['Bottle',6,0]);
+ });
