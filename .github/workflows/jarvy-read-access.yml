@@ -24,6 +24,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx tsc --noEmit
+      - run: npx tsx --test server/guardianInventoryRouter.test.ts
+        env:
+          GUARDIAN_TEST_DB: postgres://postgres@localhost:55446/postgres
       - run: npx tsx --test server/jarvyReadRouter.test.ts server/jarvyOrderContract.test.ts server/manualWawiPricing.test.ts server/orderConfirmationPolicy.test.ts server/orderItemIdentity.test.ts
       - run: npx drizzle-kit export --dialect postgresql --schema ./drizzle/schema.ts > /tmp/jarvy-wawi-schema.sql
       - run: npx tsx server/jarvyOrderRehearsal.ts
