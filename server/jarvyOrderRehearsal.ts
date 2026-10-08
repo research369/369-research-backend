@@ -27,6 +27,9 @@ try{
  const preview=await post('preview',request);assert.equal(preview.status,200,JSON.stringify(preview.data));
  assert.equal((await db.query('SELECT count(*)::int n FROM orders')).rows[0].n,0);
  assert.equal((await db.query('SELECT stock FROM articles WHERE id=1')).rows[0].stock,20);
+ await db.query("INSERT INTO articles(sku,name,selling_price,stock,is_active) VALUES('TEST-NASAL','Test Nasenspray',10,20,1)");
+ assert.equal((await post('preview',{...request,items:[{sku:'TEST-NASAL',quantity:1}]})).data.error,'article_requires_wawi');
+ assert.equal((await db.query('SELECT count(*)::int n FROM orders')).rows[0].n,0);
  const body={id:randomUUID(),request,expected_hash:preview.data.hash};
  const first=await post('execute',body);assert.equal(first.status,200,JSON.stringify(first.data));assert.equal(first.data.state,'succeeded',JSON.stringify(first.data));
  assert.equal((await post('execute',body)).data.order_id,first.data.order_id);
@@ -40,5 +43,5 @@ try{
  assert.equal((await db.query('SELECT count(*)::int n FROM orders')).rows[0].n,2);assert.equal((await db.query('SELECT stock FROM articles WHERE id=1')).rows[0].stock,16);
  const p4=await post('preview',request);await db.query("UPDATE users SET role='user' WHERE id=1");assert.equal((await post('execute',{id:randomUUID(),request,expected_hash:p4.data.hash})).data.error,'actor_unavailable');
  assert.equal(outbound,0,'No mail, payment or other external request');
- console.log(JSON.stringify({isolated_postgres:true,real_order_pipeline:true,preview_no_order_or_stock_write:true,one_order_one_deduction:true,replay_same_order:true,concurrent_execute_once:true,revoked_actor_denied:true,price_drift_denied:true,external_requests:outbound}));
+ console.log(JSON.stringify({isolated_postgres:true,real_order_pipeline:true,preview_no_order_or_stock_write:true,one_order_one_deduction:true,replay_same_order:true,concurrent_execute_once:true,revoked_actor_denied:true,price_drift_denied:true,implicit_components_denied:true,external_requests:outbound}));
 }finally{globalThis.fetch=originalFetch;server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));await closeDb();await db.end();}
