@@ -20,6 +20,7 @@ import { getDb, getPool } from "./db.js";
 import { partners, partnerAddressRequests, partnerTransactions, orders, orderItems, partnerCodeUsage, customers } from "../drizzle/schema.js";
 import { ENV } from "./env.js";
 import { bookPaidPartnerCommission, redeemPartnerCreditForOrder } from "./partnerCreditService.js";
+import { buildPartnerSettlementReport } from "./partnerSettlementReport.js";
 import type { Request } from "express";
 import {
   createPartnerToken,
@@ -599,38 +600,14 @@ export const partnerRouter = router({
         allItems = await db.select().from(orderItems).where(inArray(orderItems.orderId, orderIds));
       }
 
-      // Calculate totals
-      const totalCommissionEarned = transactions
-        .filter(t => t.type === "provision")
-        .reduce((sum, t) => sum + parseFloat(t.amount), 0);
-
-      const totalRedeemed = transactions
-        .filter(t => t.type === "einloesung")
-        .reduce((sum, t) => sum + Math.abs(parseFloat(t.amount)), 0);
-
-      const totalAdjustments = transactions
-        .filter(t => t.type === "korrektur")
-        .reduce((sum, t) => sum + parseFloat(t.amount), 0);
-
-      return {
-        partner: {
-          ...partner,
-          commissionPercent: parseFloat(partner.commissionPercent),
-          customerDiscountPercent: parseFloat(partner.customerDiscountPercent),
-          creditBalance: parseFloat(partner.creditBalance),
-          codeTerms,
-          passwordHash: undefined,
-        },
-        summary: {
-          totalOrders: referredOrders.length,
-          totalCommissionEarned,
-          totalRedeemed,
-          totalAdjustments,
-          currentBalance: parseFloat(partner.creditBalance),
-        },
+      // The complete accounting view is calculated from this one, internally
+      // consistent ledger/order snapshot. The WaWi must not fan out further
+      // data requests while an admin is reviewing a partner's balance.
+      const report = buildPartnerSettlementReport({
+        currentBalance: parseFloat(partner.creditBalance),
         orders: referredOrders.map(o => ({
           orderId: o.orderId,
-          customerName: `${o.firstName} ${o.lastName}`,
+          customerName: `${o.firstName} ${o.lastName}`.trim(),
           orderDate: o.orderDate,
           subtotal: parseFloat(o.subtotal),
           discount: parseFloat(o.discount),
@@ -649,12 +626,30 @@ export const partnerRouter = router({
             .map(i => ({ name: i.name, quantity: i.quantity, price: parseFloat(i.price) })),
         })),
         transactions: transactions.map(t => ({
-          ...t,
+          id: t.id,
+          partnerId: t.partnerId,
+          type: t.type,
           amount: parseFloat(t.amount),
           balanceAfter: parseFloat(t.balanceAfter),
+          orderId: t.orderId,
+          customerName: t.customerName,
+          description: t.description,
           status: t.status || "normal",
           adminNote: t.adminNote || null,
+          createdAt: t.createdAt,
         })),
+      });
+
+      return {
+        partner: {
+          ...partner,
+          commissionPercent: parseFloat(partner.commissionPercent),
+          customerDiscountPercent: parseFloat(partner.customerDiscountPercent),
+          creditBalance: parseFloat(partner.creditBalance),
+          codeTerms,
+          passwordHash: undefined,
+        },
+        ...report,
       };
     }),
 
