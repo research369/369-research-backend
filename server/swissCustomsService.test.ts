@@ -5,6 +5,7 @@ import {
   THERMAL_LABEL_HEIGHT_PT,
   THERMAL_LABEL_WIDTH_PT,
   buildSwissCommercialInvoicePdf,
+  buildSwissShipmentPrintPdf,
   toDhlSwissCustomsPayload,
   validateSwissCustomsDeclaration,
   type ValidatedSwissCustomsDeclaration,
@@ -90,6 +91,28 @@ test("stores two standalone invoice copies without a DHL label page", async () =
   const rendered = await PDFDocument.load(output);
   assert.equal(rendered.getPageCount(), 2);
   for (const page of rendered.getPages()) {
+    assert.equal(page.getWidth(), THERMAL_LABEL_WIDTH_PT);
+    assert.equal(page.getHeight(), THERMAL_LABEL_HEIGHT_PT);
+  }
+});
+
+test("creates the Swiss print package in label-then-two-invoice order", async () => {
+  const validation = validateSwissCustomsDeclaration(draft());
+  assert.equal(validation.ok, true);
+  if (!validation.ok) return;
+
+  const dhlLabel = await PDFDocument.create();
+  dhlLabel.addPage([300, 400]);
+  const output = await buildSwissShipmentPrintPdf({
+    labelPdfBase64: Buffer.from(await dhlLabel.save()).toString("base64"),
+    invoice: invoice(validation.value, "CH-369-TEST-PRINT"),
+  });
+  const rendered = await PDFDocument.load(output);
+
+  assert.equal(rendered.getPageCount(), 3);
+  assert.equal(rendered.getPages()[0].getWidth(), 300);
+  assert.equal(rendered.getPages()[0].getHeight(), 400);
+  for (const page of rendered.getPages().slice(1)) {
     assert.equal(page.getWidth(), THERMAL_LABEL_WIDTH_PT);
     assert.equal(page.getHeight(), THERMAL_LABEL_HEIGHT_PT);
   }

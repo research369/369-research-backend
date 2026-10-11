@@ -331,11 +331,7 @@ function addInvoicePage(
   return page;
 }
 
-/**
- * Generates the two required commercial-invoice copies as a standalone PDF.
- * The document is persisted with the shipment evidence and deliberately never
- * included in, opened with, or sent to the thermal-label print flow.
- */
+/** Generates the two required commercial-invoice copies as a standalone PDF. */
 export async function buildSwissCommercialInvoicePdf(input: {
   invoice: SwissCommercialInvoice;
 }): Promise<Uint8Array> {
@@ -344,5 +340,29 @@ export async function buildSwissCommercialInvoicePdf(input: {
   for (let copyNumber = 1; copyNumber <= 2; copyNumber++) {
     chunks.forEach((chunk, index) => addInvoicePage(output, input.invoice, chunk, copyNumber, 2, index + 1, chunks.length));
   }
+  return output.save();
+}
+
+/**
+ * Creates the physical document sequence required for one Swiss shipment:
+ * DHL label first, then both complete commercial-invoice copies. The invoice
+ * continues onto additional thermal pages only when its position count needs it.
+ */
+export async function buildSwissShipmentPrintPdf(input: {
+  labelPdfBase64: string;
+  invoice: SwissCommercialInvoice;
+}): Promise<Uint8Array> {
+  const labelBytes = Buffer.from(input.labelPdfBase64, "base64");
+  const labelDocument = await PDFDocument.load(labelBytes);
+  const invoiceBytes = await buildSwissCommercialInvoicePdf({ invoice: input.invoice });
+  const invoiceDocument = await PDFDocument.load(invoiceBytes);
+  const output = await PDFDocument.create();
+
+  const labelPages = await output.copyPages(labelDocument, labelDocument.getPageIndices());
+  labelPages.forEach((page) => output.addPage(page));
+
+  const invoicePages = await output.copyPages(invoiceDocument, invoiceDocument.getPageIndices());
+  invoicePages.forEach((page) => output.addPage(page));
+
   return output.save();
 }
