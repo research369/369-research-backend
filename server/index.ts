@@ -44,6 +44,7 @@ import { ensurePersonalPromoExpiryReminderSchema, syncPersonalPromoExpiryReminde
 import { ensureCustomerDataChangeSchema } from "./customerDataChangeService.js";
 import { ensureCommunicationLanguageSchema } from "./communicationLanguageService.js";
 import { ensureWawiPerformanceIndexes } from "./wawiPerformanceSchema.js";
+import { ensureSwissCustomsSchema } from "./swissCustomsSchema.js";
 
 import {jarvyOrderRouter} from "./jarvyOrderRouter.js";
 import { jarvyReadRouter } from "./jarvyReadRouter.js";
@@ -353,6 +354,15 @@ async function start() {
     await ensureCommunicationLanguageSchema();
   } catch (err) {
     console.warn("[Server] Communication-language schema migration failed:", err);
+  }
+
+  // DHL Paket Schweiz: auftragsbezogene Zolldaten bleiben getrennt von
+  // Artikelstammdaten, damit kein HS-Code, Ursprung oder Gewicht geraten wird.
+  try {
+    await ensureSwissCustomsSchema();
+    console.log("[Server] Swiss customs declaration schema ready");
+  } catch (err) {
+    console.warn("[Server] Swiss customs declaration schema migration failed:", err);
   }
 
   // Persönliche Aktionscodes sind separat und nur bei einer bewussten

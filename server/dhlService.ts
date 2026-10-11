@@ -22,6 +22,7 @@
  */
 
 import { ENV } from "./env.js";
+import { toDhlSwissCustomsPayload, type ValidatedSwissCustomsDeclaration } from "./swissCustomsService.js";
 
 // ─── Konstanten ───────────────────────────────────────────────────────────────
 
@@ -63,6 +64,8 @@ export interface DhlShipmentInput {
   productCode?:   string;
   /** 14-stellige Billing Number – überschreibt ENV.dhlBillingNumber. Aus dhlProfiles.ts. */
   billingNumber?: string;
+  /** Ausschließlich für DHL Paket Schweiz: bereits vollständig validierte Zollpositionen. */
+  swissCustoms?: ValidatedSwissCustomsDeclaration;
 }
 
 export interface DhlShipmentResult {
@@ -568,5 +571,142 @@ export async function createDhlShipmentEU(
     labelUrl:      labelUrl ?? undefined,
     labelBase64:   labelBase64 ?? undefined,
     statusCode:    rawResponse.status,
+  };
+}
+
+
+/**
+ * Erstellt eine DHL Paket Schweiz Sendung (V54EPAK).
+ *
+ * Die Funktion akzeptiert nur zuvor validierte und auftragsbezogene Zollpositionen.
+ * Sie verwendet verbindlich DAP: Versand trägt der Absender; Schweizer Abgaben und
+ * Zollabfertigung trägt der Empfänger.
+ */
+export async function createDhlShipmentCH(
+  input: DhlShipmentInput,
+): Promise<DhlShipmentResult> {
+  const validationError = validateConsignee(input.consignee);
+  if (validationError) return { success: false, error: validationError };
+
+  const billingNumber = input.billingNumber;
+  if (!billingNumber || billingNumber.length < 14) {
+    return { success: false, error: "DHL_BILLING_NUMBER_CH nicht konfiguriert oder ungültig (14 Zeichen erwartet)" };
+  }
+  if (!input.swissCustoms) {
+    return { success: false, error: "Schweizer Zolldaten fehlen oder wurden nicht validiert." };
+  }
+
+  const countryAlpha3 = normalizeCountryToAlpha3(input.consignee.country);
+  if (countryAlpha3 !== "CHE") {
+    return { success: false, error: "DHL Paket Schweiz darf nur für eine Schweizer Empfängeradresse verwendet werden." };
+  }
+
+  let headers: Record<string, string>;
+  try {
+    headers = buildAuthHeaders();
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+
+  const refNo = input.orderId.length >= 8 ? input.orderId : input.orderId.padEnd(8, "0");
+  const body = {
+    profile: "STANDARD_GRUPPENPROFIL",
+    printSettings: {
+      printerDpi: 300,
+      encodingType: "PDF",
+      labelFormat: "910-300-400",
+    },
+    shipments: [{
+      product: input.productCode ?? "V54EPAK",
+      billingNumber,
+      refNo,
+      shipper: {
+        name1: DEFAULT_SHIPPER.name1,
+        addressStreet: DEFAULT_SHIPPER.addressStreet,
+        addressHouse: DEFAULT_SHIPPER.addressHouse,
+        postalCode: DEFAULT_SHIPPER.postalCode,
+        city: DEFAULT_SHIPPER.city,
+        country: DEFAULT_SHIPPER.country,
+      },
+      consignee: {
+        name1: input.consignee.name1.slice(0, 50),
+        ...(input.consignee.name2 ? { name2: input.consignee.name2.slice(0, 50) } : {}),
+        ...(input.consignee.name3 ? { name3: input.consignee.name3.slice(0, 50) } : {}),
+        addressStreet: input.consignee.addressStreet,
+        addressHouse: input.consignee.addressHouse,
+        postalCode: input.consignee.postalCode,
+        city: input.consignee.city,
+        country: countryAlpha3,
+        ...(input.consignee.email ? { email: input.consignee.email } : {}),
+        ...(input.consignee.phone ? { phone: input.consignee.phone } : {}),
+      },
+      details: {
+        weight: {
+          uom: "g",
+          value: input.swissCustoms.packageWeightGrams,
+        },
+      },
+      customs: toDhlSwissCustomsPayload(input.swissCustoms),
+    }],
+  };
+
+  const apiUrl = `${getApiBase()}/orders?validate=false&printOnlyIfCodable=false&docFormat=PDF&labelResponseType=INCLUDE`;
+  let rawResponse: Response;
+  let responseText: string;
+  try {
+    rawResponse = await fetch(apiUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+    responseText = await rawResponse.text();
+  } catch (err: any) {
+    return { success: false, error: `DHL API nicht erreichbar: ${err.message}`, statusCode: 0 };
+  }
+
+  let data: any;
+  try {
+    data = JSON.parse(responseText);
+  } catch {
+    return { success: false, error: `DHL API: Ungültige JSON-Antwort (HTTP ${rawResponse.status})`, statusCode: rawResponse.status };
+  }
+  if (!rawResponse.ok) {
+    const detail = data?.detail || data?.title || data?.items?.[0]?.validationMessages?.[0]?.validationMessage || JSON.stringify(data).slice(0, 300);
+    console.error(`[dhlService/CH] DHL API Fehler HTTP ${rawResponse.status}:`, detail);
+    return { success: false, error: `DHL Fehler Schweiz (${rawResponse.status}): ${detail}`, statusCode: rawResponse.status };
+  }
+
+  const shipment = data?.items?.[0];
+  const trackingNumber = shipment?.shipmentNo ?? shipment?.trackingId ?? shipment?.shipmentTrackingNumber;
+  const labelUrl = shipment?.label?.url;
+  let labelBase64 = shipment?.label?.b64 ?? shipment?.label?.content;
+  if (!trackingNumber) {
+    return { success: false, error: "DHL API: Keine Trackingnummer in der Antwort", statusCode: rawResponse.status };
+  }
+
+  // DHL kann je Vertragskonfiguration ein temporäres Label-URL statt Inline-Base64
+  // liefern. Der Schweiz-Druck muss das Label mit den zwei Zollexemplaren in einem
+  // gespeicherten Dokument bündeln; daher wird es einmal serverseitig abgerufen.
+  if (!labelBase64 && labelUrl) {
+    try {
+      const labelResponse = await fetch(labelUrl, { headers });
+      if (labelResponse.ok) {
+        labelBase64 = Buffer.from(await labelResponse.arrayBuffer()).toString("base64");
+      }
+    } catch (error) {
+      console.warn("[dhlService/CH] DHL-Label-URL konnte nicht geladen werden:", error);
+    }
+  }
+  if (!labelBase64) {
+    return { success: false, error: "DHL hat kein druckbares Label-PDF zurückgegeben.", statusCode: rawResponse.status };
+  }
+
+  console.log(`[dhlService/CH] Label erstellt: ${trackingNumber} (DAP, Sandbox: ${ENV.dhlSandbox})`);
+  return {
+    success: true,
+    trackingNumber,
+    labelUrl: labelUrl ?? undefined,
+    labelBase64: labelBase64 ?? undefined,
+    statusCode: rawResponse.status,
   };
 }

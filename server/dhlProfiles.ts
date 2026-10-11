@@ -91,13 +91,13 @@ export function getDhlProfiles(): Record<DhlProfileKey, DhlProfile> {
     DHL_CH: {
       label:           "DHL Paket Schweiz",
       product:         "V54EPAK",
-      billingNumber:   null, // Noch nicht aktiviert – International-Vertrag nötig
-      active:          false,
+      billingNumber:   ENV.dhlBillingNumberCh || null,
+      active:          !!ENV.dhlBillingNumberCh,
       countries:       ["CH"],
       maxWeightG:      31500,
       customsRequired: true,
       labelFormat:     "910-300-400",
-      inactiveReason:  "DHL Paket Schweiz noch nicht aktiviert – Billing Number fehlt + Zollfelder nötig",
+      inactiveReason:  ENV.dhlBillingNumberCh ? undefined : "DHL_BILLING_NUMBER_CH nicht gesetzt",
     },
   };
 }

@@ -28,12 +28,13 @@
 
 import { Router, type Request, type Response } from "express";
 import { ENV } from "./env.js";
-import { createDhlShipmentDE, createDhlShipmentEU, validateConsignee, normalizeCountryToAlpha3, type DhlConsignee } from "./dhlService.js";
+import { createDhlShipmentCH, createDhlShipmentDE, createDhlShipmentEU, validateConsignee, normalizeCountryToAlpha3, type DhlConsignee } from "./dhlService.js";
 import { getDhlProfiles, getActiveProfile, suggestProfile, type DhlProfileKey } from "./dhlProfiles.js";
-import { getDb } from "./db.js";
-import { orders } from "../drizzle/schema.js";
+import { getDb, getPool } from "./db.js";
+import { orderItems, orders } from "../drizzle/schema.js";
 import { eq, and, isNull } from "drizzle-orm";
 import { getUserFromRequest } from "./auth.js";
+import { buildSwissThermalPrintPdf, validateSwissCustomsDeclaration, type SwissCommercialInvoice, type SwissCustomsDeclaration, type ValidatedSwissCustomsDeclaration } from "./swissCustomsService.js";
 
 export const dhlExpressRouter = Router();
 
@@ -92,6 +93,273 @@ const alpha3ToAlpha2: Record<string, string> = {
   IRL: "IE", FIN: "FI", SWE: "SE", DNK: "DK", EST: "EE", LVA: "LV", LTU: "LT",
   NOR: "NO", ISL: "IS", LIE: "LI",
 };
+
+type SwissCustomsDraftItem = {
+  orderItemId: number;
+  description: string;
+  hsCode: string;
+  countryOfOrigin: string;
+  unitWeightGrams: number;
+};
+
+function isSwissDestination(country: string | null | undefined): boolean {
+  return normalizeCountryToAlpha3(String(country ?? "")) === "CHE";
+}
+
+async function loadSwissCustomsForLabel(order: typeof orders.$inferSelect): Promise<{
+  declaration: ValidatedSwissCustomsDeclaration;
+  invoice: SwissCommercialInvoice;
+}> {
+  const pool = await getPool();
+  if (!pool) throw new Error("Datenbank für Schweizer Zolldaten nicht verfügbar");
+  const result = await pool.query(`
+    SELECT
+      declaration.package_weight_grams,
+      declaration.invoice_number,
+      declaration.created_at,
+      declaration.compliance_confirmed_at,
+      item.order_item_id,
+      item.item_description,
+      item.hs_code,
+      item.country_of_origin,
+      item.unit_weight_grams,
+      order_item.quantity,
+      order_item.price
+    FROM order_swiss_customs_declarations declaration
+    JOIN order_swiss_customs_items item ON item.declaration_id = declaration.id
+    JOIN order_items order_item ON order_item.id = item.order_item_id
+    WHERE declaration.order_id = $1
+    ORDER BY order_item.id ASC
+  `, [order.orderId]);
+  if (result.rows.length === 0) {
+    throw new Error("Für diese Schweizer Bestellung fehlen gespeicherte Zolldaten.");
+  }
+  const first = result.rows[0];
+  if (!first.compliance_confirmed_at) {
+    throw new Error("Die Compliance-Prüfung für diese Schweizer Sendung wurde nicht bestätigt.");
+  }
+  const declaration: SwissCustomsDeclaration = {
+    orderId: order.orderId,
+    packageWeightGrams: Number(first.package_weight_grams),
+    shippingEur: Number(order.shipping ?? 0),
+    subtotalEur: Number(order.subtotal ?? 0),
+    discountEur: Number(order.discount ?? 0),
+    lines: result.rows.map((row) => ({
+      orderItemId: Number(row.order_item_id),
+      description: row.item_description,
+      hsCode: row.hs_code,
+      countryOfOrigin: row.country_of_origin,
+      unitWeightGrams: Number(row.unit_weight_grams),
+      quantity: Number(row.quantity),
+      unitPriceEur: Number(row.price),
+    })),
+  };
+  const validated = validateSwissCustomsDeclaration(declaration);
+  if (!validated.ok) throw new Error(validated.error);
+  if (validated.value.goodsValueEur > 1000) {
+    throw new Error("Warenwert über 1.000 €: Ausfuhrbegleitdokument (ABD) ist zusätzlich erforderlich und wird nicht automatisch erzeugt.");
+  }
+  return {
+    declaration: validated.value,
+    invoice: {
+      invoiceNumber: String(first.invoice_number),
+      invoiceDate: new Date(first.created_at),
+      seller: {
+        name: "369 RESEARCH Sp. z o.o.",
+        street: "Hoża 86/210",
+        zip: "00-682",
+        city: "Warszawa",
+        country: "Poland",
+        taxId: "PL5214161163",
+      },
+      consignee: {
+        name: `${order.firstName ?? ""} ${order.lastName ?? ""}`.trim(),
+        street: String(order.street ?? ""),
+        houseNumber: String(order.houseNumber ?? ""),
+        zip: String(order.zip ?? ""),
+        city: String(order.city ?? ""),
+        country: "Switzerland",
+      },
+      declaration: validated.value,
+    },
+  };
+}
+
+// ─── Schweizer Zolldaten: nur auftragsbezogen und vollständig ─────────────────
+
+dhlExpressRouter.get(
+  "/api/shipping/dhl/swiss-customs/:orderId",
+  requireWawiAdmin,
+  async (req: Request, res: Response) => {
+    const orderId = String(req.params.orderId ?? "").trim();
+    const db = await getDb();
+    if (!db) {
+      res.status(503).json({ success: false, error: "Datenbank nicht verfügbar" });
+      return;
+    }
+    const [order] = await db.select().from(orders).where(eq(orders.orderId, orderId)).limit(1);
+    if (!order) {
+      res.status(404).json({ success: false, error: "Bestellung nicht gefunden" });
+      return;
+    }
+    if (!isSwissDestination(order.country)) {
+      res.status(422).json({ success: false, error: "Zolldaten können nur für eine Schweizer Lieferadresse erfasst werden." });
+      return;
+    }
+    const rows = await db.select({
+      id: orderItems.id,
+      name: orderItems.name,
+      dosage: orderItems.dosage,
+      variant: orderItems.variant,
+      quantity: orderItems.quantity,
+      price: orderItems.price,
+    }).from(orderItems).where(eq(orderItems.orderId, orderId));
+    const pool = await getPool();
+    if (!pool) {
+      res.status(503).json({ success: false, error: "Datenbank für Schweizer Zolldaten nicht verfügbar" });
+      return;
+    }
+    const saved = await pool.query(`
+      SELECT declaration.package_weight_grams, declaration.compliance_confirmed_at,
+             item.order_item_id, item.item_description, item.hs_code, item.country_of_origin, item.unit_weight_grams
+      FROM order_swiss_customs_declarations declaration
+      LEFT JOIN order_swiss_customs_items item ON item.declaration_id = declaration.id
+      WHERE declaration.order_id = $1
+    `, [orderId]);
+    const savedByItem = new Map(saved.rows.filter((row) => row.order_item_id).map((row) => [Number(row.order_item_id), row]));
+    const declaration = saved.rows[0];
+    res.json({
+      success: true,
+      orderId,
+      packageWeightGrams: declaration?.package_weight_grams ? Number(declaration.package_weight_grams) : null,
+      complianceConfirmed: Boolean(declaration?.compliance_confirmed_at),
+      items: rows.map((item) => {
+        const prior = savedByItem.get(item.id);
+        return {
+          orderItemId: item.id,
+          name: item.name,
+          dosage: item.dosage,
+          variant: item.variant,
+          quantity: item.quantity,
+          unitPriceEur: Number(item.price),
+          description: prior?.item_description ?? "",
+          hsCode: prior?.hs_code ?? "",
+          countryOfOrigin: prior?.country_of_origin ?? "",
+          unitWeightGrams: prior?.unit_weight_grams ? Number(prior.unit_weight_grams) : null,
+        };
+      }),
+    });
+  },
+);
+
+dhlExpressRouter.put(
+  "/api/shipping/dhl/swiss-customs/:orderId",
+  requireWawiAdmin,
+  async (req: Request, res: Response) => {
+    const orderId = String(req.params.orderId ?? "").trim();
+    const body = req.body as { packageWeightGrams?: unknown; complianceConfirmed?: unknown; items?: SwissCustomsDraftItem[] };
+    const db = await getDb();
+    const user = await getUserFromRequest(req);
+    if (!db || !user) {
+      res.status(503).json({ success: false, error: "Datenbank oder Sitzung nicht verfügbar" });
+      return;
+    }
+    const [order] = await db.select().from(orders).where(eq(orders.orderId, orderId)).limit(1);
+    if (!order) {
+      res.status(404).json({ success: false, error: "Bestellung nicht gefunden" });
+      return;
+    }
+    if (order.trackingNumber || order.shippingLabelUrl) {
+      res.status(409).json({ success: false, error: "Zolldaten können nach der Label-Erstellung nicht mehr geändert werden." });
+      return;
+    }
+    if (!isSwissDestination(order.country)) {
+      res.status(422).json({ success: false, error: "Zolldaten können nur für eine Schweizer Lieferadresse erfasst werden." });
+      return;
+    }
+    if (body.complianceConfirmed !== true) {
+      res.status(422).json({ success: false, error: "Bitte bestätige, dass keine Verbote, Beschränkungen oder Ausfuhrgenehmigungen vorliegen." });
+      return;
+    }
+    const existingItems = await db.select({ id: orderItems.id, quantity: orderItems.quantity, price: orderItems.price })
+      .from(orderItems).where(eq(orderItems.orderId, orderId));
+    if (!Array.isArray(body.items) || body.items.length !== existingItems.length) {
+      res.status(422).json({ success: false, error: "Alle Bestellpositionen müssen genau einmal mit Zolldaten erfasst werden." });
+      return;
+    }
+    const inputById = new Map(body.items.map((item) => [Number(item.orderItemId), item]));
+    if (inputById.size !== existingItems.length || existingItems.some((item) => !inputById.has(item.id))) {
+      res.status(422).json({ success: false, error: "Die Zolldaten passen nicht exakt zu den Bestellpositionen." });
+      return;
+    }
+    const draft: SwissCustomsDeclaration = {
+      orderId,
+      packageWeightGrams: Number(body.packageWeightGrams),
+      shippingEur: Number(order.shipping ?? 0),
+      subtotalEur: Number(order.subtotal ?? 0),
+      discountEur: Number(order.discount ?? 0),
+      lines: existingItems.map((item) => {
+        const customs = inputById.get(item.id)!;
+        return {
+          orderItemId: item.id,
+          description: customs.description,
+          hsCode: customs.hsCode,
+          countryOfOrigin: customs.countryOfOrigin,
+          unitWeightGrams: Number(customs.unitWeightGrams),
+          quantity: Number(item.quantity),
+          unitPriceEur: Number(item.price),
+        };
+      }),
+    };
+    const validated = validateSwissCustomsDeclaration(draft);
+    if (!validated.ok) {
+      res.status(422).json({ success: false, error: validated.error });
+      return;
+    }
+    if (validated.value.goodsValueEur > 1000) {
+      res.status(422).json({ success: false, error: "Warenwert über 1.000 €: Die notwendige Ausfuhranmeldung/ABD wird nicht automatisch erstellt." });
+      return;
+    }
+    const pool = await getPool();
+    if (!pool) {
+      res.status(503).json({ success: false, error: "Datenbank für Schweizer Zolldaten nicht verfügbar" });
+      return;
+    }
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const declarationResult = await client.query(`
+        INSERT INTO order_swiss_customs_declarations (
+          order_id, package_weight_grams, shipping_terms, invoice_number,
+          compliance_confirmed_at, compliance_confirmed_by, created_by, updated_at
+        ) VALUES ($1, $2, 'DAP', $3, NOW(), $4, $4, NOW())
+        ON CONFLICT (order_id) DO UPDATE SET
+          package_weight_grams = EXCLUDED.package_weight_grams,
+          compliance_confirmed_at = EXCLUDED.compliance_confirmed_at,
+          compliance_confirmed_by = EXCLUDED.compliance_confirmed_by,
+          updated_at = NOW()
+        RETURNING id
+      `, [orderId, validated.value.packageWeightGrams, `CH-${orderId}`, user.name || user.username || "admin"]);
+      const declarationId = Number(declarationResult.rows[0].id);
+      await client.query("DELETE FROM order_swiss_customs_items WHERE declaration_id = $1", [declarationId]);
+      for (const line of validated.value.lines) {
+        await client.query(`
+          INSERT INTO order_swiss_customs_items (
+            declaration_id, order_item_id, item_description, hs_code, country_of_origin, unit_weight_grams, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
+        `, [declarationId, line.orderItemId, line.description, line.hsCode, line.countryOfOrigin, line.unitWeightGrams]);
+      }
+      await client.query("COMMIT");
+      res.json({ success: true, goodsValueEur: validated.value.goodsValueEur, packageWeightGrams: validated.value.packageWeightGrams });
+    } catch (error: any) {
+      await client.query("ROLLBACK");
+      console.error("[dhlRouter/CH] Zolldaten konnten nicht gespeichert werden", error);
+      res.status(500).json({ success: false, error: "Zolldaten konnten nicht gespeichert werden." });
+    } finally {
+      client.release();
+    }
+  },
+);
 
 dhlExpressRouter.get(
   "/api/shipping/dhl/availability/:country",
@@ -312,8 +580,20 @@ dhlExpressRouter.post(
     }
 
     // Ein fehlender Gewichtsdatensatz darf niemals das Profil-Maximum als Sendungsgewicht
-    // an DHL übergeben. Der bisherige produktive DHL-Standard beträgt 1.000 g.
-    const requestedWeightG = Number(weightGrams ?? (order as any).weightGrams ?? 1000);
+    // an DHL übergeben. Bei CH ist ausschließlich das zuvor gespeicherte, tatsächliche
+    // Paketgewicht zulässig; Browserwerte werden bewusst nicht akzeptiert.
+    let swissCustoms: { declaration: ValidatedSwissCustomsDeclaration; invoice: SwissCommercialInvoice } | null = null;
+    if (profileKey === "DHL_CH") {
+      try {
+        swissCustoms = await loadSwissCustomsForLabel(order);
+      } catch (error: any) {
+        res.status(422).json({ success: false, error: error.message || "Schweizer Zolldaten sind unvollständig." });
+        return;
+      }
+    }
+    const requestedWeightG = profileKey === "DHL_CH"
+      ? swissCustoms!.declaration.packageWeightGrams
+      : Number(weightGrams ?? (order as any).weightGrams ?? 1000);
     if (!Number.isFinite(requestedWeightG) || requestedWeightG <= 0) {
       res.status(422).json({ success: false, error: "Gewicht für die DHL-Sendung fehlt oder ist ungültig." });
       return;
@@ -419,7 +699,8 @@ dhlExpressRouter.post(
         and(
           eq(orders.orderId, orderId.trim()),
           isNull(orders.trackingNumber),
-          isNull(orders.shippingLabelUrl)
+          isNull(orders.shippingLabelUrl),
+          isNull(orders.trackingCarrier)
         )
       );
 
@@ -440,20 +721,43 @@ dhlExpressRouter.post(
       weightGrams:   requestedWeightG,
       productCode:   activeProfile.product,
       billingNumber: activeProfile.billingNumber!,
+      ...(swissCustoms ? { swissCustoms: swissCustoms.declaration } : {}),
     };
     // DHL_DE_STANDARD → createDhlShipmentDE (unverändert)
     // DHL_EU          → createDhlShipmentEU (Phase 2, V53WPAK)
-    const result = profileKey === "DHL_EU"
-      ? await createDhlShipmentEU(shipmentInput)
-      : await createDhlShipmentDE(shipmentInput);
+    // DHL_CH          → V54EPAK mit DAP- und Zoll-EDI-Daten
+    const result = profileKey === "DHL_CH"
+      ? await createDhlShipmentCH(shipmentInput)
+      : profileKey === "DHL_EU"
+        ? await createDhlShipmentEU(shipmentInput)
+        : await createDhlShipmentDE(shipmentInput);
 
     // ── Stufe 3: Ergebnis in DB schreiben ────────────────────────────────────
     if (result.success && result.trackingNumber) {
       // Interne Download-Route als shippingLabelUrl
       const labelRoute = `/api/shipping/dhl/label/${orderId.trim()}`;
 
-      // Base64-PDF in shippingLabelContent speichern
-      const labelContent = result.labelBase64 ?? null;
+      // Schweizer Sendungen erhalten ein einziges 4×6-PDF: DHL-Label plus zwei
+      // lesbare Handelsrechnungs-Ausfertigungen. Andere DHL-Profile bleiben exakt
+      // beim bisherigen, unveränderten Speicherformat.
+      let labelContent = result.labelBase64 ?? null;
+      if (profileKey === "DHL_CH") {
+        try {
+          if (!labelContent || !swissCustoms) throw new Error("DHL-Label oder Zolldaten fehlen");
+          const combined = await buildSwissThermalPrintPdf({
+            dhlLabelPdf: Buffer.from(labelContent, "base64"),
+            invoice: swissCustoms.invoice,
+          });
+          labelContent = Buffer.from(combined).toString("base64");
+        } catch (error: any) {
+          // Das DHL-Label wurde extern bereits gebucht. Es darf aber niemals als
+          // unvollständige Schweiz-Sendung in der WaWi erscheinen; der Pending-Lock
+          // bleibt bewusst bestehen und die Ursache wird klar zurückgemeldet.
+          console.error(`[dhlRouter/CH] Druckdokument konnte nicht aufgebaut werden:`, error);
+          res.status(500).json({ success: false, error: "DHL-Label erstellt, aber das kombinierte Schweiz-Druckdokument konnte nicht erzeugt werden. Bitte Support kontaktieren; kein zweites Label auslösen." });
+          return;
+        }
+      }
 
       await db
         .update(orders)

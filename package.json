@@ -24,6 +24,7 @@
     "jsonwebtoken": "^9.0.3",
     "nanoid": "^5.1.5",
     "otpauth": "^9.5.1",
+    "pdf-lib": "^1.17.1",
     "pg": "^8.13.1",
     "qrcode": "^1.5.4",
     "resend": "^6.10.0",

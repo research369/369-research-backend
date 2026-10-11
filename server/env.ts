@@ -43,6 +43,8 @@ export const ENV = {
   dhlProductCodeDe:    process.env.DHL_PRODUCT_CODE_DE || "V01PAK",
   // EU International (V53WPAK) – Phase 2
   dhlBillingNumberEu:  process.env.DHL_BILLING_NUMBER_EU || "",
+  // Schweiz (V54EPAK) – nur mit aktivierter International-Teilnahme und vollständigen Zolldaten.
+  dhlBillingNumberCh:  process.env.DHL_BILLING_NUMBER_CH || "",
   // DE Kleinpaket (V62KP) – eigene Abrechnungsnummer 63979135286201
   dhlBillingNumberKleinpaket: process.env.DHL_BILLING_NUMBER_KLEINPAKET || "",
   // true = Sandbox (Default), false = Production (nur nach expliziter Freigabe)
