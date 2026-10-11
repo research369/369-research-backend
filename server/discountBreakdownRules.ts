@@ -28,5 +28,9 @@ export function shouldKeepClientDiscountBreakdownSource(
     return !context.hasResolvedPublicPartnerCode && !context.hasAuthenticatedPartnerSelfOrder;
   }
 
+  if (source === "partner_credit") {
+    return !context.hasAuthenticatedPartnerSelfOrder;
+  }
+
   return true;
 }

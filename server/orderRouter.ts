@@ -43,6 +43,7 @@ import {
 import { verifyKwkToken } from "./kwkAuth.js";
 import { getActiveGlobalAutomaticDiscountFromDb } from "./globalAutomaticDiscountConfig.js";
 import { calculateAuthoritativeWawiManualOrder, normalizeDiscountCodeForOrderSource } from "./manualWawiPricing.js";
+import { calculateAuthoritativeShopCheckoutPricing } from "./shopCheckoutPricing.js";
 import { shouldSendOrderConfirmation } from "./orderConfirmationPolicy.js";
 import { resolveSubstitutionProductFamily } from "./orderItemIdentity.js";
 import { serializeKwkFraudFlags } from "./kwkReferralPayload.js";
@@ -452,41 +453,47 @@ export const orderRouter = router({
         });
         input.shippingCountry = resolveShippingRegion(input.customer.country);
       }
-      // The catalog-backed subtotal is available now. Recalculate every public
-      // partner and authenticated self-order discount here, rather than trusting
-      // a preview value computed in the browser before prices were reconstructed.
-      if (resolvedPublicPartnerCode || authenticatedPartner || resolvedPromoCode) {
-        const authoritativePromoDiscount = resolvedPromoCode
-          ? calculatePromoDiscount({
-              subtotal: input.subtotal,
-              items: input.items,
-              promo: resolvedPromoCode,
-              precedingProductDiscount: automaticGlobalDiscountAmount,
-            })
+      // The catalog-backed subtotal is available now. Every public shop term is
+      // rebuilt here from its server-owned source; an old browser preview must
+      // never change the payable amount. An authenticated partner's own discount
+      // and separately entered shop credit are intentionally both retained.
+      const authoritativePromoDiscount = resolvedPromoCode
+        ? calculatePromoDiscount({
+            subtotal: input.subtotal,
+            items: input.items,
+            promo: resolvedPromoCode,
+            precedingProductDiscount: automaticGlobalDiscountAmount,
+          })
+        : 0;
+      const authoritativePartnerDiscount = resolvedPublicPartnerCode
+        ? calculatePublicPartnerCustomerDiscount({
+            subtotal: input.subtotal,
+            priorProductDiscount: automaticGlobalDiscountAmount + authoritativePromoDiscount,
+            percentage: publicPartnerDiscountEligible ? resolvedPublicPartnerCode.customerDiscountPercent : 0,
+            isAuthenticatedWawiManualSale,
+          })
+        : authenticatedPartner
+          ? calculateProgramDiscount(
+              input.subtotal,
+              automaticGlobalDiscountAmount,
+              selfOrderDiscountPercent || 0,
+            )
           : 0;
-        const authoritativePartnerDiscount = resolvedPublicPartnerCode
-          ? calculatePublicPartnerCustomerDiscount({
-              subtotal: input.subtotal,
-              priorProductDiscount: automaticGlobalDiscountAmount + authoritativePromoDiscount,
-              percentage: publicPartnerDiscountEligible ? resolvedPublicPartnerCode.customerDiscountPercent : 0,
-              isAuthenticatedWawiManualSale,
-            })
-          : authenticatedPartner
-            ? calculateProgramDiscount(
-                input.subtotal,
-                automaticGlobalDiscountAmount,
-                selfOrderDiscountPercent || 0,
-              )
-            : 0;
-        input.partnerDiscount = resolvedPublicPartnerCode || authenticatedPartner
-          ? authoritativePartnerDiscount
-          : 0;
-        if (!isAuthenticatedWawiManualSale) {
-          // Public codes use the same sequential stack as the visible checkout.
-          // Authenticated self-orders retain their existing independent policy.
-          input.discount = roundMoney(automaticGlobalDiscountAmount + authoritativePartnerDiscount + authoritativePromoDiscount);
-          input.total = roundMoney(input.subtotal - input.discount + input.shipping);
-        }
+      input.partnerDiscount = resolvedPublicPartnerCode || authenticatedPartner
+        ? authoritativePartnerDiscount
+        : 0;
+      if (!isAuthenticatedWawiManualSale && !hasKwkRequest) {
+        const authoritativeShopPricing = calculateAuthoritativeShopCheckoutPricing({
+          subtotal: input.subtotal,
+          shipping: input.shipping,
+          automaticGlobalDiscount: automaticGlobalDiscountAmount,
+          promotionDiscount: authoritativePromoDiscount,
+          partnerDiscount: authoritativePartnerDiscount,
+          partnerCreditUsed: authenticatedPartner ? roundMoney(input.creditUsed || 0) : 0,
+        });
+        input.creditUsed = authoritativeShopPricing.partnerCreditUsed;
+        input.discount = authoritativeShopPricing.totalDiscount;
+        input.total = authoritativeShopPricing.total;
       }
       const submittedAutomaticGlobalDiscount = roundMoney((input.discountBreakdown || [])
         .filter((entry) => entry.source === "automatic_global_percent")
@@ -649,12 +656,11 @@ export const orderRouter = router({
         input.total = authoritative.total;
       }
 
-      // Für alle Bestellkanäle: Den zentralen Dauerrabatt nach der vollständigen
-      // serverseitigen Preis- und Versandermittlung verbindlich einsetzen.
-      // Alle übrigen strukturierten und manuell gewährten Rabattanteile bleiben
-      // erhalten; ein eventuell mitgesendeter automatischer Betrag wird ersetzt.
-      // KWK besitzt bereits eine eigene vollständige Autoritätsberechnung.
-      if (!hasKwkRequest) {
+      // Diese Korrektur gehört ausschließlich in den authentifizierten WaWi-
+      // Verkaufsprozess. Shop-Checkouts wurden oben bereits vollständig aus
+      // serverautoritativen Rabattquellen aufgebaut und dürfen hier nicht noch
+      // einmal aus einer alten Browseraufschlüsselung überschrieben werden.
+      if (isAuthenticatedWawiManualSale && !hasKwkRequest) {
         const authoritativeWawiPricing = calculateAuthoritativeWawiManualOrder({
           subtotal: input.subtotal,
           shipping: input.shipping,
@@ -715,8 +721,8 @@ export const orderRouter = router({
           });
         }
       }
-      const authoritativePartnerDiscount = roundMoney(input.partnerDiscount || 0);
-      if ((resolvedPublicPartnerCode || authenticatedPartner) && authoritativePartnerDiscount > 0) {
+      const authoritativePartnerDiscountForBreakdown = roundMoney(input.partnerDiscount || 0);
+      if ((resolvedPublicPartnerCode || authenticatedPartner) && authoritativePartnerDiscountForBreakdown > 0) {
         const isCreatorSelfOrder = Boolean(authenticatedPartner && authenticatedSelfOrderProgram?.key === "creator");
         const partnerDiscountPercent = selfOrderDiscountPercent
           ?? resolvedPublicPartnerCode?.customerDiscountPercent
@@ -730,9 +736,18 @@ export const orderRouter = router({
             : (resolvedPublicPartnerCode?.program.key === "creator"
                 ? `Creator-Code ${resolvedPublicPartnerCode.partnerCode} (${partnerDiscountPercent}%)`
                 : `Partner-Code ${resolvedPublicPartnerCode?.partnerCode} (${partnerDiscountPercent}%)`),
-          amount: authoritativePartnerDiscount,
+          amount: authoritativePartnerDiscountForBreakdown,
           percentage: partnerDiscountPercent,
           ...(resolvedPublicPartnerCode ? { code: resolvedPublicPartnerCode.partnerCode } : {}),
+        });
+      }
+      const authoritativePartnerCredit = roundMoney(authenticatedPartner ? input.creditUsed || 0 : 0);
+      if (authenticatedPartner && authoritativePartnerCredit > 0) {
+        submittedDiscountBreakdown.push({
+          source: "partner_credit" as const,
+          label: "Partnerguthaben eingelöst",
+          amount: authoritativePartnerCredit,
+          percentage: undefined,
         });
       }
       const submittedDiscountBreakdownTotal = roundMoney(

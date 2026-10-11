@@ -50,3 +50,12 @@ test("keeps other valid discount provenance entries and always rebuilds global d
   assert.equal(shouldKeepClientDiscountBreakdownSource("kwk_credit", noAuthoritativeTerms), true);
   assert.equal(shouldKeepClientDiscountBreakdownSource("automatic_global_percent", noAuthoritativeTerms), false);
 });
+
+test("rebuilds an authenticated partner's own discount and credit from server values", () => {
+  const authenticatedSelfOrder = {
+    ...noAuthoritativeTerms,
+    hasAuthenticatedPartnerSelfOrder: true,
+  };
+  assert.equal(shouldKeepClientDiscountBreakdownSource("partner_self_discount", authenticatedSelfOrder), false);
+  assert.equal(shouldKeepClientDiscountBreakdownSource("partner_credit", authenticatedSelfOrder), false);
+});
