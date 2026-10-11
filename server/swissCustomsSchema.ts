@@ -18,6 +18,8 @@ export async function ensureSwissCustomsSchema(): Promise<void> {
       invoice_number VARCHAR(64) NOT NULL,
       compliance_confirmed_at TIMESTAMP,
       compliance_confirmed_by VARCHAR(100),
+      commercial_invoice_content TEXT,
+      commercial_invoice_generated_at TIMESTAMP,
       created_by VARCHAR(100) NOT NULL,
       created_at TIMESTAMP NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMP NOT NULL DEFAULT NOW()
@@ -27,6 +29,9 @@ export async function ensureSwissCustomsSchema(): Promise<void> {
       ADD COLUMN IF NOT EXISTS compliance_confirmed_at TIMESTAMP;
     ALTER TABLE order_swiss_customs_declarations
       ADD COLUMN IF NOT EXISTS compliance_confirmed_by VARCHAR(100);
+    ALTER TABLE order_swiss_customs_declarations
+      ADD COLUMN IF NOT EXISTS commercial_invoice_content TEXT,
+      ADD COLUMN IF NOT EXISTS commercial_invoice_generated_at TIMESTAMP;
 
     CREATE TABLE IF NOT EXISTS order_swiss_customs_items (
       id SERIAL PRIMARY KEY,
@@ -36,11 +41,15 @@ export async function ensureSwissCustomsSchema(): Promise<void> {
       hs_code VARCHAR(10) NOT NULL,
       country_of_origin VARCHAR(3) NOT NULL,
       unit_weight_grams INTEGER NOT NULL CHECK (unit_weight_grams > 0),
+      unit_customs_value_eur NUMERIC(12,2),
       created_at TIMESTAMP NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMP NOT NULL DEFAULT NOW()
     );
 
     CREATE INDEX IF NOT EXISTS order_swiss_customs_items_declaration_idx
       ON order_swiss_customs_items(declaration_id);
+
+    ALTER TABLE order_swiss_customs_items
+      ADD COLUMN IF NOT EXISTS unit_customs_value_eur NUMERIC(12,2);
   `);
 }

@@ -14,8 +14,8 @@ export type SwissCustomsLine = {
   /** Weight of a single sellable unit, in grams. */
   unitWeightGrams: number | null | undefined;
   quantity: number;
-  /** Unit price before the order-level discount allocation. */
-  unitPriceEur: number;
+  /** Manually verified customs value per sellable unit, net in EUR. */
+  unitCustomsValueEur: number | null | undefined;
 };
 
 export type SwissCustomsDeclaration = {
@@ -157,11 +157,10 @@ export function validateSwissCustomsDeclaration(
     if (!quantity) {
       return { ok: false, error: `Zollposition ${line.orderItemId}: Menge ist ungültig.` };
     }
-    const originalUnitValue = asPositiveMoney(line.unitPriceEur);
-    if (originalUnitValue === null) {
-      return { ok: false, error: `Zollposition ${line.orderItemId}: Einzelwert ist ungültig.` };
+    const unitCustomsValueEur = asPositiveMoney(line.unitCustomsValueEur);
+    if (unitCustomsValueEur === null || unitCustomsValueEur <= 0) {
+      return { ok: false, error: `Zollposition ${line.orderItemId}: manueller Warenwert je Einheit fehlt oder ist ungültig.` };
     }
-    const unitValueEur = Math.round(originalUnitValue * discountFactor * 100) / 100;
     lines.push({
       orderItemId: line.orderItemId,
       description,
@@ -169,8 +168,8 @@ export function validateSwissCustomsDeclaration(
       countryOfOrigin,
       unitWeightGrams,
       quantity,
-      unitValueEur,
-      lineValueEur: Math.round(unitValueEur * quantity * 100) / 100,
+      unitValueEur: unitCustomsValueEur,
+      lineValueEur: Math.round(unitCustomsValueEur * quantity * 100) / 100,
       lineWeightGrams: unitWeightGrams * quantity,
     });
   }
@@ -333,31 +332,14 @@ function addInvoicePage(
 }
 
 /**
- * Produces one 4×6 inch label page plus two individually signed commercial-invoice
- * copies. If the invoice contains more than three goods rows, each copy expands to
- * further 4×6 pages instead of reducing legally relevant text to an unreadable size.
+ * Generates the two required commercial-invoice copies as a standalone PDF.
+ * The document is persisted with the shipment evidence and deliberately never
+ * included in, opened with, or sent to the thermal-label print flow.
  */
-export async function buildSwissThermalPrintPdf(input: {
-  dhlLabelPdf: Uint8Array;
+export async function buildSwissCommercialInvoicePdf(input: {
   invoice: SwissCommercialInvoice;
 }): Promise<Uint8Array> {
   const output = await PDFDocument.create();
-  const source = await PDFDocument.load(input.dhlLabelPdf);
-  const [sourcePage] = await output.copyPages(source, [0]);
-  const sourceSize = sourcePage.getSize();
-  const labelPage = output.addPage([THERMAL_LABEL_WIDTH_PT, THERMAL_LABEL_HEIGHT_PT]);
-  const embedded = await output.embedPage(sourcePage);
-  const scale = Math.min(
-    (THERMAL_LABEL_WIDTH_PT - 4) / sourceSize.width,
-    (THERMAL_LABEL_HEIGHT_PT - 4) / sourceSize.height,
-  );
-  labelPage.drawPage(embedded, {
-    x: (THERMAL_LABEL_WIDTH_PT - sourceSize.width * scale) / 2,
-    y: (THERMAL_LABEL_HEIGHT_PT - sourceSize.height * scale) / 2,
-    width: sourceSize.width * scale,
-    height: sourceSize.height * scale,
-  });
-
   const chunks = invoicePageChunks(input.invoice.declaration.lines);
   for (let copyNumber = 1; copyNumber <= 2; copyNumber++) {
     chunks.forEach((chunk, index) => addInvoicePage(output, input.invoice, chunk, copyNumber, 2, index + 1, chunks.length));

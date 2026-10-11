@@ -7,7 +7,7 @@ Stand: 11. Oktober 2026
 - Die Rechnung muss je Packstück u. a. Absender, Empfänger, Exportgrund, Menge, Warenbeschreibung, Warenwert, Gewicht, HS-Code, Ursprungsland, Versandkosten, Versandbedingungen, Rechnungsnummer/-datum und eine Originalunterschrift enthalten. Sie muss Englisch oder in der Sprache des Bestimmungslandes sein.
 - Für die gewählte Frankatur DAP zahlt der Absender nur das Paketentgelt; Empfänger zahlt Zollabfertigung, Zölle und Steuern. In der DHL Parcel DE API lautet der Wert `shippingConditions: "DAP"`.
 - Die DHL-API-Beispiele für V54EPAK verlangen bei Zollsendungen `exportType`, `shippingConditions`, `postalCharges` sowie je Warenposition `itemDescription`, `packagedQuantity`, `hsCode`, `countryOfOrigin`, `itemValue` und `itemWeight`.
-- Der kombinierte Thermaldruck besteht daher aus: 1 DHL-Label plus 2 Handelsrechnungs-Kopien. Bei mehr als drei Warenpositionen wird jede Rechnung auf weitere 4×6-Zoll-Seiten fortgesetzt; Informationen dürfen nicht unlesbar verkleinert werden.
+- Der DHL-Labeldruck bleibt unverändert und enthält nur das DHL-Label. Die zwei Handelsrechnungs-Kopien werden als separates PDF revisionssicher bei der konkreten Bestellung abgelegt. Sie werden weder automatisch geöffnet noch gedruckt. Bei mehr als drei Warenpositionen wird jede Rechnung lesbar auf weitere 4×6-Zoll-Seiten fortgesetzt.
 
 ## Quellen
 

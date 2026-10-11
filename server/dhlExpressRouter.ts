@@ -34,7 +34,7 @@ import { getDb, getPool } from "./db.js";
 import { orderItems, orders } from "../drizzle/schema.js";
 import { eq, and, isNull } from "drizzle-orm";
 import { getUserFromRequest } from "./auth.js";
-import { buildSwissThermalPrintPdf, validateSwissCustomsDeclaration, type SwissCommercialInvoice, type SwissCustomsDeclaration, type ValidatedSwissCustomsDeclaration } from "./swissCustomsService.js";
+import { buildSwissCommercialInvoicePdf, validateSwissCustomsDeclaration, type SwissCommercialInvoice, type SwissCustomsDeclaration, type ValidatedSwissCustomsDeclaration } from "./swissCustomsService.js";
 
 export const dhlExpressRouter = Router();
 
@@ -100,6 +100,7 @@ type SwissCustomsDraftItem = {
   hsCode: string;
   countryOfOrigin: string;
   unitWeightGrams: number;
+  unitCustomsValueEur: number;
 };
 
 function isSwissDestination(country: string | null | undefined): boolean {
@@ -123,8 +124,8 @@ async function loadSwissCustomsForLabel(order: typeof orders.$inferSelect): Prom
       item.hs_code,
       item.country_of_origin,
       item.unit_weight_grams,
-      order_item.quantity,
-      order_item.price
+      item.unit_customs_value_eur,
+      order_item.quantity
     FROM order_swiss_customs_declarations declaration
     JOIN order_swiss_customs_items item ON item.declaration_id = declaration.id
     JOIN order_items order_item ON order_item.id = item.order_item_id
@@ -151,7 +152,7 @@ async function loadSwissCustomsForLabel(order: typeof orders.$inferSelect): Prom
       countryOfOrigin: row.country_of_origin,
       unitWeightGrams: Number(row.unit_weight_grams),
       quantity: Number(row.quantity),
-      unitPriceEur: Number(row.price),
+      unitCustomsValueEur: Number(row.unit_customs_value_eur),
     })),
   };
   const validated = validateSwissCustomsDeclaration(declaration);
@@ -212,7 +213,6 @@ dhlExpressRouter.get(
       dosage: orderItems.dosage,
       variant: orderItems.variant,
       quantity: orderItems.quantity,
-      price: orderItems.price,
     }).from(orderItems).where(eq(orderItems.orderId, orderId));
     const pool = await getPool();
     if (!pool) {
@@ -221,7 +221,7 @@ dhlExpressRouter.get(
     }
     const saved = await pool.query(`
       SELECT declaration.package_weight_grams, declaration.compliance_confirmed_at,
-             item.order_item_id, item.item_description, item.hs_code, item.country_of_origin, item.unit_weight_grams
+             item.order_item_id, item.item_description, item.hs_code, item.country_of_origin, item.unit_weight_grams, item.unit_customs_value_eur
       FROM order_swiss_customs_declarations declaration
       LEFT JOIN order_swiss_customs_items item ON item.declaration_id = declaration.id
       WHERE declaration.order_id = $1
@@ -241,14 +241,48 @@ dhlExpressRouter.get(
           dosage: item.dosage,
           variant: item.variant,
           quantity: item.quantity,
-          unitPriceEur: Number(item.price),
           description: prior?.item_description ?? "",
           hsCode: prior?.hs_code ?? "",
           countryOfOrigin: prior?.country_of_origin ?? "",
           unitWeightGrams: prior?.unit_weight_grams ? Number(prior.unit_weight_grams) : null,
+          unitCustomsValueEur: prior?.unit_customs_value_eur ? Number(prior.unit_customs_value_eur) : null,
         };
       }),
     });
+  },
+);
+
+// Handelsrechnungen werden nur gespeichert. Dieser geschützte Abruf erzeugt
+// keinen automatischen Druck oder Browser-Popup und ist ausschließlich für
+// einen späteren, bewussten WaWi-Download vorgesehen.
+dhlExpressRouter.get(
+  "/api/shipping/dhl/swiss-customs-invoice/:orderId",
+  requireWawiAdmin,
+  async (req: Request, res: Response) => {
+    const orderId = String(req.params.orderId ?? "").trim();
+    const pool = await getPool();
+    if (!pool) {
+      res.status(503).json({ success: false, error: "Datenbank für Schweizer Handelsrechnung nicht verfügbar" });
+      return;
+    }
+    const result = await pool.query(`
+      SELECT commercial_invoice_content
+      FROM order_swiss_customs_declarations
+      WHERE order_id = $1
+    `, [orderId]);
+    const content = result.rows[0]?.commercial_invoice_content;
+    if (!content) {
+      res.status(404).json({ success: false, error: "Keine gespeicherte Schweizer Handelsrechnung für diese Bestellung vorhanden" });
+      return;
+    }
+    const buffer = Buffer.from(String(content), "base64");
+    res.set({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `attachment; filename="swiss-commercial-invoice-${orderId}.pdf"`,
+      "Content-Length": String(buffer.length),
+      "Cache-Control": "private, no-cache",
+    });
+    res.send(buffer);
   },
 );
 
@@ -281,7 +315,7 @@ dhlExpressRouter.put(
       res.status(422).json({ success: false, error: "Bitte bestätige, dass keine Verbote, Beschränkungen oder Ausfuhrgenehmigungen vorliegen." });
       return;
     }
-    const existingItems = await db.select({ id: orderItems.id, quantity: orderItems.quantity, price: orderItems.price })
+    const existingItems = await db.select({ id: orderItems.id, quantity: orderItems.quantity })
       .from(orderItems).where(eq(orderItems.orderId, orderId));
     if (!Array.isArray(body.items) || body.items.length !== existingItems.length) {
       res.status(422).json({ success: false, error: "Alle Bestellpositionen müssen genau einmal mit Zolldaten erfasst werden." });
@@ -307,7 +341,7 @@ dhlExpressRouter.put(
           countryOfOrigin: customs.countryOfOrigin,
           unitWeightGrams: Number(customs.unitWeightGrams),
           quantity: Number(item.quantity),
-          unitPriceEur: Number(item.price),
+          unitCustomsValueEur: Number(customs.unitCustomsValueEur),
         };
       }),
     };
@@ -345,9 +379,9 @@ dhlExpressRouter.put(
       for (const line of validated.value.lines) {
         await client.query(`
           INSERT INTO order_swiss_customs_items (
-            declaration_id, order_item_id, item_description, hs_code, country_of_origin, unit_weight_grams, updated_at
-          ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
-        `, [declarationId, line.orderItemId, line.description, line.hsCode, line.countryOfOrigin, line.unitWeightGrams]);
+            declaration_id, order_item_id, item_description, hs_code, country_of_origin, unit_weight_grams, unit_customs_value_eur, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+        `, [declarationId, line.orderItemId, line.description, line.hsCode, line.countryOfOrigin, line.unitWeightGrams, line.unitValueEur]);
       }
       await client.query("COMMIT");
       res.json({ success: true, goodsValueEur: validated.value.goodsValueEur, packageWeightGrams: validated.value.packageWeightGrams });
@@ -737,24 +771,44 @@ dhlExpressRouter.post(
       // Interne Download-Route als shippingLabelUrl
       const labelRoute = `/api/shipping/dhl/label/${orderId.trim()}`;
 
-      // Schweizer Sendungen erhalten ein einziges 4×6-PDF: DHL-Label plus zwei
-      // lesbare Handelsrechnungs-Ausfertigungen. Andere DHL-Profile bleiben exakt
-      // beim bisherigen, unveränderten Speicherformat.
-      let labelContent = result.labelBase64 ?? null;
+      // Das DHL-Label bleibt bei jedem Profil ein eigenständiges Label-PDF.
+      // Schweizer Handelsrechnungen werden unabhängig und revisionssicher an der
+      // Zolldeklaration abgelegt; sie werden weder kombiniert noch automatisch
+      // im Browser geöffnet oder an den Thermodruck gesendet.
+      const labelContent = result.labelBase64 ?? null;
+      let commercialInvoiceContent: string | null = null;
       if (profileKey === "DHL_CH") {
         try {
           if (!labelContent || !swissCustoms) throw new Error("DHL-Label oder Zolldaten fehlen");
-          const combined = await buildSwissThermalPrintPdf({
-            dhlLabelPdf: Buffer.from(labelContent, "base64"),
+          const commercialInvoice = await buildSwissCommercialInvoicePdf({
             invoice: swissCustoms.invoice,
           });
-          labelContent = Buffer.from(combined).toString("base64");
+          commercialInvoiceContent = Buffer.from(commercialInvoice).toString("base64");
         } catch (error: any) {
-          // Das DHL-Label wurde extern bereits gebucht. Es darf aber niemals als
-          // unvollständige Schweiz-Sendung in der WaWi erscheinen; der Pending-Lock
-          // bleibt bewusst bestehen und die Ursache wird klar zurückgemeldet.
-          console.error(`[dhlRouter/CH] Druckdokument konnte nicht aufgebaut werden:`, error);
-          res.status(500).json({ success: false, error: "DHL-Label erstellt, aber das kombinierte Schweiz-Druckdokument konnte nicht erzeugt werden. Bitte Support kontaktieren; kein zweites Label auslösen." });
+          // Das DHL-Label wurde extern bereits gebucht. Ohne eine gespeicherte
+          // Handelsrechnung darf keine scheinbar vollständige Schweiz-Sendung
+          // erscheinen; der Pending-Lock verhindert ein zweites Label.
+          console.error(`[dhlRouter/CH] Handelsrechnung konnte nicht erzeugt werden:`, error);
+          res.status(500).json({ success: false, error: "DHL-Label erstellt, aber die Handelsrechnung konnte nicht revisionssicher abgelegt werden. Bitte Support kontaktieren; kein zweites Label auslösen." });
+          return;
+        }
+      }
+
+      if (profileKey === "DHL_CH" && commercialInvoiceContent) {
+        const pool = await getPool();
+        if (!pool) {
+          console.error(`[dhlRouter/CH] Handelsrechnung für ${orderId} konnte nicht gespeichert werden: Datenbank nicht verfügbar`);
+          res.status(500).json({ success: false, error: "DHL-Label erstellt, aber die Handelsrechnung konnte nicht gespeichert werden. Bitte Support kontaktieren; kein zweites Label auslösen." });
+          return;
+        }
+        const invoiceStored = await pool.query(`
+          UPDATE order_swiss_customs_declarations
+          SET commercial_invoice_content = $1, commercial_invoice_generated_at = NOW(), updated_at = NOW()
+          WHERE order_id = $2
+        `, [commercialInvoiceContent, orderId.trim()]);
+        if ((invoiceStored.rowCount ?? 0) !== 1) {
+          console.error(`[dhlRouter/CH] Handelsrechnung für ${orderId} konnte nicht zugeordnet werden`);
+          res.status(500).json({ success: false, error: "DHL-Label erstellt, aber die Handelsrechnung konnte nicht der Bestellung zugeordnet werden. Bitte Support kontaktieren; kein zweites Label auslösen." });
           return;
         }
       }
@@ -776,6 +830,7 @@ dhlExpressRouter.post(
         trackingNumber: result.trackingNumber,
         labelUrl:       labelRoute,
         hasContent:     !!labelContent,
+        customsInvoiceStored: profileKey === "DHL_CH" && !!commercialInvoiceContent,
         sandbox:        ENV.dhlSandbox,
       });
     } else {
