@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { PDFDocument } from "pdf-lib";
 import {
-  THERMAL_LABEL_HEIGHT_PT,
-  THERMAL_LABEL_WIDTH_PT,
+  CUSTOMS_DOCUMENT_HEIGHT_PT,
+  CUSTOMS_DOCUMENT_WIDTH_PT,
   buildSwissCommercialInvoicePdf,
-  buildSwissShipmentPrintPdf,
+  buildSwissCustomsDocumentsPdf,
   toDhlSwissCustomsPayload,
   validateSwissCustomsDeclaration,
   type ValidatedSwissCustomsDeclaration,
@@ -41,22 +41,21 @@ function invoice(declaration: ValidatedSwissCustomsDeclaration, invoiceNumber: s
   };
 }
 
-test("builds a DAP customs payload from manually entered commercial values", () => {
+test("builds a DHL Paket International customs payload from manually entered commercial values", () => {
   const result = validateSwissCustomsDeclaration(draft());
   assert.equal(result.ok, true);
   if (!result.ok) return;
   assert.equal(result.value.goodsValueEur, 108);
   assert.deepEqual(toDhlSwissCustomsPayload(result.value), {
     exportType: "COMMERCIAL_GOODS",
-    shippingConditions: "DAP",
     postalCharges: { currency: "EUR", value: 15 },
     items: [{
       itemDescription: "Research peptide vial",
-      packagedQuantity: "2",
+      packagedQuantity: 2,
       hsCode: "30049000",
       countryOfOrigin: "CHN",
       itemValue: { currency: "EUR", value: 54 },
-      itemWeight: { uom: "g", value: "100" },
+      itemWeight: { uom: "g", value: 100 },
     }],
   });
 });
@@ -91,35 +90,33 @@ test("stores two standalone invoice copies without a DHL label page", async () =
   const rendered = await PDFDocument.load(output);
   assert.equal(rendered.getPageCount(), 2);
   for (const page of rendered.getPages()) {
-    assert.equal(page.getWidth(), THERMAL_LABEL_WIDTH_PT);
-    assert.equal(page.getHeight(), THERMAL_LABEL_HEIGHT_PT);
+    assert.equal(page.getWidth(), CUSTOMS_DOCUMENT_WIDTH_PT);
+    assert.equal(page.getHeight(), CUSTOMS_DOCUMENT_HEIGHT_PT);
   }
 });
 
-test("creates the Swiss print package in label-then-two-invoice order", async () => {
+test("creates separate A4 Swiss customs documents in CN23-two-invoice order", async () => {
   const validation = validateSwissCustomsDeclaration(draft());
   assert.equal(validation.ok, true);
   if (!validation.ok) return;
 
-  const dhlLabel = await PDFDocument.create();
-  dhlLabel.addPage([300, 400]);
-  const output = await buildSwissShipmentPrintPdf({
-    labelPdfBase64: Buffer.from(await dhlLabel.save()).toString("base64"),
+  const cn23 = await PDFDocument.create();
+  cn23.addPage([CUSTOMS_DOCUMENT_WIDTH_PT, CUSTOMS_DOCUMENT_HEIGHT_PT]);
+  const output = await buildSwissCustomsDocumentsPdf({
+    customsDocPdfBase64: Buffer.from(await cn23.save()).toString("base64"),
     invoice: invoice(validation.value, "CH-369-TEST-PRINT"),
   });
   const rendered = await PDFDocument.load(output);
 
   assert.equal(rendered.getPageCount(), 3);
-  assert.equal(rendered.getPages()[0].getWidth(), 300);
-  assert.equal(rendered.getPages()[0].getHeight(), 400);
-  for (const page of rendered.getPages().slice(1)) {
-    assert.equal(page.getWidth(), THERMAL_LABEL_WIDTH_PT);
-    assert.equal(page.getHeight(), THERMAL_LABEL_HEIGHT_PT);
+  for (const page of rendered.getPages()) {
+    assert.equal(page.getWidth(), CUSTOMS_DOCUMENT_WIDTH_PT);
+    assert.equal(page.getHeight(), CUSTOMS_DOCUMENT_HEIGHT_PT);
   }
 });
 
 test("continues long standalone invoices on further readable pages", async () => {
-  const lines = Array.from({ length: 4 }, (_, index) => ({
+  const lines = Array.from({ length: 13 }, (_, index) => ({
     orderItemId: index + 1,
     description: `Research material vial ${index + 1}`,
     hsCode: "30049000",
@@ -128,14 +125,14 @@ test("continues long standalone invoices on further readable pages", async () =>
     quantity: 1,
     unitCustomsValueEur: 10,
   }));
-  const validation = validateSwissCustomsDeclaration(draft({ packageWeightGrams: 500, subtotalEur: 40, discountEur: 0, lines }));
+  const validation = validateSwissCustomsDeclaration(draft({ packageWeightGrams: 1000, subtotalEur: 130, discountEur: 0, lines }));
   assert.equal(validation.ok, true);
   if (!validation.ok) return;
   const output = await buildSwissCommercialInvoicePdf({ invoice: invoice(validation.value, "CH-369-TEST-LONG") });
   const rendered = await PDFDocument.load(output);
   assert.equal(rendered.getPageCount(), 4);
   for (const page of rendered.getPages()) {
-    assert.equal(page.getWidth(), THERMAL_LABEL_WIDTH_PT);
-    assert.equal(page.getHeight(), THERMAL_LABEL_HEIGHT_PT);
+    assert.equal(page.getWidth(), CUSTOMS_DOCUMENT_WIDTH_PT);
+    assert.equal(page.getHeight(), CUSTOMS_DOCUMENT_HEIGHT_PT);
   }
 });

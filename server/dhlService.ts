@@ -64,7 +64,7 @@ export interface DhlShipmentInput {
   productCode?:   string;
   /** 14-stellige Billing Number – überschreibt ENV.dhlBillingNumber. Aus dhlProfiles.ts. */
   billingNumber?: string;
-  /** Ausschließlich für DHL Paket Schweiz: bereits vollständig validierte Zollpositionen. */
+  /** Ausschließlich für Schweizer DHL Paket International: vollständig validierte Zollpositionen. */
   swissCustoms?: ValidatedSwissCustomsDeclaration;
 }
 
@@ -74,6 +74,8 @@ export interface DhlShipmentResult {
   labelUrl?:       string;
   /** Base64-kodiertes PDF-Label (falls URL nicht verfügbar) */
   labelBase64?:    string;
+  /** DHL-generierte CN23-Zollinhaltserklärung als Base64-PDF für V53WPAK. */
+  customsDocBase64?: string;
   error?:          string;
   /** HTTP-Statuscode der DHL-Antwort */
   statusCode?:     number;
@@ -107,6 +109,20 @@ function buildAuthHeaders(): Record<string, string> {
     "Authorization": `Basic ${basicToken}`,
     "Content-Type": "application/json",
   };
+}
+
+/** Resolves a DHL document irrespective of inline or URL-based delivery. */
+async function resolveDhlDocumentBase64(document: any, headers: Record<string, string>): Promise<string | undefined> {
+  const content = document?.b64 ?? document?.content;
+  if (content) return String(content);
+  if (!document?.url) return undefined;
+  try {
+    const response = await fetch(document.url, { headers });
+    if (!response.ok) return undefined;
+    return Buffer.from(await response.arrayBuffer()).toString("base64");
+  } catch {
+    return undefined;
+  }
 }
 
 /** Gibt den korrekten API-Basis-URL zurück (Sandbox vs. Production) */
@@ -576,7 +592,7 @@ export async function createDhlShipmentEU(
 
 
 /**
- * Erstellt eine DHL Paket Schweiz Sendung (V54EPAK).
+ * Erstellt eine Schweizer DHL Paket International Sendung (V53WPAK).
  *
  * Die Funktion akzeptiert nur zuvor validierte und auftragsbezogene Zollpositionen.
  * Sie verwendet verbindlich DAP: Versand trägt der Absender; Schweizer Abgaben und
@@ -590,7 +606,7 @@ export async function createDhlShipmentCH(
 
   const billingNumber = input.billingNumber;
   if (!billingNumber || billingNumber.length < 14) {
-    return { success: false, error: "DHL_BILLING_NUMBER_CH nicht konfiguriert oder ungültig (14 Zeichen erwartet)" };
+    return { success: false, error: "DHL Paket International-Abrechnungsnummer nicht konfiguriert oder ungültig (14 Zeichen erwartet)" };
   }
   if (!input.swissCustoms) {
     return { success: false, error: "Schweizer Zolldaten fehlen oder wurden nicht validiert." };
@@ -598,7 +614,7 @@ export async function createDhlShipmentCH(
 
   const countryAlpha3 = normalizeCountryToAlpha3(input.consignee.country);
   if (countryAlpha3 !== "CHE") {
-    return { success: false, error: "DHL Paket Schweiz darf nur für eine Schweizer Empfängeradresse verwendet werden." };
+    return { success: false, error: "DHL Paket International für die Schweiz darf nur für eine Schweizer Empfängeradresse verwendet werden." };
   }
 
   let headers: Record<string, string>;
@@ -617,7 +633,7 @@ export async function createDhlShipmentCH(
       labelFormat: "910-300-400",
     },
     shipments: [{
-      product: input.productCode ?? "V54EPAK",
+      product: input.productCode ?? "V53WPAK",
       billingNumber,
       refNo,
       shipper: {
@@ -650,7 +666,7 @@ export async function createDhlShipmentCH(
     }],
   };
 
-  const apiUrl = `${getApiBase()}/orders?validate=false&printOnlyIfCodable=false&docFormat=PDF&labelResponseType=INCLUDE`;
+  const apiUrl = `${getApiBase()}/orders?validate=false&mustEncode=false&docFormat=PDF&includeDocs=include`;
   let rawResponse: Response;
   let responseText: string;
   try {
@@ -679,34 +695,53 @@ export async function createDhlShipmentCH(
   const shipment = data?.items?.[0];
   const trackingNumber = shipment?.shipmentNo ?? shipment?.trackingId ?? shipment?.shipmentTrackingNumber;
   const labelUrl = shipment?.label?.url;
-  let labelBase64 = shipment?.label?.b64 ?? shipment?.label?.content;
+  let labelBase64 = await resolveDhlDocumentBase64(shipment?.label, headers);
+  let customsDocBase64 = await resolveDhlDocumentBase64(shipment?.customsDoc, headers);
   if (!trackingNumber) {
     return { success: false, error: "DHL API: Keine Trackingnummer in der Antwort", statusCode: rawResponse.status };
   }
 
-  // DHL kann je Vertragskonfiguration ein temporäres Label-URL statt Inline-Base64
-  // liefern. Der Schweiz-Druck muss das Label mit den zwei Zollexemplaren in einem
-  // gespeicherten Dokument bündeln; daher wird es einmal serverseitig abgerufen.
-  if (!labelBase64 && labelUrl) {
+  // DHL kann beim POST Dokumente als URL liefern oder die CN23 erst über den
+  // dokumentierten GET-Abruf bereitstellen. V53WPAK muss eine DHL-generierte
+  // CN23 liefern; ohne sie darf das Druckpaket nicht als vollständig erscheinen.
+  if (!labelBase64 || !customsDocBase64) {
     try {
-      const labelResponse = await fetch(labelUrl, { headers });
-      if (labelResponse.ok) {
-        labelBase64 = Buffer.from(await labelResponse.arrayBuffer()).toString("base64");
+      const documentsUrl = `${getApiBase()}/orders?shipment=${encodeURIComponent(String(trackingNumber))}&docFormat=PDF&includeDocs=include`;
+      const documentsResponse = await fetch(documentsUrl, { headers });
+      if (documentsResponse.ok) {
+        const documentsData = await documentsResponse.json();
+        const documents = documentsData?.items?.[0];
+        labelBase64 = labelBase64 ?? await resolveDhlDocumentBase64(documents?.label, headers);
+        customsDocBase64 = customsDocBase64 ?? await resolveDhlDocumentBase64(documents?.customsDoc, headers);
       }
     } catch (error) {
-      console.warn("[dhlService/CH] DHL-Label-URL konnte nicht geladen werden:", error);
+      console.warn("[dhlService/CH] DHL-Dokumente konnten nicht nachgeladen werden:", error);
     }
   }
   if (!labelBase64) {
     return { success: false, error: "DHL hat kein druckbares Label-PDF zurückgegeben.", statusCode: rawResponse.status };
   }
 
-  console.log(`[dhlService/CH] Label erstellt: ${trackingNumber} (DAP, Sandbox: ${ENV.dhlSandbox})`);
+  if (!customsDocBase64) {
+    // Eine Sendung ist bereits bei DHL angelegt. success bleibt deshalb true: Der
+    // Router behält seinen Pending-Lock und verhindert so eine zweite Buchung.
+    return {
+      success: true,
+      trackingNumber,
+      labelUrl: labelUrl ?? undefined,
+      labelBase64: labelBase64 ?? undefined,
+      error: "DHL hat keine CN23-Zollinhaltserklärung zurückgegeben. Bitte Support kontaktieren und kein zweites Label auslösen.",
+      statusCode: rawResponse.status,
+    };
+  }
+
+  console.log(`[dhlService/CH] Label und CN23 erstellt: ${trackingNumber} (DAP, Sandbox: ${ENV.dhlSandbox})`);
   return {
     success: true,
     trackingNumber,
     labelUrl: labelUrl ?? undefined,
     labelBase64: labelBase64 ?? undefined,
+    customsDocBase64,
     statusCode: rawResponse.status,
   };
 }

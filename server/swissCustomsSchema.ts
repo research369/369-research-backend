@@ -20,6 +20,8 @@ export async function ensureSwissCustomsSchema(): Promise<void> {
       compliance_confirmed_by VARCHAR(100),
       commercial_invoice_content TEXT,
       commercial_invoice_generated_at TIMESTAMP,
+      customs_print_content TEXT,
+      customs_print_generated_at TIMESTAMP,
       created_by VARCHAR(100) NOT NULL,
       created_at TIMESTAMP NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMP NOT NULL DEFAULT NOW()
@@ -32,6 +34,9 @@ export async function ensureSwissCustomsSchema(): Promise<void> {
     ALTER TABLE order_swiss_customs_declarations
       ADD COLUMN IF NOT EXISTS commercial_invoice_content TEXT,
       ADD COLUMN IF NOT EXISTS commercial_invoice_generated_at TIMESTAMP;
+    ALTER TABLE order_swiss_customs_declarations
+      ADD COLUMN IF NOT EXISTS customs_print_content TEXT,
+      ADD COLUMN IF NOT EXISTS customs_print_generated_at TIMESTAMP;
 
     CREATE TABLE IF NOT EXISTS order_swiss_customs_items (
       id SERIAL PRIMARY KEY,

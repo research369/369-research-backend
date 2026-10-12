@@ -1,16 +1,35 @@
-# DHL Paket Schweiz – geprüfte Integrationsvorgaben
+# DHL Paket International in die Schweiz – geprüfte Integrationsvorgaben
 
-Stand: 11. Oktober 2026
+Stand: 12. Oktober 2026
 
-- Für DHL Europaket in die Schweiz sind Zoll-EDI-Daten und eine Handelsrechnung erforderlich.
-- Bis 1.000 € Warenwert je Packstück: Handelsrechnung in **zweifacher Ausfertigung**. Über 1.000 € oder bei besonderen Beschränkungen ist zusätzlich ein Ausfuhrbegleitdokument (ABD) erforderlich; dieses wird nicht automatisch erzeugt.
-- Die Rechnung muss je Packstück u. a. Absender, Empfänger, Exportgrund, Menge, Warenbeschreibung, Warenwert, Gewicht, HS-Code, Ursprungsland, Versandkosten, Versandbedingungen, Rechnungsnummer/-datum und eine Originalunterschrift enthalten. Sie muss Englisch oder in der Sprache des Bestimmungslandes sein.
-- Für die gewählte Frankatur DAP zahlt der Absender nur das Paketentgelt; Empfänger zahlt Zollabfertigung, Zölle und Steuern. In der DHL Parcel DE API lautet der Wert `shippingConditions: "DAP"`.
-- Die DHL-API-Beispiele für V54EPAK verlangen bei Zollsendungen `exportType`, `shippingConditions`, `postalCharges` sowie je Warenposition `itemDescription`, `packagedQuantity`, `hsCode`, `countryOfOrigin`, `itemValue` und `itemWeight`.
-- Das Schweizer Druckpaket enthält in verbindlicher Reihenfolge das DHL-Label sowie die zwei Handelsrechnungs-Kopien. Ein expliziter Klick auf „Druckpaket erstellen & drucken“ öffnet den Druckdialog für alle Seiten; die Handelsrechnung wird zusätzlich als separates PDF revisionssicher bei der konkreten Bestellung abgelegt. Bei mehr als drei Warenpositionen wird jede Rechnung lesbar auf weitere 4×6-Zoll-Seiten fortgesetzt.
+## Vertrag und DHL-Produkt
+
+- Die hinterlegte Abrechnungsnummer ist im DHL-Geschäftskundenportal als **DHL Paket International** geführt. Sie wird deshalb ausschließlich mit dem API-Produkt `V53WPAK` verwendet.
+- `V54EPAK` ist **DHL Europaket** und darf nicht mit der Paket-International-Abrechnungsnummer kombiniert werden.
+- Für die Schweiz gilt die Frankatur **DAP**: 369 Research zahlt das Paketentgelt; Schweizer Einfuhrabgaben und die Zollabfertigung trägt der Empfänger. `shippingConditions` wird nicht im `V53WPAK`-Zollpayload übermittelt, weil DHL dieses Feld ausschließlich für V54 dokumentiert. DAP steht sichtbar auf der Handelsrechnung.
+
+## Verbindliche Papierunterlagen je Packstück
+
+DHL verlangt bei DHL Paket International für jedes einzelne Packstück:
+
+1. das **DHL-Label** im Thermalformat 100 × 150 mm,
+2. die von DHL erzeugte **Zollinhaltserklärung CN23** im A4-Format,
+3. die **Handelsrechnung in zweifacher Ausfertigung** im A4-Format.
+
+Die CN23 wird nicht nachgebildet: DHL generiert sie aus den übermittelten Zolldaten und liefert sie als separates `customsDoc` zurück. Die WaWi speichert zwei getrennte Druckdateien: das DHL-Label im 100×150-mm-Format sowie CN23 plus Rechnungskopie 1 und 2 als A4-PDF. Es gibt keinen automatischen Druck oder Versand.
+
+Die drei Zollunterlagen werden außen am Packstück in einer selbstklebenden, transparenten Zolldokumententasche angebracht. Bei Warenwert über 1.000 EUR oder bei besonderen Ausfuhrvorgaben ist zusätzlich ein Ausfuhrbegleitdokument (ABD) erforderlich; die WaWi blockiert die automatische Buchung bewusst und erzeugt kein ABD.
+
+## Pflichtdaten und technische Regel
+
+- Zolldaten sind vor der DHL-Buchung vollständig und explizit zu erfassen: englische Warenbeschreibung, Menge, 6- bis 10-stelliger HS-Code, Ursprungsland, Gewicht und Warenwert pro Position sowie tatsächliches Paketgewicht.
+- Die DHL-API erhält für V53WPAK `exportType`, `postalCharges` und die positionsbezogenen Warenwerte. Fehlende Angaben dürfen weder aus Produktnamen abgeleitet noch mit Platzhaltern ergänzt werden.
+- Die DHL API gibt die CN23 für `V53WPAK` als separates Dokument zurück. Falls nach der realen DHL-Buchung keine CN23 abrufbar ist, wird kein scheinbar vollständiges Druckpaket gespeichert; der bestehende Duplikatschutz bleibt aktiv, damit nicht versehentlich ein zweites Label erzeugt wird.
+- Das neue DHL-Feature „Paperless Customs“ ist laut API nur in Sandbox verfügbar, nicht in Produktion. Deshalb bleiben die physischen Unterlagen Teil dieses Produktionsablaufs.
 
 ## Quellen
 
-1. DHL Paket Deutschland, „DHL Europaket – Einfach durch den Zoll“, Mai 2026: https://www.dhl.de/dam/jcr:12efd54a-2b40-4ffe-8436-c5f32701738c/dhl-europapaket-einfach-durch-den-zoll.pdf
-2. DHL Parcel DE Shipping API v2, V54EPAK Customs DAP example, Postman collection: https://developer.dhl.com/sites/default/files/2025-06/pp-parcel-shipping-native_onboarding_collection_1.json
-3. DHL Parcel DE Shipping API v2 reference: https://developer.dhl.com/api-reference/parcel-de-shipping-post-parcel-germany-v2?language_content_entity=en
+1. DHL, [Merkblatt zur Ausfuhr von Waren – DHL Paket International](https://www.dhl.de/dam/jcr:440cb199-a284-4c1c-ae2c-caf64329baa2/dhl-paket-international-merkblatt-zoll-042024.pdf)
+2. DHL, [Zolldatenanforderungen](https://www.dhl.de/dam/jcr:afc09a9f-c2e7-4bd7-928c-abd8cf7bbec3/dhl-gk-zolldatenanforderung-072025-de.pdf)
+3. DHL, [Parcel DE Shipping API v2.2.0](https://developer.dhl.com/api-reference/parcel-de-shipping-post-parcel-germany-v2?language_content_entity=en)
+4. DHL, [OpenAPI-Spezifikation v2.2.0](https://developer.dhl.com/sites/default/files/2026-10/parcel-de-shipping-v2_2.yaml)

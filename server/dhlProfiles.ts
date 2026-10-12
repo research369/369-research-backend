@@ -89,15 +89,17 @@ export function getDhlProfiles(): Record<DhlProfileKey, DhlProfile> {
     },
 
     DHL_CH: {
-      label:           "DHL Paket Schweiz",
-      product:         "V54EPAK",
-      billingNumber:   ENV.dhlBillingNumberCh || null,
-      active:          !!ENV.dhlBillingNumberCh,
+      // Die vorhandene Vertragsleistung „DHL Paket International“ nutzt V53WPAK
+      // und deckt die Schweiz als Zolldestination ab.
+      label:           "DHL Paket International – Schweiz",
+      product:         "V53WPAK",
+      billingNumber:   ENV.dhlBillingNumberEu || ENV.dhlBillingNumberCh || null,
+      active:          !!(ENV.dhlBillingNumberEu || ENV.dhlBillingNumberCh),
       countries:       ["CH"],
       maxWeightG:      31500,
       customsRequired: true,
       labelFormat:     "910-300-400",
-      inactiveReason:  ENV.dhlBillingNumberCh ? undefined : "DHL_BILLING_NUMBER_CH nicht gesetzt",
+      inactiveReason:  (ENV.dhlBillingNumberEu || ENV.dhlBillingNumberCh) ? undefined : "DHL Paket International-Abrechnungsnummer nicht gesetzt",
     },
   };
 }

@@ -3,8 +3,8 @@ import { normalizeCountryToAlpha3 } from "./dhlService.js";
 
 export const SWISS_CUSTOMS_SHIPPING_CONDITION = "DAP" as const;
 export const SWISS_CUSTOMS_EXPORT_TYPE = "COMMERCIAL_GOODS" as const;
-export const THERMAL_LABEL_WIDTH_PT = 6 * 72;
-export const THERMAL_LABEL_HEIGHT_PT = 4 * 72;
+export const CUSTOMS_DOCUMENT_WIDTH_PT = 595.28; // A4 portrait
+export const CUSTOMS_DOCUMENT_HEIGHT_PT = 841.89;
 
 export type SwissCustomsLine = {
   orderItemId: number;
@@ -196,18 +196,21 @@ export function validateSwissCustomsDeclaration(
   };
 }
 
-/** DHL Parcel DE Customs payload for the explicitly chosen DAP terms. */
+/**
+ * DHL Paket International customs payload. DAP remains the agreed commercial term
+ * on the stored invoice; V53WPAK does not accept shippingConditions in its customs
+ * payload. Postal DDP would be an explicitly booked V53 service and is not sent.
+ */
 export function toDhlSwissCustomsPayload(declaration: ValidatedSwissCustomsDeclaration) {
   return {
     exportType: SWISS_CUSTOMS_EXPORT_TYPE,
-    shippingConditions: SWISS_CUSTOMS_SHIPPING_CONDITION,
     postalCharges: {
       currency: "EUR",
       value: declaration.shippingEur,
     },
     items: declaration.lines.map((line) => ({
       itemDescription: line.description,
-      packagedQuantity: String(line.quantity),
+      packagedQuantity: line.quantity,
       hsCode: line.hsCode,
       countryOfOrigin: line.countryOfOrigin,
       itemValue: {
@@ -216,7 +219,7 @@ export function toDhlSwissCustomsPayload(declaration: ValidatedSwissCustomsDecla
       },
       itemWeight: {
         uom: "g",
-        value: String(line.unitWeightGrams),
+        value: line.unitWeightGrams,
       },
     })),
   };
@@ -250,11 +253,11 @@ function drawText(page: PDFPage, text: string, x: number, y: number, size: numbe
 }
 
 function drawRule(page: PDFPage, y: number) {
-  page.drawLine({ start: { x: 14, y }, end: { x: THERMAL_LABEL_WIDTH_PT - 14, y }, thickness: 0.5, color: rgb(0.6, 0.64, 0.7) });
+  page.drawLine({ start: { x: 14, y }, end: { x: CUSTOMS_DOCUMENT_WIDTH_PT - 14, y }, thickness: 0.5, color: rgb(0.6, 0.64, 0.7) });
 }
 
 function invoicePageChunks(lines: ValidatedSwissCustomsLine[]): ValidatedSwissCustomsLine[][] {
-  const maxRows = 3;
+  const maxRows = 12;
   const chunks: ValidatedSwissCustomsLine[][] = [];
   for (let index = 0; index < lines.length; index += maxRows) chunks.push(lines.slice(index, index + maxRows));
   return chunks;
@@ -269,9 +272,9 @@ function addInvoicePage(
   continuation: number,
   continuationCount: number,
 ) {
-  const page = document.addPage([THERMAL_LABEL_WIDTH_PT, THERMAL_LABEL_HEIGHT_PT]);
+  const page = document.addPage([CUSTOMS_DOCUMENT_WIDTH_PT, CUSTOMS_DOCUMENT_HEIGHT_PT]);
   const { declaration } = invoice;
-  let y = 270;
+  let y = 805;
   drawText(page, "COMMERCIAL INVOICE", 14, y, 13, true);
   drawText(page, `CUSTOMS COPY ${copyNumber}/${copyCount}${continuationCount > 1 ? `  PAGE ${continuation}/${continuationCount}` : ""}`, 250, y + 2, 7, true);
   y -= 16;
@@ -331,7 +334,7 @@ function addInvoicePage(
   return page;
 }
 
-/** Generates the two required commercial-invoice copies as a standalone PDF. */
+/** Generates the two required A4 commercial-invoice copies as a standalone PDF. */
 export async function buildSwissCommercialInvoicePdf(input: {
   invoice: SwissCommercialInvoice;
 }): Promise<Uint8Array> {
@@ -344,22 +347,22 @@ export async function buildSwissCommercialInvoicePdf(input: {
 }
 
 /**
- * Creates the physical document sequence required for one Swiss shipment:
- * DHL label first, then both complete commercial-invoice copies. The invoice
- * continues onto additional thermal pages only when its position count needs it.
+ * Creates the A4 documents required for one Swiss shipment: the original DHL CN23
+ * followed by both commercial-invoice copies. The 100×150-mm shipping label stays
+ * separate, because shrinking these A4 documents to a thermal label is not valid.
  */
-export async function buildSwissShipmentPrintPdf(input: {
-  labelPdfBase64: string;
+export async function buildSwissCustomsDocumentsPdf(input: {
+  customsDocPdfBase64: string;
   invoice: SwissCommercialInvoice;
 }): Promise<Uint8Array> {
-  const labelBytes = Buffer.from(input.labelPdfBase64, "base64");
-  const labelDocument = await PDFDocument.load(labelBytes);
+  const customsDocBytes = Buffer.from(input.customsDocPdfBase64, "base64");
+  const customsDocument = await PDFDocument.load(customsDocBytes);
   const invoiceBytes = await buildSwissCommercialInvoicePdf({ invoice: input.invoice });
   const invoiceDocument = await PDFDocument.load(invoiceBytes);
   const output = await PDFDocument.create();
 
-  const labelPages = await output.copyPages(labelDocument, labelDocument.getPageIndices());
-  labelPages.forEach((page) => output.addPage(page));
+  const customsPages = await output.copyPages(customsDocument, customsDocument.getPageIndices());
+  customsPages.forEach((page) => output.addPage(page));
 
   const invoicePages = await output.copyPages(invoiceDocument, invoiceDocument.getPageIndices());
   invoicePages.forEach((page) => output.addPage(page));

@@ -34,7 +34,7 @@ import { getDb, getPool } from "./db.js";
 import { orderItems, orders } from "../drizzle/schema.js";
 import { eq, and, isNull } from "drizzle-orm";
 import { getUserFromRequest } from "./auth.js";
-import { buildSwissCommercialInvoicePdf, buildSwissShipmentPrintPdf, validateSwissCustomsDeclaration, type SwissCommercialInvoice, type SwissCustomsDeclaration, type ValidatedSwissCustomsDeclaration } from "./swissCustomsService.js";
+import { buildSwissCommercialInvoicePdf, buildSwissCustomsDocumentsPdf, validateSwissCustomsDeclaration, type SwissCommercialInvoice, type SwissCustomsDeclaration, type ValidatedSwissCustomsDeclaration } from "./swissCustomsService.js";
 
 export const dhlExpressRouter = Router();
 
@@ -283,7 +283,39 @@ dhlExpressRouter.get(
       "Cache-Control": "private, no-cache",
     });
     res.send(buffer);
-  },
+  }
+);
+
+/** Liefert die gespeicherte DHL-CN23 plus beide A4-Handelsrechnungen. */
+dhlExpressRouter.get(
+  "/api/shipping/dhl/swiss-customs-documents/:orderId",
+  requireWawiAdmin,
+  async (req: Request, res: Response) => {
+    const orderId = String(req.params.orderId ?? "").trim();
+    const pool = await getPool();
+    if (!pool) {
+      res.status(503).json({ success: false, error: "Datenbank für Schweizer Zolldokumente nicht verfügbar" });
+      return;
+    }
+    const result = await pool.query(`
+      SELECT customs_print_content
+      FROM order_swiss_customs_declarations
+      WHERE order_id = $1
+    `, [orderId]);
+    const content = result.rows[0]?.customs_print_content;
+    if (!content) {
+      res.status(404).json({ success: false, error: "Keine vollständigen Schweizer Zolldokumente für diese Bestellung gespeichert" });
+      return;
+    }
+    const buffer = Buffer.from(String(content), "base64");
+    res.set({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `inline; filename="swiss-customs-documents-${orderId}.pdf"`,
+      "Content-Length": String(buffer.length),
+      "Cache-Control": "private, no-cache",
+    });
+    res.send(buffer);
+  }
 );
 
 dhlExpressRouter.put(
@@ -759,7 +791,7 @@ dhlExpressRouter.post(
     };
     // DHL_DE_STANDARD → createDhlShipmentDE (unverändert)
     // DHL_EU          → createDhlShipmentEU (Phase 2, V53WPAK)
-    // DHL_CH          → V54EPAK mit DAP- und Zoll-EDI-Daten
+    // DHL_CH          → V53WPAK mit DAP und vollständigen Zoll-EDI-Daten
     const result = profileKey === "DHL_CH"
       ? await createDhlShipmentCH(shipmentInput)
       : profileKey === "DHL_EU"
@@ -771,27 +803,28 @@ dhlExpressRouter.post(
       // Interne Download-Route als shippingLabelUrl
       const labelRoute = `/api/shipping/dhl/label/${orderId.trim()}`;
 
-      // Das DHL-Label bleibt bei allen anderen Profilen ein eigenständiges PDF.
-      // Für die Schweiz ist das gespeicherte Druckpaket verbindlich sequenziert:
-      // DHL-Label, anschließend beide Zollrechnungs-Ausfertigungen.
+      // Das 100×150-mm DHL-Label bleibt für jeden Versand ein eigenständiges PDF.
+      // Schweiz: DHL-CN23 und beide A4-Handelsrechnungen werden separat abgelegt,
+      // weil sie nicht zulässig auf das Thermalformat verkleinert werden dürfen.
       const labelContent = result.labelBase64 ?? null;
+      const customsDocContent = result.customsDocBase64 ?? null;
       let commercialInvoiceContent: string | null = null;
-      let printPackageContent = labelContent;
+      let customsPrintContent: string | null = null;
       if (profileKey === "DHL_CH") {
         try {
-          if (!labelContent || !swissCustoms) throw new Error("DHL-Label oder Zolldaten fehlen");
+          if (!labelContent || !customsDocContent || !swissCustoms) throw new Error(result.error || "DHL-Label, CN23 oder Zolldaten fehlen");
           const commercialInvoice = await buildSwissCommercialInvoicePdf({
             invoice: swissCustoms.invoice,
           });
           commercialInvoiceContent = Buffer.from(commercialInvoice).toString("base64");
-          const printPackage = await buildSwissShipmentPrintPdf({
-            labelPdfBase64: labelContent,
+          const customsPrintPackage = await buildSwissCustomsDocumentsPdf({
+            customsDocPdfBase64: customsDocContent,
             invoice: swissCustoms.invoice,
           });
-          printPackageContent = Buffer.from(printPackage).toString("base64");
+          customsPrintContent = Buffer.from(customsPrintPackage).toString("base64");
         } catch (error: any) {
           // Das DHL-Label wurde extern bereits gebucht. Ohne eine gespeicherte
-          // Dreifachdruckmappe darf keine scheinbar vollständige Schweiz-Sendung
+          // vollständige Zollmappe darf keine scheinbar vollständige Schweiz-Sendung
           // erscheinen; der Pending-Lock verhindert ein zweites Label.
           console.error(`[dhlRouter/CH] Schweizer Druckpaket konnte nicht erzeugt werden:`, error);
           res.status(500).json({ success: false, error: "DHL-Label erstellt, aber das Schweizer Druckpaket konnte nicht vollständig erzeugt und abgelegt werden. Bitte Support kontaktieren; kein zweites Label auslösen." });
@@ -808,12 +841,16 @@ dhlExpressRouter.post(
         }
         const invoiceStored = await pool.query(`
           UPDATE order_swiss_customs_declarations
-          SET commercial_invoice_content = $1, commercial_invoice_generated_at = NOW(), updated_at = NOW()
-          WHERE order_id = $2
-        `, [commercialInvoiceContent, orderId.trim()]);
+          SET commercial_invoice_content = $1,
+              commercial_invoice_generated_at = NOW(),
+              customs_print_content = $2,
+              customs_print_generated_at = NOW(),
+              updated_at = NOW()
+          WHERE order_id = $3
+        `, [commercialInvoiceContent, customsPrintContent, orderId.trim()]);
         if ((invoiceStored.rowCount ?? 0) !== 1) {
           console.error(`[dhlRouter/CH] Handelsrechnung für ${orderId} konnte nicht zugeordnet werden`);
-          res.status(500).json({ success: false, error: "DHL-Label erstellt, aber die Handelsrechnung konnte nicht der Bestellung zugeordnet werden. Bitte Support kontaktieren; kein zweites Label auslösen." });
+          res.status(500).json({ success: false, error: "DHL-Label erstellt, aber die Zollunterlagen konnten nicht der Bestellung zugeordnet werden. Bitte Support kontaktieren; kein zweites Label auslösen." });
           return;
         }
       }
@@ -824,18 +861,18 @@ dhlExpressRouter.post(
           trackingNumber:   result.trackingNumber,
           trackingCarrier:  "DHL",
           shippingLabelUrl: labelRoute,
-          ...(printPackageContent ? { shippingLabelContent: printPackageContent } as any : {}),
+          ...(labelContent ? { shippingLabelContent: labelContent } as any : {}),
         })
         .where(eq(orders.orderId, orderId.trim()));
 
-      console.log(`[dhlRouter] Druckpaket gespeichert: ${result.trackingNumber} | Route: ${labelRoute} | Content: ${printPackageContent ? 'ja' : 'nein'}`);
+      console.log(`[dhlRouter] Schweizer Unterlagen gespeichert: ${result.trackingNumber} | Label 4×6, CN23 + Handelsrechnung A4 | Customs: ${customsPrintContent ? 'ja' : 'nein'}`);
 
       res.json({
         success:        true,
         trackingNumber: result.trackingNumber,
         labelUrl:       labelRoute,
         hasContent:     !!labelContent,
-        customsInvoiceStored: profileKey === "DHL_CH" && !!commercialInvoiceContent,
+        customsInvoiceStored: profileKey === "DHL_CH" && !!commercialInvoiceContent && !!customsDocContent,
         sandbox:        ENV.dhlSandbox,
       });
     } else {
