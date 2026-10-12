@@ -30,8 +30,9 @@ export type SwissCustomsDeclaration = {
 export type ValidatedSwissCustomsLine = {
   orderItemId: number;
   description: string;
-  hsCode: string;
-  countryOfOrigin: string;
+  /** DHL Parcel DE accepts both fields as optional commodity metadata. */
+  hsCode: string | null;
+  countryOfOrigin: string | null;
   unitWeightGrams: number;
   quantity: number;
   unitValueEur: number;
@@ -109,8 +110,9 @@ function resolveDiscountFactor(subtotalEur: number, discountEur: number): number
 }
 
 /**
- * Validates every datum that DHL and the physical customs invoice need. It never
- * derives an HS code, origin, item weight, or legal sales value from a name.
+ * Validates the data that DHL requires for a customs commodity: description,
+ * quantity, unit weight, and unit value. HS code and country of origin remain
+ * optional DHL metadata; when supplied, they are validated but never inferred.
  */
 export function validateSwissCustomsDeclaration(
   declaration: SwissCustomsDeclaration,
@@ -141,12 +143,14 @@ export function validateSwissCustomsDeclaration(
     if (!description) {
       return { ok: false, error: `Zollposition ${line.orderItemId}: englische Warenbezeichnung fehlt oder ist ungültig.` };
     }
-    const hsCode = normalizedHsCode(line.hsCode);
-    if (!hsCode) {
+    const hsCodeInput = String(line.hsCode ?? "").trim();
+    const hsCode = hsCodeInput ? normalizedHsCode(hsCodeInput) : null;
+    if (hsCodeInput && !hsCode) {
       return { ok: false, error: `Zollposition ${line.orderItemId}: HS-Code muss 6 bis 10 Ziffern enthalten.` };
     }
-    const countryOfOrigin = normalizeCountryToAlpha3(String(line.countryOfOrigin ?? ""));
-    if (!/^[A-Z]{3}$/.test(countryOfOrigin)) {
+    const originInput = String(line.countryOfOrigin ?? "").trim();
+    const countryOfOrigin = originInput ? normalizeCountryToAlpha3(originInput) : null;
+    if (originInput && (!countryOfOrigin || !/^[A-Z]{3}$/.test(countryOfOrigin))) {
       return { ok: false, error: `Zollposition ${line.orderItemId}: Ursprungsland muss als ISO-Ländercode angegeben werden.` };
     }
     const unitWeightGrams = asPositiveInteger(line.unitWeightGrams);
@@ -211,8 +215,8 @@ export function toDhlSwissCustomsPayload(declaration: ValidatedSwissCustomsDecla
     items: declaration.lines.map((line) => ({
       itemDescription: line.description,
       packagedQuantity: line.quantity,
-      hsCode: line.hsCode,
-      countryOfOrigin: line.countryOfOrigin,
+      ...(line.hsCode ? { hsCode: line.hsCode } : {}),
+      ...(line.countryOfOrigin ? { countryOfOrigin: line.countryOfOrigin } : {}),
       itemValue: {
         currency: "EUR",
         value: line.unitValueEur,
@@ -299,7 +303,7 @@ function addInvoicePage(
 
   drawText(page, "Description (English)", 14, y, 6.5, true);
   drawText(page, "Qty", 202, y, 6.5, true);
-  drawText(page, "HS / Origin", 230, y, 6.5, true);
+  drawText(page, "HS / Origin (optional)", 230, y, 6.5, true);
   drawText(page, "Weight", 318, y, 6.5, true);
   drawText(page, "Value", 372, y, 6.5, true);
   y -= 7;
@@ -314,7 +318,7 @@ function addInvoicePage(
     }
     const rowTop = y + descriptionLines.length * 7;
     drawText(page, String(line.quantity), 202, rowTop, 6);
-    drawText(page, `${line.hsCode} / ${line.countryOfOrigin}`, 230, rowTop, 6);
+    drawText(page, [line.hsCode, line.countryOfOrigin].filter(Boolean).join(" / ") || "-", 230, rowTop, 6);
     drawText(page, formatWeight(line.lineWeightGrams), 318, rowTop, 6);
     drawText(page, formatEur(line.lineValueEur), 372, rowTop, 6);
     y -= 3;

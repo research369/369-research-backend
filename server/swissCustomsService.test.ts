@@ -60,7 +60,33 @@ test("builds a DHL Paket International customs payload from manually entered com
   });
 });
 
-test("rejects incomplete manual customs data instead of inferring it", () => {
+test("accepts the DHL minimum commodity data without HS code or country of origin", () => {
+  const result = validateSwissCustomsDeclaration(draft({
+    lines: [{
+      orderItemId: 91,
+      description: "Collagen and amino acids",
+      hsCode: "",
+      countryOfOrigin: "",
+      unitWeightGrams: 100,
+      quantity: 2,
+      unitCustomsValueEur: 54,
+    }],
+  }));
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.deepEqual(toDhlSwissCustomsPayload(result.value), {
+    exportType: "COMMERCIAL_GOODS",
+    postalCharges: { currency: "EUR", value: 15 },
+    items: [{
+      itemDescription: "Collagen and amino acids",
+      packagedQuantity: 2,
+      itemValue: { currency: "EUR", value: 54 },
+      itemWeight: { uom: "g", value: 100 },
+    }],
+  });
+});
+
+test("rejects missing required DHL commodity data instead of inferring it", () => {
   const result = validateSwissCustomsDeclaration(draft({
     lines: [{
       orderItemId: 91,

@@ -43,8 +43,8 @@ export async function ensureSwissCustomsSchema(): Promise<void> {
       declaration_id INTEGER NOT NULL REFERENCES order_swiss_customs_declarations(id) ON DELETE CASCADE,
       order_item_id INTEGER NOT NULL UNIQUE REFERENCES order_items(id) ON DELETE RESTRICT,
       item_description VARCHAR(200) NOT NULL,
-      hs_code VARCHAR(10) NOT NULL,
-      country_of_origin VARCHAR(3) NOT NULL,
+      hs_code VARCHAR(10),
+      country_of_origin VARCHAR(3),
       unit_weight_grams INTEGER NOT NULL CHECK (unit_weight_grams > 0),
       unit_customs_value_eur NUMERIC(12,2),
       created_at TIMESTAMP NOT NULL DEFAULT NOW(),
@@ -56,5 +56,9 @@ export async function ensureSwissCustomsSchema(): Promise<void> {
 
     ALTER TABLE order_swiss_customs_items
       ADD COLUMN IF NOT EXISTS unit_customs_value_eur NUMERIC(12,2);
+
+    ALTER TABLE order_swiss_customs_items
+      ALTER COLUMN hs_code DROP NOT NULL,
+      ALTER COLUMN country_of_origin DROP NOT NULL;
   `);
 }

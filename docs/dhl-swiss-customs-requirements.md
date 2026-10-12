@@ -22,8 +22,9 @@ Die drei Zollunterlagen werden außen am Packstück in einer selbstklebenden, tr
 
 ## Pflichtdaten und technische Regel
 
-- Zolldaten sind vor der DHL-Buchung vollständig und explizit zu erfassen: englische Warenbeschreibung, Menge, 6- bis 10-stelliger HS-Code, Ursprungsland, Gewicht und Warenwert pro Position sowie tatsächliches Paketgewicht.
-- Die DHL-API erhält für V53WPAK `exportType`, `postalCharges` und die positionsbezogenen Warenwerte. Fehlende Angaben dürfen weder aus Produktnamen abgeleitet noch mit Platzhaltern ergänzt werden.
+- Zolldaten sind vor der DHL-Buchung explizit zu erfassen: englische Warenbeschreibung, Menge, Gewicht und Warenwert pro Position sowie tatsächliches Paketgewicht.
+- HS-Code und Ursprungsland sind für eine DHL-API-Warenposition ausdrücklich optional. Die WaWi zeigt und verlangt sie deshalb nicht; falls sie später gezielt ergänzt werden, werden sie nur validiert und niemals aus Produktnamen abgeleitet oder durch Platzhalter ersetzt.
+- Die DHL-API erhält für V53WPAK `exportType`, `postalCharges` und die positionsbezogenen Warenwerte.
 - Die DHL API gibt die CN23 für `V53WPAK` als separates Dokument zurück. Falls nach der realen DHL-Buchung keine CN23 abrufbar ist, wird kein scheinbar vollständiges Druckpaket gespeichert; der bestehende Duplikatschutz bleibt aktiv, damit nicht versehentlich ein zweites Label erzeugt wird.
 - Das neue DHL-Feature „Paperless Customs“ ist laut API nur in Sandbox verfügbar, nicht in Produktion. Deshalb bleiben die physischen Unterlagen Teil dieses Produktionsablaufs.
 
