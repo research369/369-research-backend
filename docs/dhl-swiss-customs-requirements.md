@@ -12,11 +12,13 @@ Stand: 12. Oktober 2026
 
 DHL verlangt bei DHL Paket International für jedes einzelne Packstück:
 
-1. das **DHL-Label** im Thermalformat 100 × 150 mm,
+1. das **DHL-Label** im Thermalformat 100 × 150 mm (**Hochformat**),
 2. die von DHL erzeugte **Zollinhaltserklärung CN23**,
 3. die **Handelsrechnung in zweifacher Ausfertigung** im A4-Format.
 
-Die CN23 wird nicht nachgebildet: DHL generiert sie aus den übermittelten Zolldaten und liefert sie als separates `customsDoc` zurück. Die WaWi erzeugt daraus für den vorhandenen Thermodrucker einen dreiseitigen 100×150-mm-Drucksatz: **Paketmarke, linke CN23-Hälfte, rechte CN23-Hälfte**. Der Zuschnitt erfolgt ausschließlich an der vertikalen Mitte der originalen DHL-CN23; es werden keine Inhalte, Barcodes oder Felder neu geschrieben.
+Die CN23 wird nicht nachgebildet: DHL generiert sie aus den übermittelten Zolldaten und liefert sie als separates `customsDoc` zurück. Die WaWi erzeugt daraus für den vorhandenen Thermodrucker einen dreiseitigen 100×150-mm-**Hochformat**-Drucksatz: **Paketmarke, linke CN23-Hälfte, rechte CN23-Hälfte**. Der Zuschnitt erfolgt ausschließlich an der vertikalen Mitte der originalen DHL-CN23; es werden keine Inhalte, Barcodes oder Felder neu geschrieben. Eine horizontale Teilung würde die 210-mm-breite Formularhälfte auf ein nur rund 35-mm-hohes Etikett verkleinern und ist deshalb nicht zulässig.
+
+Für Tests mit einer DHL-Onlinefrankierung auf einem A4-Trägerblatt erkennt der Druckdienst die obere Paketmarkenhälfte automatisch und dreht sie einmal in das gleiche 100×150-mm-Hochformat. Echte DHL-API-Labels im Format `910-300-400` werden ohne Zuschnitt übernommen.
 
 Zusätzlich speichert die WaWi die zwei Handelsrechnungen revisionssicher als separates A4-PDF. Sie werden nicht automatisch geöffnet und nicht in das Thermoformat gedrückt. Für die physische Zollabwicklung sind sie bei Bedarf packstückindividuell in der transparenten Zolldokumententasche außen am Paket zu befestigen.
 

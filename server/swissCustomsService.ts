@@ -5,8 +5,13 @@ export const SWISS_CUSTOMS_SHIPPING_CONDITION = "DAP" as const;
 export const SWISS_CUSTOMS_EXPORT_TYPE = "COMMERCIAL_GOODS" as const;
 export const CUSTOMS_DOCUMENT_WIDTH_PT = 595.28; // A4 portrait
 export const CUSTOMS_DOCUMENT_HEIGHT_PT = 841.89;
-// DHL returns the CN23 on the upper A5-landscape half of an A4 page. A physical
-// 4×6 label can hold either half when it is rotated to the label orientation.
+// DHL's thermal format 910-300-400 is 103 × 150 mm: it is a portrait label.
+// The Vretti 4×6 media is therefore represented as 100 × 150 mm portrait.
+export const THERMAL_LABEL_WIDTH_PT = 288;
+export const THERMAL_LABEL_HEIGHT_PT = 432;
+// DHL returns the CN23 on the upper A5-landscape half of an A4 page. The form
+// must be divided vertically into its left and right halves for two portrait
+// 100 × 150 mm labels, preserving the readable original-form proportions.
 const DHL_CN23_HEIGHT_PT = CUSTOMS_DOCUMENT_WIDTH_PT / Math.SQRT2;
 
 export type SwissCustomsLine = {
@@ -378,7 +383,7 @@ export async function buildSwissCustomsDocumentsPdf(input: {
 }
 
 /**
- * Builds the three 4×6 thermal labels used for a DHL Paket International
+ * Builds the three portrait 100×150-mm thermal labels used for a DHL Paket International
  * shipment to Switzerland:
  *
  * 1. DHL's original shipping label (never redrawn or altered)
@@ -386,10 +391,9 @@ export async function buildSwissCustomsDocumentsPdf(input: {
  * 3. the right half of DHL's generated CN23
  *
  * DHL emits the CN23 as A4 with its usable form in the upper A5 landscape area.
- * Splitting that original form into its two halves is the thermal-printer
- * equivalent of the three-label sequence used at the DHL counter. The copied
- * label page determines the final page size, so a future DHL print-format change
- * cannot silently turn this into an incorrectly sized label.
+ * Splitting the original form at its vertical centre produces two 105×148-mm
+ * halves. Each is proportionally fitted to one 100×150-mm portrait label. No
+ * content, barcode or form field is redrawn or cropped.
  */
 export async function buildSwissThermalLabelPackagePdf(input: {
   shippingLabelPdfBase64: string;
@@ -405,11 +409,61 @@ export async function buildSwissThermalLabelPackagePdf(input: {
   }
 
   const output = await PDFDocument.create();
-  const [labelPage] = await output.copyPages(shippingLabelDocument, [0]);
-  output.addPage(labelPage);
+  const targetWidth = THERMAL_LABEL_WIDTH_PT;
+  const targetHeight = THERMAL_LABEL_HEIGHT_PT;
+  const sourceLabelPage = shippingLabelDocument.getPage(0);
+  const sourceLabelWidth = sourceLabelPage.getWidth();
+  const sourceLabelHeight = sourceLabelPage.getHeight();
+  const labelPage = output.addPage([targetWidth, targetHeight]);
 
-  const targetWidth = labelPage.getWidth();
-  const targetHeight = labelPage.getHeight();
+  // DHL API labels in format 910-300-400 are already portrait. DHL's online
+  // franking reference, however, is an A4 carrier sheet whose upper half is a
+  // landscape label. Supporting that document shape makes the print routine
+  // testable against an actual DHL document without changing live API output.
+  const isA4CarrierSheet = sourceLabelWidth >= 500 && sourceLabelHeight >= 800;
+  if (isA4CarrierSheet) {
+    const sourceFormHeight = Math.min(sourceLabelHeight / 2, sourceLabelWidth / Math.SQRT2);
+    const embeddedCarrierLabel = await output.embedPage(sourceLabelPage, {
+      left: 0,
+      right: sourceLabelWidth,
+      bottom: sourceLabelHeight - sourceFormHeight,
+      top: sourceLabelHeight,
+    });
+    const scale = Math.min(targetWidth / sourceFormHeight, targetHeight / sourceLabelWidth);
+    const printedWidth = sourceFormHeight * scale;
+    const printedHeight = sourceLabelWidth * scale;
+    labelPage.drawPage(embeddedCarrierLabel, {
+      x: (targetWidth - printedWidth) / 2,
+      y: (targetHeight + printedHeight) / 2,
+      width: sourceLabelWidth * scale,
+      height: sourceFormHeight * scale,
+      rotate: degrees(270),
+    });
+  } else if (sourceLabelHeight >= sourceLabelWidth) {
+    const embeddedLabel = await output.embedPage(sourceLabelPage);
+    const scale = Math.min(targetWidth / sourceLabelWidth, targetHeight / sourceLabelHeight);
+    const printedWidth = sourceLabelWidth * scale;
+    const printedHeight = sourceLabelHeight * scale;
+    labelPage.drawPage(embeddedLabel, {
+      x: (targetWidth - printedWidth) / 2,
+      y: (targetHeight - printedHeight) / 2,
+      width: printedWidth,
+      height: printedHeight,
+    });
+  } else {
+    const embeddedLabel = await output.embedPage(sourceLabelPage);
+    const scale = Math.min(targetWidth / sourceLabelHeight, targetHeight / sourceLabelWidth);
+    const printedWidth = sourceLabelHeight * scale;
+    const printedHeight = sourceLabelWidth * scale;
+    labelPage.drawPage(embeddedLabel, {
+      x: (targetWidth - printedWidth) / 2,
+      y: (targetHeight + printedHeight) / 2,
+      width: sourceLabelWidth * scale,
+      height: sourceLabelHeight * scale,
+      rotate: degrees(270),
+    });
+  }
+
   const cn23Page = customsDocument.getPage(0);
   const sourceWidth = cn23Page.getWidth();
   const sourceHeight = cn23Page.getHeight();
@@ -429,24 +483,7 @@ export async function buildSwissThermalLabelPackagePdf(input: {
     });
     const page = output.addPage([targetWidth, targetHeight]);
 
-    // Retain the original reading orientation where the DHL label is portrait.
-    // On the 6×4 landscape label returned by DHL, rotate the narrow CN23 half
-    // exactly once so it fills the available print area without cropping.
     const directScale = Math.min(targetWidth / sourceWidthHalf, targetHeight / sourceHeightHalf);
-    const rotatedScale = Math.min(targetWidth / sourceHeightHalf, targetHeight / sourceWidthHalf);
-    if (rotatedScale > directScale) {
-      const printedWidth = sourceHeightHalf * rotatedScale;
-      const printedHeight = sourceWidthHalf * rotatedScale;
-      page.drawPage(embedded, {
-        x: (targetWidth + printedWidth) / 2,
-        y: (targetHeight - printedHeight) / 2,
-        width: sourceWidthHalf * rotatedScale,
-        height: sourceHeightHalf * rotatedScale,
-        rotate: degrees(90),
-      });
-      return;
-    }
-
     const printedWidth = sourceWidthHalf * directScale;
     const printedHeight = sourceHeightHalf * directScale;
     page.drawPage(embedded, {

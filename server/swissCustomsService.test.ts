@@ -4,6 +4,8 @@ import { PDFDocument } from "pdf-lib";
 import {
   CUSTOMS_DOCUMENT_HEIGHT_PT,
   CUSTOMS_DOCUMENT_WIDTH_PT,
+  THERMAL_LABEL_HEIGHT_PT,
+  THERMAL_LABEL_WIDTH_PT,
   buildSwissCommercialInvoicePdf,
   buildSwissCustomsDocumentsPdf,
   buildSwissThermalLabelPackagePdf,
@@ -142,7 +144,7 @@ test("creates separate A4 Swiss customs documents in CN23-two-invoice order", as
   }
 });
 
-test("builds the DHL counter-style three-label thermal package without cropping the CN23", async () => {
+test("builds the DHL counter-style three-label portrait thermal package without cropping the CN23", async () => {
   const label = await PDFDocument.create();
   const labelPage = label.addPage([432, 288]); // 6 × 4 inches
   labelPage.drawText("DHL SHIPPING LABEL", { x: 120, y: 140, size: 18 });
@@ -162,8 +164,30 @@ test("builds the DHL counter-style three-label thermal package without cropping 
 
   assert.equal(rendered.getPageCount(), 3);
   for (const page of rendered.getPages()) {
-    assert.equal(page.getWidth(), 432);
-    assert.equal(page.getHeight(), 288);
+    assert.equal(page.getWidth(), THERMAL_LABEL_WIDTH_PT);
+    assert.equal(page.getHeight(), THERMAL_LABEL_HEIGHT_PT);
+  }
+});
+
+test("converts a DHL Onlinefrankierung A4 carrier sheet into the same portrait thermal format", async () => {
+  const label = await PDFDocument.create();
+  const labelPage = label.addPage([CUSTOMS_DOCUMENT_WIDTH_PT, CUSTOMS_DOCUMENT_HEIGHT_PT]);
+  // The actual Onlinefrankierung carries its label in the upper A5-landscape half.
+  labelPage.drawText("DHL CARRIER LABEL", { x: 20, y: 790, size: 16 });
+
+  const cn23 = await PDFDocument.create();
+  const cn23Page = cn23.addPage([CUSTOMS_DOCUMENT_WIDTH_PT, CUSTOMS_DOCUMENT_HEIGHT_PT]);
+  cn23Page.drawText("DHL CN23", { x: 20, y: 790, size: 16 });
+  const output = await buildSwissThermalLabelPackagePdf({
+    shippingLabelPdfBase64: Buffer.from(await label.save()).toString("base64"),
+    customsDocPdfBase64: Buffer.from(await cn23.save()).toString("base64"),
+  });
+  const rendered = await PDFDocument.load(output);
+
+  assert.equal(rendered.getPageCount(), 3);
+  for (const page of rendered.getPages()) {
+    assert.equal(page.getWidth(), THERMAL_LABEL_WIDTH_PT);
+    assert.equal(page.getHeight(), THERMAL_LABEL_HEIGHT_PT);
   }
 });
 
