@@ -55,3 +55,31 @@ test('isolated SQL: exact identity, confirmation, atomic history, replay, drift 
         await pool.end();
     }
 });
+
+test('isolated concurrent distinct stock corrections preserve one winner and one conflict', { skip: !enabled }, async () => {
+    process.env.OPS_STOCK_ENABLED = 'true';
+    const pool = new pg.Pool({ connectionString: isolatedOperationsDatabase() });
+    const actor = { id: randomUUID(), username: 'concurrent-test', role: 'admin' as const };
+    const sku = 'TEST-RACE-' + randomUUID().slice(0, 8);
+    try {
+        const id = (await pool.query("INSERT INTO articles(sku,name,stock,shop_product_id,shop_visible) VALUES($1,'Synthetic concurrency test',8,$1,1) RETURNING id", [sku])).rows[0].id;
+        const input = { articleId: id, sku, shopProductId: sku, variantKey: '', reason: 'Isolated concurrency verification' };
+        const previews = await Promise.all([previewStock(pool, actor, { ...input, targetStock: 17 }), previewStock(pool, actor, { ...input, targetStock: 18 })]);
+        await Promise.all(previews.map(p => confirmStock(pool, actor, { previewId: p.previewId, confirmationSku: sku })));
+        const outcomes = await Promise.allSettled(previews.map(p => executeStock(pool, actor, { previewId: p.previewId })));
+        const winners = outcomes.filter(o => o.status === 'fulfilled' && o.value.status === 'completed');
+        assert.equal(winners.length, 1, 'only one distinct correction may commit');
+        const loser = outcomes.find(o => !(o.status === 'fulfilled' && o.value.status === 'completed'))!;
+        if (loser.status === 'fulfilled') assert(['preview_stale', 'conflict'].includes(loser.value.status));
+        else assert.equal(loser.reason.code, '23505', 'the competing target fence is rejected; API maps this to operation_conflict');
+        const winnerIndex = outcomes.findIndex(o => o.status === 'fulfilled' && o.value.status === 'completed');
+        const expectedStock = winnerIndex === 0 ? 17 : 18;
+        assert.equal((await pool.query('SELECT stock FROM articles WHERE id=$1', [id])).rows[0].stock, expectedStock);
+        const movements = (await pool.query('SELECT quantity_before,quantity_after FROM stock_history WHERE article_id=$1', [id])).rows;
+        assert.equal(movements.length, 1);
+        assert.equal(movements[0].quantity_before, 8);
+        assert.equal(movements[0].quantity_after, expectedStock);
+        assert.equal((await stockStatus(pool, actor, { idempotencyKey: previews[winnerIndex].idempotencyKey })).status, 'completed');
+        assert.equal(Number((await pool.query('SELECT count(*) FROM ops_console_fences WHERE target_id=$1', [id])).rows[0].count), 0);
+    } finally { await pool.end(); }
+});
