@@ -6,6 +6,7 @@ import {
   CUSTOMS_DOCUMENT_WIDTH_PT,
   THERMAL_LABEL_HEIGHT_PT,
   THERMAL_LABEL_WIDTH_PT,
+  VRETTI_CARRIER_LABEL_SCALE,
   buildSwissCommercialInvoicePdf,
   buildSwissCustomsDocumentsPdf,
   buildSwissThermalLabelPackagePdf,
@@ -172,6 +173,7 @@ test("builds the DHL counter-style package with one portrait label and two full-
 });
 
 test("converts a DHL Onlinefrankierung A4 carrier sheet into the mixed thermal format", async () => {
+  assert.equal(VRETTI_CARRIER_LABEL_SCALE, 1.1);
   const label = await PDFDocument.create();
   const labelPage = label.addPage([CUSTOMS_DOCUMENT_WIDTH_PT, CUSTOMS_DOCUMENT_HEIGHT_PT]);
   // The actual Onlinefrankierung carries its label in the upper A5-landscape half.

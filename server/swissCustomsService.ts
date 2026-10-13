@@ -9,6 +9,12 @@ export const CUSTOMS_DOCUMENT_HEIGHT_PT = 841.89;
 // The Vretti 4×6 media is therefore represented as 100 × 150 mm portrait.
 export const THERMAL_LABEL_WIDTH_PT = 288;
 export const THERMAL_LABEL_HEIGHT_PT = 432;
+// Vretti 4×6 printers reserve a small physical edge margin. DHL's A4 carrier
+// sheet includes additional white carrier margins, so 100% makes only that
+// label appear undersized next to the CN23 labels. Only this carrier-sheet
+// conversion is deliberately enlarged; native DHL thermal labels and CN23
+// sections stay at their original 100% scale.
+export const VRETTI_CARRIER_LABEL_SCALE = 1.1;
 // DHL returns the CN23 on the upper A5-landscape half of an A4 page. The form
 // is divided across its horizontal form boundary into an upper and lower part
 // for two 150 × 100 mm landscape thermal labels, preserving the original-form
@@ -430,7 +436,7 @@ export async function buildSwissThermalLabelPackagePdf(input: {
       bottom: sourceLabelHeight - sourceFormHeight,
       top: sourceLabelHeight,
     });
-    const scale = Math.min(targetWidth / sourceFormHeight, targetHeight / sourceLabelWidth);
+    const scale = Math.min(targetWidth / sourceFormHeight, targetHeight / sourceLabelWidth) * VRETTI_CARRIER_LABEL_SCALE;
     const printedWidth = sourceFormHeight * scale;
     const printedHeight = sourceLabelWidth * scale;
     labelPage.drawPage(embeddedCarrierLabel, {
