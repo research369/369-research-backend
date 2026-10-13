@@ -6,6 +6,7 @@ import {
   CUSTOMS_DOCUMENT_WIDTH_PT,
   buildSwissCommercialInvoicePdf,
   buildSwissCustomsDocumentsPdf,
+  buildSwissThermalLabelPackagePdf,
   toDhlSwissCustomsPayload,
   validateSwissCustomsDeclaration,
   type ValidatedSwissCustomsDeclaration,
@@ -138,6 +139,31 @@ test("creates separate A4 Swiss customs documents in CN23-two-invoice order", as
   for (const page of rendered.getPages()) {
     assert.equal(page.getWidth(), CUSTOMS_DOCUMENT_WIDTH_PT);
     assert.equal(page.getHeight(), CUSTOMS_DOCUMENT_HEIGHT_PT);
+  }
+});
+
+test("builds the DHL counter-style three-label thermal package without cropping the CN23", async () => {
+  const label = await PDFDocument.create();
+  const labelPage = label.addPage([432, 288]); // 6 × 4 inches
+  labelPage.drawText("DHL SHIPPING LABEL", { x: 120, y: 140, size: 18 });
+
+  const cn23 = await PDFDocument.create();
+  const cn23Page = cn23.addPage([CUSTOMS_DOCUMENT_WIDTH_PT, CUSTOMS_DOCUMENT_HEIGHT_PT]);
+  // The real DHL CN23 occupies the upper A5 landscape half of an A4 page.
+  cn23Page.drawText("CN23 LEFT", { x: 20, y: 790, size: 16 });
+  cn23Page.drawText("CN23 RIGHT", { x: 330, y: 790, size: 16 });
+  cn23Page.drawText("CUSTOMS DECLARATION", { x: 170, y: 425, size: 12 });
+
+  const output = await buildSwissThermalLabelPackagePdf({
+    shippingLabelPdfBase64: Buffer.from(await label.save()).toString("base64"),
+    customsDocPdfBase64: Buffer.from(await cn23.save()).toString("base64"),
+  });
+  const rendered = await PDFDocument.load(output);
+
+  assert.equal(rendered.getPageCount(), 3);
+  for (const page of rendered.getPages()) {
+    assert.equal(page.getWidth(), 432);
+    assert.equal(page.getHeight(), 288);
   }
 });
 

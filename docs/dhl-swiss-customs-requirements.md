@@ -13,10 +13,12 @@ Stand: 12. Oktober 2026
 DHL verlangt bei DHL Paket International für jedes einzelne Packstück:
 
 1. das **DHL-Label** im Thermalformat 100 × 150 mm,
-2. die von DHL erzeugte **Zollinhaltserklärung CN23** im A4-Format,
+2. die von DHL erzeugte **Zollinhaltserklärung CN23**,
 3. die **Handelsrechnung in zweifacher Ausfertigung** im A4-Format.
 
-Die CN23 wird nicht nachgebildet: DHL generiert sie aus den übermittelten Zolldaten und liefert sie als separates `customsDoc` zurück. Die WaWi speichert zwei getrennte Druckdateien: das DHL-Label im 100×150-mm-Format sowie CN23 plus Rechnungskopie 1 und 2 als A4-PDF. Es gibt keinen automatischen Druck oder Versand.
+Die CN23 wird nicht nachgebildet: DHL generiert sie aus den übermittelten Zolldaten und liefert sie als separates `customsDoc` zurück. Die WaWi erzeugt daraus für den vorhandenen Thermodrucker einen dreiseitigen 100×150-mm-Drucksatz: **Paketmarke, linke CN23-Hälfte, rechte CN23-Hälfte**. Der Zuschnitt erfolgt ausschließlich an der vertikalen Mitte der originalen DHL-CN23; es werden keine Inhalte, Barcodes oder Felder neu geschrieben.
+
+Zusätzlich speichert die WaWi die zwei Handelsrechnungen revisionssicher als separates A4-PDF. Sie werden nicht automatisch geöffnet und nicht in das Thermoformat gedrückt. Für die physische Zollabwicklung sind sie bei Bedarf packstückindividuell in der transparenten Zolldokumententasche außen am Paket zu befestigen.
 
 Die drei Zollunterlagen werden außen am Packstück in einer selbstklebenden, transparenten Zolldokumententasche angebracht. Bei Warenwert über 1.000 EUR oder bei besonderen Ausfuhrvorgaben ist zusätzlich ein Ausfuhrbegleitdokument (ABD) erforderlich; die WaWi blockiert die automatische Buchung bewusst und erzeugt kein ABD.
 

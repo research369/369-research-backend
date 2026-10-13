@@ -34,7 +34,7 @@ import { getDb, getPool } from "./db.js";
 import { orderItems, orders } from "../drizzle/schema.js";
 import { eq, and, isNull } from "drizzle-orm";
 import { getUserFromRequest } from "./auth.js";
-import { buildSwissCommercialInvoicePdf, buildSwissCustomsDocumentsPdf, validateSwissCustomsDeclaration, type SwissCommercialInvoice, type SwissCustomsDeclaration, type ValidatedSwissCustomsDeclaration } from "./swissCustomsService.js";
+import { buildSwissCommercialInvoicePdf, buildSwissCustomsDocumentsPdf, buildSwissThermalLabelPackagePdf, validateSwissCustomsDeclaration, type SwissCommercialInvoice, type SwissCustomsDeclaration, type ValidatedSwissCustomsDeclaration } from "./swissCustomsService.js";
 
 export const dhlExpressRouter = Router();
 
@@ -286,7 +286,7 @@ dhlExpressRouter.get(
   }
 );
 
-/** Liefert die gespeicherte DHL-CN23 plus beide A4-Handelsrechnungen. */
+/** Liefert ausschließlich die zwei separat gespeicherten A4-Handelsrechnungen. */
 dhlExpressRouter.get(
   "/api/shipping/dhl/swiss-customs-documents/:orderId",
   requireWawiAdmin,
@@ -298,19 +298,19 @@ dhlExpressRouter.get(
       return;
     }
     const result = await pool.query(`
-      SELECT customs_print_content
+      SELECT commercial_invoice_content
       FROM order_swiss_customs_declarations
       WHERE order_id = $1
     `, [orderId]);
-    const content = result.rows[0]?.customs_print_content;
+    const content = result.rows[0]?.commercial_invoice_content;
     if (!content) {
-      res.status(404).json({ success: false, error: "Keine vollständigen Schweizer Zolldokumente für diese Bestellung gespeichert" });
+      res.status(404).json({ success: false, error: "Keine gespeicherten Schweizer Handelsrechnungen für diese Bestellung vorhanden" });
       return;
     }
     const buffer = Buffer.from(String(content), "base64");
     res.set({
       "Content-Type": "application/pdf",
-      "Content-Disposition": `inline; filename="swiss-customs-documents-${orderId}.pdf"`,
+      "Content-Disposition": `inline; filename="swiss-commercial-invoices-${orderId}.pdf"`,
       "Content-Length": String(buffer.length),
       "Cache-Control": "private, no-cache",
     });
@@ -803,10 +803,10 @@ dhlExpressRouter.post(
       // Interne Download-Route als shippingLabelUrl
       const labelRoute = `/api/shipping/dhl/label/${orderId.trim()}`;
 
-      // Das 100×150-mm DHL-Label bleibt für jeden Versand ein eigenständiges PDF.
-      // Schweiz: DHL-CN23 und beide A4-Handelsrechnungen werden separat abgelegt,
-      // weil sie nicht zulässig auf das Thermalformat verkleinert werden dürfen.
-      const labelContent = result.labelBase64 ?? null;
+      // Schweiz: Das gespeicherte Versandlabel ist bewusst ein dreiseitiges
+      // 100×150-mm-Thermopaket: DHL-Marke + linke/rechte DHL-CN23-Hälfte.
+      // Die A4-Handelsrechnungen bleiben zusätzlich unverändert gespeichert.
+      let labelContent = result.labelBase64 ?? null;
       const customsDocContent = result.customsDocBase64 ?? null;
       let commercialInvoiceContent: string | null = null;
       let customsPrintContent: string | null = null;
@@ -822,6 +822,11 @@ dhlExpressRouter.post(
             invoice: swissCustoms.invoice,
           });
           customsPrintContent = Buffer.from(customsPrintPackage).toString("base64");
+          const thermalLabelPackage = await buildSwissThermalLabelPackagePdf({
+            shippingLabelPdfBase64: labelContent,
+            customsDocPdfBase64: customsDocContent,
+          });
+          labelContent = Buffer.from(thermalLabelPackage).toString("base64");
         } catch (error: any) {
           // Das DHL-Label wurde extern bereits gebucht. Ohne eine gespeicherte
           // vollständige Zollmappe darf keine scheinbar vollständige Schweiz-Sendung
@@ -865,7 +870,7 @@ dhlExpressRouter.post(
         })
         .where(eq(orders.orderId, orderId.trim()));
 
-      console.log(`[dhlRouter] Schweizer Unterlagen gespeichert: ${result.trackingNumber} | Label 4×6, CN23 + Handelsrechnung A4 | Customs: ${customsPrintContent ? 'ja' : 'nein'}`);
+      console.log(`[dhlRouter] Schweizer Unterlagen gespeichert: ${result.trackingNumber} | 3× 4×6 (Label + CN23-Hälften), Handelsrechnung A4 | Customs: ${customsPrintContent ? 'ja' : 'nein'}`);
 
       res.json({
         success:        true,

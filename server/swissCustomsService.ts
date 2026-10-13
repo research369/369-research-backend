@@ -1,10 +1,13 @@
-import { PDFDocument, rgb, type PDFPage } from "pdf-lib";
+import { PDFDocument, degrees, rgb, type PDFPage } from "pdf-lib";
 import { normalizeCountryToAlpha3 } from "./dhlService.js";
 
 export const SWISS_CUSTOMS_SHIPPING_CONDITION = "DAP" as const;
 export const SWISS_CUSTOMS_EXPORT_TYPE = "COMMERCIAL_GOODS" as const;
 export const CUSTOMS_DOCUMENT_WIDTH_PT = 595.28; // A4 portrait
 export const CUSTOMS_DOCUMENT_HEIGHT_PT = 841.89;
+// DHL returns the CN23 on the upper A5-landscape half of an A4 page. A physical
+// 4×6 label can hold either half when it is rotated to the label orientation.
+const DHL_CN23_HEIGHT_PT = CUSTOMS_DOCUMENT_WIDTH_PT / Math.SQRT2;
 
 export type SwissCustomsLine = {
   orderItemId: number;
@@ -371,5 +374,90 @@ export async function buildSwissCustomsDocumentsPdf(input: {
   const invoicePages = await output.copyPages(invoiceDocument, invoiceDocument.getPageIndices());
   invoicePages.forEach((page) => output.addPage(page));
 
+  return output.save();
+}
+
+/**
+ * Builds the three 4×6 thermal labels used for a DHL Paket International
+ * shipment to Switzerland:
+ *
+ * 1. DHL's original shipping label (never redrawn or altered)
+ * 2. the left half of DHL's generated CN23
+ * 3. the right half of DHL's generated CN23
+ *
+ * DHL emits the CN23 as A4 with its usable form in the upper A5 landscape area.
+ * Splitting that original form into its two halves is the thermal-printer
+ * equivalent of the three-label sequence used at the DHL counter. The copied
+ * label page determines the final page size, so a future DHL print-format change
+ * cannot silently turn this into an incorrectly sized label.
+ */
+export async function buildSwissThermalLabelPackagePdf(input: {
+  shippingLabelPdfBase64: string;
+  customsDocPdfBase64: string;
+}): Promise<Uint8Array> {
+  const shippingLabelDocument = await PDFDocument.load(Buffer.from(input.shippingLabelPdfBase64, "base64"));
+  const customsDocument = await PDFDocument.load(Buffer.from(input.customsDocPdfBase64, "base64"));
+  if (shippingLabelDocument.getPageCount() < 1) {
+    throw new Error("DHL hat keine Seite für die Paketmarke zurückgegeben.");
+  }
+  if (customsDocument.getPageCount() < 1) {
+    throw new Error("DHL hat keine Seite für die CN23-Zollinhaltserklärung zurückgegeben.");
+  }
+
+  const output = await PDFDocument.create();
+  const [labelPage] = await output.copyPages(shippingLabelDocument, [0]);
+  output.addPage(labelPage);
+
+  const targetWidth = labelPage.getWidth();
+  const targetHeight = labelPage.getHeight();
+  const cn23Page = customsDocument.getPage(0);
+  const sourceWidth = cn23Page.getWidth();
+  const sourceHeight = cn23Page.getHeight();
+  const cn23Height = Math.min(sourceHeight, sourceWidth / Math.SQRT2, DHL_CN23_HEIGHT_PT);
+  if (cn23Height < sourceWidth * 0.6) {
+    throw new Error("DHL-CN23 hat kein erwartetes A4-/A5-Druckformat.");
+  }
+
+  const drawCn23Half = async (left: number, right: number) => {
+    const sourceWidthHalf = right - left;
+    const sourceHeightHalf = cn23Height;
+    const embedded = await output.embedPage(cn23Page, {
+      left,
+      right,
+      bottom: sourceHeight - cn23Height,
+      top: sourceHeight,
+    });
+    const page = output.addPage([targetWidth, targetHeight]);
+
+    // Retain the original reading orientation where the DHL label is portrait.
+    // On the 6×4 landscape label returned by DHL, rotate the narrow CN23 half
+    // exactly once so it fills the available print area without cropping.
+    const directScale = Math.min(targetWidth / sourceWidthHalf, targetHeight / sourceHeightHalf);
+    const rotatedScale = Math.min(targetWidth / sourceHeightHalf, targetHeight / sourceWidthHalf);
+    if (rotatedScale > directScale) {
+      const printedWidth = sourceHeightHalf * rotatedScale;
+      const printedHeight = sourceWidthHalf * rotatedScale;
+      page.drawPage(embedded, {
+        x: (targetWidth + printedWidth) / 2,
+        y: (targetHeight - printedHeight) / 2,
+        width: sourceWidthHalf * rotatedScale,
+        height: sourceHeightHalf * rotatedScale,
+        rotate: degrees(90),
+      });
+      return;
+    }
+
+    const printedWidth = sourceWidthHalf * directScale;
+    const printedHeight = sourceHeightHalf * directScale;
+    page.drawPage(embedded, {
+      x: (targetWidth - printedWidth) / 2,
+      y: (targetHeight - printedHeight) / 2,
+      width: printedWidth,
+      height: printedHeight,
+    });
+  };
+
+  await drawCn23Half(0, sourceWidth / 2);
+  await drawCn23Half(sourceWidth / 2, sourceWidth);
   return output.save();
 }
