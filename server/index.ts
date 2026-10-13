@@ -49,6 +49,7 @@ import { ensureSwissCustomsSchema } from "./swissCustomsSchema.js";
 import {jarvyOrderRouter} from "./jarvyOrderRouter.js";
 import { jarvyReadRouter } from "./jarvyReadRouter.js";
 import {guardianInventoryRouter} from './guardianInventoryRouter.js';
+import {operationsRouter} from './operationsRouter.js';
 
 const app = express();
 
@@ -148,6 +149,7 @@ app.use(qrRedirectRouter);
 
 app.use("/api/jarvy-read", jarvyReadRouter);
 app.use('/api/guardian', guardianInventoryRouter);
+app.use('/api/operations', operationsRouter);
 app.use("/api/jarvy-orders", jarvyOrderRouter);
 
 // Manueller Backup-Trigger (gesichert mit WAWI_INTERNAL_KEY)

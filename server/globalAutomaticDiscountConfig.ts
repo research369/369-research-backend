@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { getDb } from "./db.js";
 import { shopSettings } from "../drizzle/schema.js";
 
@@ -13,6 +13,7 @@ export const GLOBAL_AUTOMATIC_DISCOUNT_CONFIG_KEY = "global_automatic_discount";
 export const globalAutomaticDiscountConfigSchema = z.object({
   enabled: z.boolean(),
   percentage: z.number().min(0).max(100),
+  startsAt: z.string().datetime().nullable().default(null),
   expiresAt: z.string().datetime().nullable(),
   stackWithPromotionCodes: z.boolean(),
   labelDe: z.string().trim().min(1).max(120),
@@ -32,6 +33,7 @@ export type ActiveGlobalAutomaticDiscount = {
 export const defaultGlobalAutomaticDiscountConfig: GlobalAutomaticDiscountConfig = {
   enabled: false,
   percentage: 0,
+  startsAt: null,
   expiresAt: null,
   stackWithPromotionCodes: true,
   labelDe: "Dauerrabatt",
@@ -49,6 +51,7 @@ export function parseGlobalAutomaticDiscountConfig(value?: string | null): Globa
 
 export function getActiveGlobalAutomaticDiscount(config: GlobalAutomaticDiscountConfig, now = new Date()): ActiveGlobalAutomaticDiscount | null {
   if (!config.enabled || config.percentage <= 0) return null;
+  if (config.startsAt && new Date(config.startsAt).getTime() > now.getTime()) return null;
   if (config.expiresAt && new Date(config.expiresAt).getTime() <= now.getTime()) return null;
   return {
     percentage: config.percentage,
@@ -75,16 +78,19 @@ export async function getActiveGlobalAutomaticDiscountFromDb(): Promise<ActiveGl
 export async function upsertGlobalAutomaticDiscountConfig(input: GlobalAutomaticDiscountConfig) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
+  return db.transaction(async(tx)=>{
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('global_automatic_discount'))`);
   const value = JSON.stringify(input);
-  const [existing] = await db.select().from(shopSettings)
+  const [existing] = await tx.select().from(shopSettings)
     .where(eq(shopSettings.key, GLOBAL_AUTOMATIC_DISCOUNT_CONFIG_KEY))
     .limit(1);
 
   if (existing) {
-    await db.update(shopSettings).set({ value, updatedAt: new Date() })
+    await tx.update(shopSettings).set({ value, updatedAt: new Date() })
       .where(eq(shopSettings.key, GLOBAL_AUTOMATIC_DISCOUNT_CONFIG_KEY));
   } else {
-    await db.insert(shopSettings).values({ key: GLOBAL_AUTOMATIC_DISCOUNT_CONFIG_KEY, value });
+    await tx.insert(shopSettings).values({ key: GLOBAL_AUTOMATIC_DISCOUNT_CONFIG_KEY, value });
   }
   return input;
+  });
 }

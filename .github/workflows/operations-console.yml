@@ -1,0 +1,41 @@
+name: Operations console backend
+on:
+  pull_request:
+    paths: ['server/**', 'drizzle/**', '.github/workflows/operations-console.yml']
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    env:
+      TZ: UTC
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ['55446:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npx tsc --noEmit
+      - run: npx tsx --test server/*.test.ts tests/*.test.ts
+      - run: npx drizzle-kit export --dialect postgresql --schema ./drizzle/schema.ts > /tmp/ops-schema.sql
+      - name: Create disposable rehearsal database
+        run: |
+          createdb -h 127.0.0.1 -p 55446 -U postgres ops_rehearsal
+          psql -h 127.0.0.1 -p 55446 -U postgres -d ops_rehearsal -v ON_ERROR_STOP=1 -f /tmp/ops-schema.sql
+          psql -h 127.0.0.1 -p 55446 -U postgres -d ops_rehearsal -v ON_ERROR_STOP=1 -c 'CREATE TABLE substitution_config(id integer PRIMARY KEY, enabled boolean DEFAULT false, updated_at timestamp DEFAULT now())'
+          psql -h 127.0.0.1 -p 55446 -U postgres -d ops_rehearsal -v ON_ERROR_STOP=1 -f drizzle/migrations/0026_operations_console.sql
+          psql -h 127.0.0.1 -p 55446 -U postgres -d ops_rehearsal -v ON_ERROR_STOP=1 -f drizzle/migrations/0027_operations_drafts.sql
+      - run: npx tsx --test --test-concurrency=1 server/operationsStock.test.ts server/operationsPromotion.test.ts server/operationsDraft.test.ts server/operationsSimulation.test.ts
+        env:
+          OPS_ISOLATED_REHEARSAL: 'true'
+          DATABASE_URL: postgresql://postgres@127.0.0.1:55446/ops_rehearsal

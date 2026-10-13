@@ -5,6 +5,7 @@ import { z } from "zod";
 import { eq, desc, asc, like, and, sql, gte, lte, inArray } from "drizzle-orm";
 import { router, adminProcedure, productManagerProcedure, packingProcedure, publicProcedure } from "./trpc.js";
 import { getDb, getPool } from "./db.js";
+import {applyStockMovement} from "./stockMovementService.js";
 import { articles, stockHistory, orderItems, orders, articleTranslations, articleFaq } from "../drizzle/schema.js";
 import { isBillableOrderItem, isCompletedCommercialOrder } from "./commercialOrderMetrics.js";
 
@@ -155,7 +156,7 @@ function getManualArticleVariants(
  * canonical article's variants JSON (consolidated products). The public shop
  * must support both forms so mg selections never disappear after consolidation.
  */
-function getPublicShopVariants(
+export function getPublicShopVariants(
   article: {
     id: number;
     name: string;
@@ -584,19 +585,7 @@ export const articleRouter = router({
       const newStock = article.stock + input.change;
       if (newStock < 0) throw new Error("Bestand kann nicht negativ werden");
 
-      // Update stock
-      await db.update(articles).set({ stock: newStock }).where(eq(articles.id, input.id));
-
-      // Log history
-      await db.insert(stockHistory).values({
-        articleId: input.id,
-        changeType: input.type,
-        quantityBefore: article.stock,
-        quantityChange: input.change,
-        quantityAfter: newStock,
-        reason: input.reason || null,
-        userName: ctx.user?.name || "Admin",
-      });
+      await db.transaction(async tx=>{await applyStockMovement(tx,{articleId:article.id,sku:article.sku,expectedStock:article.stock,change:input.change,type:input.type,reason:input.reason||"WaWi-Bestandsbewegung",actor:ctx.user?.name||"Admin"});});
 
       // E-Mail-Benachrichtigung an Pakko wenn packing-User Bestand manuell reduziert (kein Verkauf)
       if (ctx.user?.role === "packing" && input.change < 0 && input.type !== "verkauf") {
