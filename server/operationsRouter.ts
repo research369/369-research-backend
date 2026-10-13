@@ -1,3 +1,4 @@
+import {operationsDetail} from './operationsDetails.js';
 import { simulateCheckout } from './operationsSimulation.js';
 import { searchOperations } from './operationsSearch.js';
 import { diagnosePartner } from './operationsPartner.js';
@@ -72,6 +73,7 @@ for (const action of ['list', 'options', 'template', 'save', 'preview', 'publish
             res.status(409).json({ code: e instanceof z.ZodError ? 'invalid_input' : e instanceof Error ? e.message : 'draft_unavailable' });
         }
     });
+operationsRouter.post('/details',async(req,res)=>{try{res.json(await operationsDetail(req.body,res.locals.opsActor));}catch(e){res.status(409).json({code:e instanceof Error?e.message:'detail_unavailable'});}});
 operationsRouter.post('/runs', async (_req, res) => {
     try {
         const pool = await getPool();
