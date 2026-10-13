@@ -80,6 +80,7 @@ test(
       assert.equal(r.total, 168);
       assert.equal(r.available, true);
       assert.equal(r.sideEffects, false);
+    assert.equal(r.addressChecked,true);assert.equal(r.addressValidation.status,'warning');assert(r.addressValidation.warnings.some((w:any)=>w.code==='street_missing'));
       assert.deepEqual(
         (
           await pool.query(

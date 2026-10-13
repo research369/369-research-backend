@@ -797,7 +797,7 @@ export const orderRouter = router({
           if(!authenticatedSelfOrderProgram||!canRedeemShopCredit(authenticatedSelfOrderProgram))throw Error('PARTNER_GUTHABEN_PROGRAMM_AUSGESCHLOSSEN');
           if(Number(authenticatedPartner.creditBalance||0)+0.001<(input.creditUsed||0))throw Error('PARTNER_GUTHABEN_NICHT_AUSREICHEND');
         }
-        return {operationsPreview:{subtotal:input.subtotal,shipping:input.shipping,discount:input.discount,total:input.total,discountBreakdown,items:input.items.map(i=>({shopProductId:i.shopProductId,name:i.name,dosage:i.dosage,quantity:i.quantity,price:i.price})),addressChecked:false}};
+        return {operationsPreview:{subtotal:input.subtotal,shipping:input.shipping,discount:input.discount,total:input.total,discountBreakdown,items:input.items.map(i=>({shopProductId:i.shopProductId,name:i.name,dosage:i.dosage,quantity:i.quantity,price:i.price})),addressChecked:true,addressValidation:await validateGermanAddress(input.customer)}};
       }
       const addressValidation = await validateGermanAddress(input.customer);
       const addressWarningNeedsConfirmation = addressValidation.applicable
