@@ -256,7 +256,7 @@ export async function simulateCheckout(
       available: stockPlan.every((p) => p.available),
       checkedAt: new Date().toISOString(),
       limitations: [
-        "Die Vorschau prüft Preis, Bestand und gegebenenfalls Kundenvoraussetzungen. Eine Lieferadressprüfung erfolgt erst bei der tatsächlichen Bestellung.",
+        "Die Vorschau prüft Preis, Bestand und gegebenenfalls Kundenvoraussetzungen. Die Lieferadressprüfung verwendet denselben Dienst wie die tatsächliche Bestellung; Hinweise müssen im Shop vor dem Bestellen bestätigt werden.",
         "Guthaben werden nur geprüft und nicht reserviert. Eine echte Einlösung erfordert die persönliche Anmeldung im Shop.",
       ],
       sideEffects: false,
