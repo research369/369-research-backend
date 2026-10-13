@@ -803,9 +803,10 @@ dhlExpressRouter.post(
       // Interne Download-Route als shippingLabelUrl
       const labelRoute = `/api/shipping/dhl/label/${orderId.trim()}`;
 
-      // Schweiz: Das gespeicherte Versandlabel ist bewusst ein dreiseitiges
-      // 100×150-mm-Thermopaket: DHL-Marke + linke/rechte DHL-CN23-Hälfte.
-      // Die A4-Handelsrechnungen bleiben zusätzlich unverändert gespeichert.
+      // Schweiz: Das gespeicherte Versandlabel besteht bewusst aus drei
+      // Thermoetiketten: Marke 100×150 mm hochkant, danach oberer und unterer
+      // CN23-Bereich jeweils 150×100 mm quer. Die A4-Handelsrechnungen bleiben
+      // zusätzlich unverändert gespeichert.
       let labelContent = result.labelBase64 ?? null;
       const customsDocContent = result.customsDocBase64 ?? null;
       let commercialInvoiceContent: string | null = null;

@@ -10,8 +10,9 @@ export const CUSTOMS_DOCUMENT_HEIGHT_PT = 841.89;
 export const THERMAL_LABEL_WIDTH_PT = 288;
 export const THERMAL_LABEL_HEIGHT_PT = 432;
 // DHL returns the CN23 on the upper A5-landscape half of an A4 page. The form
-// must be divided vertically into its left and right halves for two portrait
-// 100 × 150 mm labels, preserving the readable original-form proportions.
+// is divided across its horizontal form boundary into an upper and lower part
+// for two 150 × 100 mm landscape thermal labels, preserving the original-form
+// proportions and keeping all text and barcodes intact.
 const DHL_CN23_HEIGHT_PT = CUSTOMS_DOCUMENT_WIDTH_PT / Math.SQRT2;
 
 export type SwissCustomsLine = {
@@ -383,17 +384,17 @@ export async function buildSwissCustomsDocumentsPdf(input: {
 }
 
 /**
- * Builds the three portrait 100×150-mm thermal labels used for a DHL Paket International
- * shipment to Switzerland:
+ * Builds the three thermal labels used for a DHL Paket International shipment
+ * to Switzerland:
  *
- * 1. DHL's original shipping label (never redrawn or altered)
- * 2. the left half of DHL's generated CN23
- * 3. the right half of DHL's generated CN23
+ * 1. DHL's original 100×150-mm portrait shipping label (never redrawn)
+ * 2. the upper CN23 form section on a 150×100-mm landscape label
+ * 3. the lower CN23 form section on a 150×100-mm landscape label
  *
- * DHL emits the CN23 as A4 with its usable form in the upper A5 landscape area.
- * Splitting the original form at its vertical centre produces two 105×148-mm
- * halves. Each is proportionally fitted to one 100×150-mm portrait label. No
- * content, barcode or form field is redrawn or cropped.
+ * DHL emits the CN23 on the upper A5-landscape section of an A4 document. The
+ * division follows the printed horizontal boundary between the recipient area
+ * and the goods area. Each full-width section is proportionally fitted; no
+ * barcode, text or form field is redrawn, cut or distorted.
  */
 export async function buildSwissThermalLabelPackagePdf(input: {
   shippingLabelPdfBase64: string;
@@ -472,29 +473,36 @@ export async function buildSwissThermalLabelPackagePdf(input: {
     throw new Error("DHL-CN23 hat kein erwartetes A4-/A5-Druckformat.");
   }
 
-  const drawCn23Half = async (left: number, right: number) => {
-    const sourceWidthHalf = right - left;
-    const sourceHeightHalf = cn23Height;
-    const embedded = await output.embedPage(cn23Page, {
-      left,
-      right,
-      bottom: sourceHeight - cn23Height,
-      top: sourceHeight,
-    });
-    const page = output.addPage([targetWidth, targetHeight]);
+  const cn23Bottom = sourceHeight - cn23Height;
+  const cn23Top = sourceHeight;
+  // DHL's printed boundary between recipient and goods areas sits at roughly
+  // 56% from the visual top of the usable A5 landscape form. The equivalent
+  // PDF coordinate is 44% from its bottom. This keeps complete table rows and
+  // the signer declaration on their intended label section.
+  const cn23SplitY = cn23Bottom + cn23Height * 0.44;
 
-    const directScale = Math.min(targetWidth / sourceWidthHalf, targetHeight / sourceHeightHalf);
-    const printedWidth = sourceWidthHalf * directScale;
-    const printedHeight = sourceHeightHalf * directScale;
+  const drawCn23Section = async (bottom: number, top: number) => {
+    const sourceSectionHeight = top - bottom;
+    const embedded = await output.embedPage(cn23Page, {
+      left: 0,
+      right: sourceWidth,
+      bottom,
+      top,
+    });
+    const page = output.addPage([targetHeight, targetWidth]);
+
+    const directScale = Math.min(targetHeight / sourceWidth, targetWidth / sourceSectionHeight);
+    const printedWidth = sourceWidth * directScale;
+    const printedHeight = sourceSectionHeight * directScale;
     page.drawPage(embedded, {
-      x: (targetWidth - printedWidth) / 2,
-      y: (targetHeight - printedHeight) / 2,
+      x: (targetHeight - printedWidth) / 2,
+      y: (targetWidth - printedHeight) / 2,
       width: printedWidth,
       height: printedHeight,
     });
   };
 
-  await drawCn23Half(0, sourceWidth / 2);
-  await drawCn23Half(sourceWidth / 2, sourceWidth);
+  await drawCn23Section(cn23SplitY, cn23Top);
+  await drawCn23Section(cn23Bottom, cn23SplitY);
   return output.save();
 }
