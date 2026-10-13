@@ -247,4 +247,4 @@ export async function draftTemplate(pool: Pool, body: unknown) {
         c.release();
     }
 }
-export async function draftOptions(pool: Pool) { return { useCases: (await pool.query("SELECT DISTINCT ON (u.id) u.id,coalesce(t.name,u.slug) AS name FROM use_cases u LEFT JOIN use_case_translations t ON t.use_case_id=u.id AND t.lang='de' ORDER BY u.id,t.id LIMIT 1000")).rows }; }
+export async function draftOptions(pool: Pool) { return { useCases: (await pool.query("SELECT DISTINCT ON (u.id) u.id,coalesce(to_jsonb(t)->>'name',to_jsonb(t)->>'title',u.slug) AS name FROM use_cases u LEFT JOIN use_case_translations t ON t.use_case_id=u.id AND t.lang='de' ORDER BY u.id,t.id LIMIT 1000")).rows }; }
