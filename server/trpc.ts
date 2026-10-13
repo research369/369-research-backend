@@ -3,6 +3,8 @@ import superjson from "superjson";
 import type { Request, Response } from "express";
 
 export interface Context {
+  /** Internal diagnostic principal only. Never accepted in a public request. */
+  operationsPreview?: {partnerId?:number};
   jarvyOrder?: import('./jarvyOrderContract.js').JarvyOrderContext;
   req: Request;
   res: Response;

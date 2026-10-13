@@ -5,6 +5,7 @@
  */
 
 import { z } from "zod";
+import {applyStockMovement} from "./stockMovementService.js";
 import {orderHash} from "./jarvyOrderContract.js";
 import { eq, desc, inArray, and, or, getTableColumns } from "drizzle-orm";
 import { router, publicProcedure, adminProcedure } from "./trpc.js";
@@ -52,6 +53,7 @@ import { isPromoCodeExpired } from "./promoCodeRouter.js";
 import {
   calculatePublicPartnerCustomerDiscount,
   calculateProgramDiscount,
+  canRedeemShopCredit,
   calculateSelfOrderDiscountPercent,
   getPartnerProgram,
   isDiscountAllowedForProgram,
@@ -341,7 +343,9 @@ export const orderRouter = router({
       // code or any browser-provided percentage can never authorize this route.
       const requiresPartnerSession = Boolean(input.partnerNumber?.trim()) || (input.creditUsed || 0) > 0;
       const authenticatedPartner = requiresPartnerSession
-        ? await getAuthenticatedPartnerFromRequest(ctx.req)
+        ? ctx.operationsPreview?.partnerId
+          ? (await db.select().from(partners).where(and(eq(partners.id,ctx.operationsPreview.partnerId),eq(partners.isActive,1))).limit(1))[0]??null
+          : await getAuthenticatedPartnerFromRequest(ctx.req)
         : null;
       if (requiresPartnerSession && !authenticatedPartner) {
         throw new Error("PARTNER_GUTHABEN_AUTHENTIFIZIERUNG_ERFORDERLICH");
@@ -784,6 +788,13 @@ export const orderRouter = router({
 
       // Deutsche Adressplausibilität wird serverseitig erneut geprüft. Das Frontend
       // zeigt denselben Befund vorher an; diese Prüfung verhindert ein Umgehen per Request.
+      if(ctx.operationsPreview){
+        if(authenticatedPartner&&(input.creditUsed||0)>0){
+          if(!authenticatedSelfOrderProgram||!canRedeemShopCredit(authenticatedSelfOrderProgram))throw Error('PARTNER_GUTHABEN_PROGRAMM_AUSGESCHLOSSEN');
+          if(Number(authenticatedPartner.creditBalance||0)+0.001<(input.creditUsed||0))throw Error('PARTNER_GUTHABEN_NICHT_AUSREICHEND');
+        }
+        return {operationsPreview:{subtotal:input.subtotal,shipping:input.shipping,discount:input.discount,total:input.total,discountBreakdown,items:input.items.map(i=>({shopProductId:i.shopProductId,name:i.name,dosage:i.dosage,quantity:i.quantity,price:i.price})),addressChecked:false}};
+      }
       const addressValidation = await validateGermanAddress(input.customer);
       const addressWarningNeedsConfirmation = addressValidation.applicable
         && (addressValidation.status === "warning" || addressValidation.status === "unavailable");
@@ -1303,18 +1314,9 @@ export const orderRouter = router({
             const article = allArticlesForCheck.find(a => a.id === comp.articleId);
             if (!article) continue;
             const newStock = (article.stock ?? 0) - comp.quantity;
-            await db.update(articles).set({ stock: newStock, updatedAt: new Date() }).where(eq(articles.id, article.id));
-            await db.insert(stockHistory).values({
-              articleId: article.id,
-              quantityChange: -comp.quantity,
-              changeType: 'verkauf',
-              quantityBefore: article.stock ?? 0,
-              quantityAfter: newStock,
-              reason: `Smart Substitution für Bestellung ${orderId}: ${sub.internalNote}`,
-              orderId: orderId,
-              userName: 'system',
-            });
-            console.log(`[Orders] Smart Substitution deducted: ${article.name} ${article.stock} → ${newStock} (order ${orderId})`);
+            await applyStockMovement(db,{articleId:article.id,sku:article.sku,expectedStock:article.stock??0,change:-comp.quantity,type:'verkauf',reason:`Smart Substitution für Bestellung ${orderId}: ${sub.internalNote}`,orderId,actor:'system'});
+
+            article.stock=newStock;
           }
         } else {
           // Normal: Bestand der bestellten Variante abziehen
@@ -1325,22 +1327,10 @@ export const orderRouter = router({
             const deduct = Math.min(remainingToDeduct, article.stock ?? 0);
             if (deduct > 0) {
               const newStock = (article.stock ?? 0) - deduct;
-              if(ctx.jarvyOrder) {
-                const changed=await db.execute(sql`UPDATE articles SET stock=stock-${deduct},updated_at=now() WHERE id=${article.id} AND is_active=1 AND stock>=${deduct} AND (CASE WHEN sale_price>0 THEN sale_price ELSE selling_price END)=${item.price} RETURNING id`);
-                if(!changed.rows.length)throw new Error('JARVY_ARTICLE_CHANGED');
-              }else await db.update(articles).set({ stock: newStock, updatedAt: new Date() }).where(eq(articles.id, article.id));
-              await db.insert(stockHistory).values({
-                articleId: article.id,
-                quantityChange: -deduct,
-                changeType: 'verkauf',
-                quantityBefore: article.stock ?? 0,
-                quantityAfter: newStock,
-                reason: `Bestandsabzug für Bestellung ${orderId}`,
-                orderId: orderId,
-                userName: 'system',
-              });
+              await applyStockMovement(db,{articleId:article.id,sku:article.sku,expectedStock:article.stock??0,change:-deduct,type:'verkauf',reason:`Bestandsabzug für Bestellung ${orderId}`,orderId,actor:'system',...(ctx.jarvyOrder?{expectedPrice:item.price}:{})});
+              article.stock=newStock;
               remainingToDeduct -= deduct;
-              console.log(`[Orders] Stock deducted: ${article.name} ${article.stock} → ${newStock} (order ${orderId})`);
+              console.log(`[Orders] Stock deducted: ${article.name} ${newStock+deduct} → ${newStock} (order ${orderId})`);
             }
           }
         }
@@ -1538,17 +1528,8 @@ export const orderRouter = router({
         if (bacWasser10ml && (bacWasser10ml.stock ?? 0) > 0) {
           const deduct = Math.min(nasalSprayCount, bacWasser10ml.stock ?? 0);
           const newStock = (bacWasser10ml.stock ?? 0) - deduct;
-          await db.update(articles).set({ stock: newStock, updatedAt: new Date() }).where(eq(articles.id, bacWasser10ml.id));
-          await db.insert(stockHistory).values({
-            articleId: bacWasser10ml.id,
-            quantityChange: -deduct,
-            changeType: 'verkauf',
-            quantityBefore: bacWasser10ml.stock ?? 0,
-            quantityAfter: newStock,
-            reason: `Automatischer Abzug: Nasenspray-Bestellung ${orderId}`,
-            orderId: orderId,
-            userName: 'system',
-          });
+            await applyStockMovement(db,{articleId:bacWasser10ml.id,sku:bacWasser10ml.sku,expectedStock:bacWasser10ml.stock??0,change:-deduct,type:'verkauf',reason:`Automatischer Abzug: Nasenspray-Bestellung ${orderId}`,orderId,actor:'system'});
+
           console.log(`[Orders] BAC Wasser 10ml Bestand abgezogen: ${bacWasser10ml.stock} → ${newStock} (${nasalSprayCount}x Nasenspray, order ${orderId})`);
         } else {
           console.warn(`[Orders] BAC Wasser 10ml nicht gefunden oder kein Bestand für Nasenspray-Bestellung ${orderId}`);
@@ -1581,17 +1562,8 @@ export const orderRouter = router({
           if (componentArticle && (componentArticle.stock ?? 0) > 0) {
             const deduct = Math.min(item.quantity, componentArticle.stock ?? 0);
             const newStock = (componentArticle.stock ?? 0) - deduct;
-            await db.update(articles).set({ stock: newStock, updatedAt: new Date() }).where(eq(articles.id, componentArticle.id));
-            await db.insert(stockHistory).values({
-              articleId: componentArticle.id,
-              quantityChange: -deduct,
-              changeType: "verkauf",
-              quantityBefore: componentArticle.stock ?? 0,
-              quantityAfter: newStock,
-              reason: `DIY-Nasenspray-Set für Bestellung ${orderId}`,
-              orderId,
-              userName: "system",
-            });
+            await applyStockMovement(db,{articleId:componentArticle.id,sku:componentArticle.sku,expectedStock:componentArticle.stock??0,change:-deduct,type:'verkauf',reason:`DIY-Nasenspray-Set für Bestellung ${orderId}`,orderId,actor:'system'});
+
           }
         }
       }
@@ -2352,8 +2324,10 @@ export const orderRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
+      return db.transaction(async tx=>{
+      const db=tx;
       // Get the order
-      const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1);
+      const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1).for("update");
       if (!order) throw new Error("Bestellung nicht gefunden");
 
       // Get order items
@@ -2365,19 +2339,8 @@ export const orderRouter = router({
           const [article] = await db.select().from(articles).where(eq(articles.id, item.articleId)).limit(1);
           if (article) {
             const newStock = article.stock + item.quantity;
-            await db.update(articles).set({ stock: newStock }).where(eq(articles.id, item.articleId));
+            await applyStockMovement(db,{articleId:article.id,sku:article.sku,expectedStock:article.stock,change:item.quantity,type:'retoure',reason:`Bestellung ${input.orderId} gelöscht`,orderId:input.orderId,actor:ctx.user?.name||'Admin'});
 
-            // Log stock restoration
-            await db.insert(stockHistory).values({
-              articleId: item.articleId,
-              changeType: "retoure",
-              quantityBefore: article.stock,
-              quantityChange: item.quantity,
-              quantityAfter: newStock,
-              reason: `Bestellung ${input.orderId} gel\u00f6scht`,
-              orderId: input.orderId,
-              userName: ctx.user?.name || "Admin",
-            });
           }
         }
       }
@@ -2391,6 +2354,7 @@ export const orderRouter = router({
       console.log(`[Orders] Deleted order ${input.orderId} with stock restoration`);
 
       return { success: true, restoredItems: items.length };
+      });
     }),
 
   // ADMIN: Add internal note
