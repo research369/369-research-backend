@@ -13,6 +13,6 @@ export async function diagnosePartner(body: unknown) {
         if (!p)
             throw Error('partner_not_found');
         const program = await getPartnerProgram(p.id);
-        return { partner: { id: p.id, name: p.name, partnerNumber: p.partnerNumber, active: p.isActive === 1 }, program, ownDiscount: program ? calculateSelfOrderDiscountPercent(program, Number(p.customerDiscountPercent), Number(p.commissionPercent)) : null, credit: { balance: Number(p.creditBalance), redeemable: p.isActive === 1 && !!program && canRedeemShopCredit(program) }, observedAt: new Date().toISOString() };
+        return { partner: { id: p.id, name: p.name, partnerNumber: p.partnerNumber, active: p.isActive === 1 }, program, ownDiscount: program?.active ? calculateSelfOrderDiscountPercent(program, Number(p.customerDiscountPercent), Number(p.commissionPercent)) : null, credit: { balance: Number(p.creditBalance), redeemable: p.isActive === 1 && !!program?.active && canRedeemShopCredit(program) }, observedAt: new Date().toISOString() };
     });
 }

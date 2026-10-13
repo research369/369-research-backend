@@ -7,8 +7,10 @@ import { validateProductData } from './productValidation.js';
 const text = z.string().max(10000);
 const url = z.union([z.literal(''), z.string().url().startsWith('https://').max(2000)]);
 export const productDraftSchema = z.object({ articleId: z.number().int().positive().nullable().default(null), name: z.string().max(200), sku: z.string().max(50), shopProductId: z.string().max(100), category: z.string().max(100), categories: z.array(z.string().max(100)).max(20).default([]), shortDescription: text, description: z.record(z.unknown()), mockupImageUrl: url, labelImageUrl: url.default(''), casNumber: z.string().max(50).default(''), purity: z.string().max(20).default(''), variants: z.array(z.object({ articleId: z.number().int().positive().nullable().default(null), sku: z.string().min(1).max(50), dosage: z.string().min(1).max(100), price: z.number().min(0).max(99999999), salePrice: z.number().min(0).max(99999999).nullable().default(null) }).strict()).max(40), seo: z.object({ slug: z.string().max(200), seoTitle: z.string().max(70), seoDescription: z.string().max(160), canonical: z.string().max(2000) }).strict(), merchant: z.object({ brand: z.string().max(100), googleProductCategory: z.string().max(10), productType: z.string().max(200), availability: z.enum(['in_stock', 'out_of_stock', 'preorder']) }).strict(), translations: z.array(z.object({ lang: z.enum(['de', 'en']), name: z.string().max(200), merchantTitle: z.string().max(150), merchantDescription: text }).strict()).max(2), faqs: z.array(z.object({ lang: z.enum(['de', 'en']), question: z.string().max(2000), answer: text, isVisible: z.number().int().min(0).max(1).default(1) }).strict()).max(30), useCases: z.array(z.number().int().positive()).max(30) }).strict();
-function edit(a: OpsActor) { if (!['operator', 'admin'].includes(a.role))
-    throw Error('role_denied'); }
+function edit(a: OpsActor) {
+    if (!['operator', 'admin'].includes(a.role))
+        throw Error('role_denied');
+}
 async function snapshot(c: PoolClient, p: z.infer<typeof productDraftSchema>) {
     const family = (await c.query('SELECT * FROM articles WHERE shop_product_id=$1 ORDER BY id FOR UPDATE', [p.shopProductId])).rows;
     if (p.articleId) {
@@ -56,49 +58,59 @@ export function validateDraft(p: z.infer<typeof productDraftSchema>) {
         issues.push('FAQ-Frage und Antwort dürfen nicht leer sein.');
     return { ...base, issues, warnings, score: issues.length || warnings.length ? Math.min(99, base.score) : 100, isValid: issues.length === 0 && warnings.length === 0 };
 }
-export async function draftSave(pool: Pool, a: OpsActor, body: unknown) { edit(a); const i = z.object({ id: z.string().uuid().optional(), revision: z.number().int().positive().optional(), payload: productDraftSchema }).strict().parse(body); const c = await pool.connect(); try {
-    await c.query('BEGIN');
-    let record;
-    if (i.id) {
-        record = (await c.query("UPDATE ops_console_drafts SET payload=$3,revision=revision+1,updated_at=now(),status='draft' WHERE id=$1 AND (actor_id=$2 OR $5::bool) AND revision=$4 AND status<>'published' RETURNING *", [i.id, a.id, i.payload, i.revision,a.role==='admin'])).rows[0];
-        if (!record)
-            throw Error('draft_conflict');
+export async function draftSave(pool: Pool, a: OpsActor, body: unknown) {
+    edit(a);
+    const i = z.object({ id: z.string().uuid().optional(), revision: z.number().int().positive().optional(), payload: productDraftSchema }).strict().parse(body);
+    const c = await pool.connect();
+    try {
+        await c.query('BEGIN');
+        let record;
+        if (i.id) {
+            record = (await c.query("UPDATE ops_console_drafts SET payload=$3,revision=revision+1,updated_at=now(),status='draft' WHERE id=$1 AND (actor_id=$2 OR $5::bool) AND revision=$4 AND status<>'published' RETURNING *", [i.id, a.id, i.payload, i.revision, a.role === 'admin'])).rows[0];
+            if (!record)
+                throw Error('draft_conflict');
+        }
+        else
+            record = (await c.query('INSERT INTO ops_console_drafts(id,actor_id,payload) VALUES($1,$2,$3) RETURNING *', [randomUUID(), a.id, i.payload])).rows[0];
+        await c.query("INSERT INTO ops_console_events(actor_id,event_type,data) VALUES($1,'draft.saved',$2)", [a.id, { id: record.id, revision: record.revision }]);
+        await c.query('COMMIT');
+        return { draft: record, validation: validateDraft(i.payload) };
     }
-    else
-        record = (await c.query('INSERT INTO ops_console_drafts(id,actor_id,payload) VALUES($1,$2,$3) RETURNING *', [randomUUID(), a.id, i.payload])).rows[0];
-    await c.query("INSERT INTO ops_console_events(actor_id,event_type,data) VALUES($1,'draft.saved',$2)", [a.id, { id: record.id, revision: record.revision }]);
-    await c.query('COMMIT');
-    return { draft: record, validation: validateDraft(i.payload) };
+    catch (e) {
+        await c.query('ROLLBACK').catch(() => { });
+        throw e;
+    }
+    finally {
+        c.release();
+    }
 }
-catch (e) {
-    await c.query('ROLLBACK').catch(() => { });
-    throw e;
+export async function draftList(pool: Pool, a: OpsActor) { return { drafts: (await pool.query('SELECT id,revision,status,payload,updated_at FROM ops_console_drafts WHERE actor_id=$1 OR $2::bool ORDER BY updated_at DESC LIMIT 100', [a.id, a.role === 'admin'])).rows }; }
+export async function draftPreview(pool: Pool, a: OpsActor, body: unknown) {
+    edit(a);
+    const { id, revision } = z.object({ id: z.string().uuid(), revision: z.number().int().positive() }).strict().parse(body);
+    const c = await pool.connect();
+    try {
+        await c.query('BEGIN');
+        const d = (await c.query('SELECT * FROM ops_console_drafts WHERE id=$1 AND (actor_id=$2 OR $4::bool) AND revision=$3 FOR UPDATE', [id, a.id, revision, a.role === 'admin'])).rows[0];
+        if (!d || d.status === 'published')
+            throw Error('draft_conflict');
+        const p = productDraftSchema.parse(d.payload), validation = validateDraft(p);
+        if (!validation.isValid)
+            throw Error('validation_incomplete');
+        const before = await snapshot(c, p);
+        const previewId = randomUUID(), key = randomUUID();
+        await c.query("INSERT INTO ops_console_previews(id,actor_id,operation_type,target_id,target_sku,before_snapshot,planned_mutation,expected_hash,idempotency_key,expires_at) VALUES($1,$2,'product_publish',$3,$4,$5,$6,$7,$8,now()+interval '5 minutes')", [previewId, a.id, p.articleId ?? 0, p.sku, before, { draftId: id, revision, payload: p }, orderHash(before), key]);
+        await c.query('COMMIT');
+        return { previewId, idempotencyKey: key, sku: p.sku, validation, expiresAt: new Date(Date.now() + 300000).toISOString(), existing: !!p.articleId };
+    }
+    catch (e) {
+        await c.query('ROLLBACK').catch(() => { });
+        throw e;
+    }
+    finally {
+        c.release();
+    }
 }
-finally {
-    c.release();
-} }
-export async function draftList(pool: Pool, a: OpsActor) { return { drafts: (await pool.query('SELECT id,revision,status,payload,updated_at FROM ops_console_drafts WHERE actor_id=$1 OR $2::bool ORDER BY updated_at DESC LIMIT 100', [a.id,a.role==='admin'])).rows }; }
-export async function draftPreview(pool: Pool, a: OpsActor, body: unknown) { edit(a); const { id, revision } = z.object({ id: z.string().uuid(), revision: z.number().int().positive() }).strict().parse(body); const c = await pool.connect(); try {
-    await c.query('BEGIN');
-    const d = (await c.query('SELECT * FROM ops_console_drafts WHERE id=$1 AND (actor_id=$2 OR $4::bool) AND revision=$3 FOR UPDATE', [id, a.id, revision,a.role==='admin'])).rows[0];
-    if (!d || d.status === 'published')
-        throw Error('draft_conflict');
-    const p = productDraftSchema.parse(d.payload), validation = validateDraft(p);
-    if (!validation.isValid)
-        throw Error('validation_incomplete');
-    const before = await snapshot(c, p);
-    const previewId = randomUUID(), key = randomUUID();
-    await c.query("INSERT INTO ops_console_previews(id,actor_id,operation_type,target_id,target_sku,before_snapshot,planned_mutation,expected_hash,idempotency_key,expires_at) VALUES($1,$2,'product_publish',$3,$4,$5,$6,$7,$8,now()+interval '5 minutes')", [previewId, a.id, p.articleId ?? 0, p.sku, before, { draftId: id, revision, payload: p }, orderHash(before), key]);
-    await c.query('COMMIT');
-    return { previewId, idempotencyKey: key, sku: p.sku, validation, expiresAt: new Date(Date.now() + 300000).toISOString(), existing: !!p.articleId };
-}
-catch (e) {
-    await c.query('ROLLBACK').catch(() => { });
-    throw e;
-}
-finally {
-    c.release();
-} }
 export async function draftPublish(pool: Pool, a: OpsActor, body: unknown) {
     if (a.role !== 'admin')
         throw Error('role_denied');
@@ -235,3 +247,4 @@ export async function draftTemplate(pool: Pool, body: unknown) {
         c.release();
     }
 }
+export async function draftOptions(pool: Pool) { return { useCases: (await pool.query("SELECT DISTINCT ON (u.id) u.id,coalesce(t.name,u.slug) AS name FROM use_cases u LEFT JOIN use_case_translations t ON t.use_case_id=u.id AND t.lang='de' ORDER BY u.id,t.id LIMIT 1000")).rows }; }

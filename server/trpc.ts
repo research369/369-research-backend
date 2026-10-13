@@ -4,7 +4,7 @@ import type { Request, Response } from "express";
 
 export interface Context {
   /** Internal diagnostic principal only. Never accepted in a public request. */
-  operationsPreview?: {partnerId?:number};
+  operationsPreview?: {partnerId?:number;kwkCreditAccountId?:number};
   jarvyOrder?: import('./jarvyOrderContract.js').JarvyOrderContext;
   req: Request;
   res: Response;

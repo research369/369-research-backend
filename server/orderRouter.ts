@@ -4,6 +4,7 @@
  * Protected (admin): list, updateStatus, matchPayments, etc.
  */
 
+import {assertKwkNewCustomer,assertKwkCreditAvailable} from './kwkCheckoutEligibility.js';
 import { z } from "zod";
 import {applyStockMovement} from "./stockMovementService.js";
 import {orderHash} from "./jarvyOrderContract.js";
@@ -377,7 +378,7 @@ export const orderRouter = router({
           throw new Error("PARTNER_SELBSTBESTELLUNG_ADRESS_MISMATCH");
         }
         authenticatedSelfOrderProgram = await getPartnerProgram(authenticatedPartner.id);
-        if (!authenticatedSelfOrderProgram) throw new Error("PARTNER_PROGRAMM_NICHT_VERFUEGBAR");
+        if (!authenticatedSelfOrderProgram?.active) throw new Error("PARTNER_PROGRAMM_NICHT_VERFUEGBAR");
         selfOrderDiscountPercent = calculateSelfOrderDiscountPercent(
           authenticatedSelfOrderProgram,
           Number(authenticatedPartner.customerDiscountPercent || 0),
@@ -567,7 +568,7 @@ export const orderRouter = router({
           throw new Error("KWK_NEUKUNDENRABATT_UND_GUTHABEN_NICHT_KOMBINIERBAR");
         }
         if (requestedKwkCredit > 0) {
-          const authenticatedKwk = input.kwkCreditToken ? verifyKwkToken(input.kwkCreditToken) : null;
+          const authenticatedKwk = ctx.operationsPreview?.kwkCreditAccountId?{kwkId:ctx.operationsPreview.kwkCreditAccountId}:input.kwkCreditToken ? verifyKwkToken(input.kwkCreditToken) : null;
           if (!authenticatedKwk) {
             throw new Error("KWK_GUTHABEN_AUTHENTIFIZIERUNG_ERFORDERLICH");
           }
@@ -789,6 +790,9 @@ export const orderRouter = router({
       // Deutsche Adressplausibilität wird serverseitig erneut geprüft. Das Frontend
       // zeigt denselben Befund vorher an; diese Prüfung verhindert ein Umgehen per Request.
       if(ctx.operationsPreview){
+        if(await findActiveCheckoutBlock(input.customer))throw Error(CUSTOMER_ORDER_BLOCKED_CODE);
+        if(kwkReferralAccount)await assertKwkNewCustomer(db,input.customer);
+        if((input.kwkCreditUsed||0)>0&&kwkCreditAccountId)await assertKwkCreditAvailable(db,kwkCreditAccountId,input.kwkCreditUsed||0);
         if(authenticatedPartner&&(input.creditUsed||0)>0){
           if(!authenticatedSelfOrderProgram||!canRedeemShopCredit(authenticatedSelfOrderProgram))throw Error('PARTNER_GUTHABEN_PROGRAMM_AUSGESCHLOSSEN');
           if(Number(authenticatedPartner.creditBalance||0)+0.001<(input.creditUsed||0))throw Error('PARTNER_GUTHABEN_NICHT_AUSREICHEND');
@@ -1090,24 +1094,7 @@ export const orderRouter = router({
       // geprüft und reserviert. So kann kein rabattierter Auftrag ohne Gegenbuchung
       // entstehen und die vom Browser gesendete Account-ID wird nicht vertraut.
       if (authoritativeKwkCredit > 0 && kwkCreditAccountId) {
-        const lockedAccount = await db.execute(sql`
-          SELECT id FROM kwk_accounts
-          WHERE id=${kwkCreditAccountId} AND status='aktiv' AND deleted_at IS NULL
-          FOR UPDATE
-        `);
-        if (lockedAccount.rows.length !== 1) {
-          throw new Error("KWK_GUTHABEN_ACCOUNT_NICHT_AKTIV");
-        }
-        const balanceResult = await db.execute(sql`
-          SELECT COALESCE(SUM(CASE
-            WHEN type IN ('credit_released','redeemed','cancelled','refund','manual_correction')
-             AND status='confirmed' THEN amount ELSE 0 END), 0) AS available
-          FROM kwk_ledger WHERE kwk_id=${kwkCreditAccountId}
-        `);
-        const available = Number(balanceResult.rows[0]?.available || 0);
-        if (available + 0.001 < authoritativeKwkCredit) {
-          throw new Error(`KWK_GUTHABEN_NICHT_AUSREICHEND: Verfügbar ${available.toFixed(2)} €`);
-        }
+        await assertKwkCreditAvailable(db,kwkCreditAccountId,authoritativeKwkCredit,true);
       }
 
       // KWK gilt ausschließlich für die erste Bestellung eines echten Neukunden.
@@ -1126,33 +1113,7 @@ export const orderRouter = router({
           await db.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`kwk-new-customer-phone:${normalizedPhone}`}))`);
         }
 
-        const previousOrderConditions = [];
-        if (normalizedEmail) {
-          previousOrderConditions.push(sql`LOWER(TRIM(${orders.email})) = ${normalizedEmail}`);
-        }
-        if (normalizedPhone) {
-          previousOrderConditions.push(sql`
-            CASE
-              WHEN regexp_replace(${orders.phone}, '[^0-9]', '', 'g') LIKE '0049%'
-                THEN '49' || regexp_replace(SUBSTRING(regexp_replace(${orders.phone}, '[^0-9]', '', 'g') FROM 5), '^0+', '')
-              WHEN regexp_replace(${orders.phone}, '[^0-9]', '', 'g') LIKE '490%'
-                THEN '49' || SUBSTRING(regexp_replace(${orders.phone}, '[^0-9]', '', 'g') FROM 4)
-              WHEN regexp_replace(${orders.phone}, '[^0-9]', '', 'g') LIKE '49%'
-                THEN regexp_replace(${orders.phone}, '[^0-9]', '', 'g')
-              WHEN regexp_replace(${orders.phone}, '[^0-9]', '', 'g') LIKE '0%'
-                THEN '49' || regexp_replace(regexp_replace(${orders.phone}, '[^0-9]', '', 'g'), '^0+', '')
-              ELSE regexp_replace(${orders.phone}, '[^0-9]', '', 'g')
-            END = ${normalizedPhone}
-          `);
-        }
-        const previousOrders = previousOrderConditions.length > 0
-          ? await db.select({ id: orders.id }).from(orders)
-            .where(or(...previousOrderConditions))
-            .limit(1)
-          : [];
-        if (previousOrders.length > 0) {
-          throw new Error("KWK_NUR_NEUKUNDEN: Der 10%-Empfehlungsrabatt gilt ausschließlich für die erste Bestellung.");
-        }
+        await assertKwkNewCustomer(db,input.customer);
       }
 
             // ── Stock check: verify all peptide items are in stock before creating order ──

@@ -2,7 +2,7 @@ import { simulateCheckout } from './operationsSimulation.js';
 import { searchOperations } from './operationsSearch.js';
 import { diagnosePartner } from './operationsPartner.js';
 import { promotionCurrent, promotionPreview, promotionExecute } from './operationsPromotion.js';
-import { draftSave, draftList, draftPreview, draftPublish, draftTemplate } from './operationsDraft.js';
+import { draftSave, draftList, draftPreview, draftPublish, draftTemplate, draftOptions } from './operationsDraft.js';
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
@@ -23,54 +23,66 @@ operationsRouter.use((req, res, next) => {
 });
 operationsRouter.use(rateLimit({ windowMs: 60000, limit: 90, keyGenerator: (_req, res) => res.locals.opsActor.id, standardHeaders: true, legacyHeaders: false }));
 operationsRouter.post('/capabilities', (_req, res) => res.json({ inventory: true, history: true, stock: process.env.OPS_STOCK_ENABLED === 'true' && ['operator', 'admin'].includes(res.locals.opsActor.role), simulation: true, productPublish: process.env.OPS_PRODUCT_PUBLISH_ENABLED === 'true' && res.locals.opsActor.role === 'admin', promotion: process.env.OPS_PROMOTION_ENABLED === 'true' && res.locals.opsActor.role === 'admin' }));
-operationsRouter.post('/simulate', async (req, res) => { try {
-    res.json(await simulateCheckout(req.body, req, res));
-}
-catch (e) {
-    res.status(e instanceof z.ZodError ? 400 : 409).json({ code: e instanceof z.ZodError ? 'invalid_input' : 'simulation_rejected', message: e instanceof Error ? e.message : 'Simulation nicht verfügbar' });
-} });
-operationsRouter.post('/partner', async (req, res) => { try {
-    res.json(await diagnosePartner(req.body));
-}
-catch {
-    res.status(409).json({ code: 'partner_diagnosis_unavailable' });
-} });
-operationsRouter.post('/search', async (req, res) => { try {
-    res.json(await searchOperations(req.body));
-}
-catch (e) {
-    res.status(e instanceof z.ZodError ? 400 : 503).json({ code: 'search_unavailable' });
-} });
+operationsRouter.post('/simulate', async (req, res) => {
+    try {
+        res.json(await simulateCheckout(req.body, req, res));
+    }
+    catch (e) {
+        res.status(e instanceof z.ZodError ? 400 : 409).json({ code: e instanceof z.ZodError ? 'invalid_input' : 'simulation_rejected', message: e instanceof Error ? e.message : 'Simulation nicht verfügbar' });
+    }
+});
+operationsRouter.post('/partner', async (req, res) => {
+    try {
+        res.json(await diagnosePartner(req.body));
+    }
+    catch {
+        res.status(409).json({ code: 'partner_diagnosis_unavailable' });
+    }
+});
+operationsRouter.post('/search', async (req, res) => {
+    try {
+        res.json(await searchOperations(req.body));
+    }
+    catch (e) {
+        res.status(e instanceof z.ZodError ? 400 : 503).json({ code: 'search_unavailable' });
+    }
+});
 for (const [action, handler] of [['current', promotionCurrent], ['preview', promotionPreview], ['execute', promotionExecute]] as const)
-    operationsRouter.post('/promotion/' + action, async (req, res) => { try {
+    operationsRouter.post('/promotion/' + action, async (req, res) => {
+        try {
+            const pool = await getPool();
+            if (!pool)
+                throw Error('unavailable');
+            res.json(await (action === 'current' ? promotionCurrent(pool) : handler(pool, res.locals.opsActor, req.body)));
+        }
+        catch (e) {
+            res.status(409).json({ code: e instanceof Error ? e.message : 'promotion_unavailable' });
+        }
+    });
+for (const action of ['list', 'options', 'template', 'save', 'preview', 'publish'])
+    operationsRouter.post('/draft/' + action, async (req, res) => {
+        try {
+            const pool = await getPool();
+            if (!pool)
+                throw Error('unavailable');
+            const actor = res.locals.opsActor;
+            res.json(await (action === 'options' ? draftOptions(pool) : action === 'list' ? draftList(pool, actor) : action === 'template' ? draftTemplate(pool, req.body) : action === 'save' ? draftSave(pool, actor, req.body) : action === 'preview' ? draftPreview(pool, actor, req.body) : draftPublish(pool, actor, req.body)));
+        }
+        catch (e) {
+            res.status(409).json({ code: e instanceof z.ZodError ? 'invalid_input' : e instanceof Error ? e.message : 'draft_unavailable' });
+        }
+    });
+operationsRouter.post('/runs', async (_req, res) => {
+    try {
         const pool = await getPool();
         if (!pool)
             throw Error('unavailable');
-        res.json(await (action === 'current' ? promotionCurrent(pool) : handler(pool, res.locals.opsActor, req.body)));
+        res.json({ runs: (await pool.query('SELECT r.id AS idempotency_key,r.state,r.created_at,r.completed_at,r.result,p.operation_type,p.target_sku FROM ops_console_receipts r JOIN ops_console_previews p ON p.id=r.preview_id WHERE r.actor_id=$1 ORDER BY r.created_at DESC LIMIT 50', [res.locals.opsActor.id])).rows });
     }
-    catch (e) {
-        res.status(409).json({ code: e instanceof Error ? e.message : 'promotion_unavailable' });
-    } });
-for (const action of ['list', 'template', 'save', 'preview', 'publish'])
-    operationsRouter.post('/draft/' + action, async (req, res) => { try {
-        const pool = await getPool();
-        if (!pool)
-            throw Error('unavailable');
-        const actor = res.locals.opsActor;
-        res.json(await (action === 'list' ? draftList(pool, actor) : action === 'template' ? draftTemplate(pool, req.body) : action === 'save' ? draftSave(pool, actor, req.body) : action === 'preview' ? draftPreview(pool, actor, req.body) : draftPublish(pool, actor, req.body)));
+    catch {
+        res.status(503).json({ code: 'runs_unavailable' });
     }
-    catch (e) {
-        res.status(409).json({ code: e instanceof z.ZodError ? 'invalid_input' : e instanceof Error ? e.message : 'draft_unavailable' });
-    } });
-operationsRouter.post('/runs', async (_req, res) => { try {
-    const pool = await getPool();
-    if (!pool)
-        throw Error('unavailable');
-    res.json({ runs: (await pool.query('SELECT r.id AS idempotency_key,r.state,r.created_at,r.completed_at,r.result,p.operation_type,p.target_sku FROM ops_console_receipts r JOIN ops_console_previews p ON p.id=r.preview_id WHERE r.actor_id=$1 ORDER BY r.created_at DESC LIMIT 50', [res.locals.opsActor.id])).rows });
-}
-catch {
-    res.status(503).json({ code: 'runs_unavailable' });
-} });
+});
 operationsRouter.post('/inventory', async (req, res) => {
     let client;
     try {
@@ -122,16 +134,18 @@ operationsRouter.post('/history', async (req, res) => {
     }
 });
 for (const [path, handler] of [['preview', previewStock], ['confirm', confirmStock], ['execute', executeStock], ['status', stockStatus]] as const) {
-    operationsRouter.post('/stock/' + path, async (req, res) => { try {
-        const pool = await getPool();
-        if (!pool)
-            throw Error('unavailable');
-        res.json(await handler(pool, res.locals.opsActor, req.body));
-    }
-    catch (e) {
-        const message = e instanceof Error ? e.message : 'unavailable';
-        const code = e instanceof z.ZodError ? 'invalid_input' : ['role_denied', 'stock_not_enabled', 'identity_mismatch', 'identity_ambiguous', 'preview_not_found', 'preview_stale', 'confirmation_required', 'confirmation_mismatch'].includes(message) ? message : 'operation_conflict';
-        res.status(code === 'role_denied' ? 403 : 409).json({ code });
-    } });
+    operationsRouter.post('/stock/' + path, async (req, res) => {
+        try {
+            const pool = await getPool();
+            if (!pool)
+                throw Error('unavailable');
+            res.json(await handler(pool, res.locals.opsActor, req.body));
+        }
+        catch (e) {
+            const message = e instanceof Error ? e.message : 'unavailable';
+            const code = e instanceof z.ZodError ? 'invalid_input' : ['role_denied', 'stock_not_enabled', 'identity_mismatch', 'identity_ambiguous', 'preview_not_found', 'preview_stale', 'confirmation_required', 'confirmation_mismatch'].includes(message) ? message : 'operation_conflict';
+            res.status(code === 'role_denied' ? 403 : 409).json({ code });
+        }
+    });
 }
 operationsRouter.use((_req, res) => res.status(404).json({ code: 'operation_not_enabled' }));
