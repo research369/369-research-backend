@@ -871,7 +871,7 @@ dhlExpressRouter.post(
         })
         .where(eq(orders.orderId, orderId.trim()));
 
-      console.log(`[dhlRouter] Schweizer Unterlagen gespeichert: ${result.trackingNumber} | 3× 4×6 (Label + CN23-Hälften), Handelsrechnung A4 | Customs: ${customsPrintContent ? 'ja' : 'nein'}`);
+      console.log(`[dhlRouter] Schweizer Unterlagen gespeichert: ${result.trackingNumber} | Label 4×6 hochkant + 2× CN23 quer, Handelsrechnung A4 | Customs: ${customsPrintContent ? 'ja' : 'nein'}`);
 
       res.json({
         success:        true,
