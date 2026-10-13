@@ -41,3 +41,11 @@ test('unauthenticated access, query parameters and writes denied before DB',asyn
   assert.equal((await fetch(url+'?sql=SELECT',{headers})).status,405);
  }finally{await new Promise<void>(r=>server.close(()=>r()));}
 });
+test('discount reader requires the same isolated key and explicit scope activation',async()=>{
+ process.env.GUARDIAN_INVENTORY_READ_KEY='g'.repeat(64);delete process.env.GUARDIAN_DISCOUNT_READ_ENABLED;
+ const app=express();app.use('/api/guardian',guardianInventoryRouter);const server=createServer(app);
+ await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));const url='http://127.0.0.1:'+(server.address() as {port:number}).port+'/api/guardian/discounts';
+ try{assert.equal((await fetch(url)).status,401);const headers={authorization:'Bearer '+'g'.repeat(64)};
+  assert.equal((await fetch(url,{headers})).status,503);assert.equal((await fetch(url,{headers,method:'POST'})).status,405);assert.equal((await fetch(url+'?code=guess',{headers})).status,405);
+ }finally{await new Promise<void>(r=>server.close(()=>r()));}
+});

@@ -1,8 +1,9 @@
-/** Guardian can read article stock only. Separate credential; no customer access. */
+/** Guardian reads fixed stock and discount projections; no customer access. */
 import {Router} from 'express';
 import rateLimit from 'express-rate-limit';
 import {timingSafeEqual} from 'node:crypto';
 import {getPool} from './db.js';
+import {guardianPromoSql,guardianPartnerSql,projectDiscountRules} from './guardianDiscounts.js';
 
 export const guardianInventorySql = `SELECT id, sku, shop_product_id, stock, is_active, shop_visible,
   CASE WHEN jsonb_typeof(variants::jsonb)='array' THEN
@@ -23,7 +24,7 @@ export const guardianInventoryRouter=Router();
 guardianInventoryRouter.use((req,res,next)=>{
   res.set('Cache-Control','no-store');
   if(!guardianKeyValid(req.get('authorization'))){res.status(401).json({error:'unauthorized'});return;}
-  if(req.method!=='GET'||req.path!=='/inventory'||Object.keys(req.query).length){res.status(405).json({error:'inventory_read_only'});return;}
+  if(req.method!=='GET'||!['/inventory','/discounts'].includes(req.path)||Object.keys(req.query).length){res.status(405).json({error:'inventory_read_only'});return;}
   next();
 });
 guardianInventoryRouter.use(rateLimit({windowMs:60000,limit:6,keyGenerator:()=> 'guardian-inventory',standardHeaders:true,legacyHeaders:false}));
@@ -43,4 +44,20 @@ guardianInventoryRouter.get('/inventory',async(_req,res)=>{
     await client?.query('ROLLBACK').catch(()=>{});
     res.status(503).json({error:'inventory_unavailable'});
   }finally{client?.release();}
+});
+
+// Explicit opt-in before expanding the existing inventory credential's read scope.
+guardianInventoryRouter.get('/discounts',async(_req,res)=>{
+ if(process.env.GUARDIAN_DISCOUNT_READ_ENABLED!=='true'){res.status(503).json({error:'discount_read_disabled'});return;}
+ let client;
+ try{
+  const pool=await getPool();if(!pool)throw Error('unavailable');client=await pool.connect();
+  await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+  await client.query("SET LOCAL statement_timeout = '5000ms'");
+  const promos=await client.query(guardianPromoSql),partners=await client.query(guardianPartnerSql);
+  const {rows:[{as_of}]}=await client.query('SELECT transaction_timestamp() AS as_of');
+  const result=projectDiscountRules(promos.rows,partners.rows,new Date(as_of));
+  await client.query('COMMIT');res.json(result);
+ }catch{await client?.query('ROLLBACK').catch(()=>{});res.status(503).json({error:'discount_rules_unavailable'});}
+ finally{client?.release();}
 });
