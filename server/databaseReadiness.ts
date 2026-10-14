@@ -1,5 +1,8 @@
 import { getPool } from "./db.js";
 
+/** Public, non-sensitive provenance for the coordinated-release acceptance. */
+export const softwareReleaseCheck = "joint-publication-v1";
+
 export type DatabaseReadiness = {
   ready: boolean;
 };

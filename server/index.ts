@@ -13,7 +13,7 @@ import { ENV } from "./env.js";
 import { appRouter } from "./routers.js";
 import { getUserFromRequest, handleLogin, handleLogout, handleMe, seedAdminUser } from "./auth.js";
 import { getPool } from "./db.js";
-import { checkDatabaseReadiness } from "./databaseReadiness.js";
+import { checkDatabaseReadiness, softwareReleaseCheck } from "./databaseReadiness.js";
 import type { Context } from "./trpc.js";
 import { startBackupScheduler } from "./backupService.js";
 import { reconcilePaidKwkCredits } from "./kwkCreditReconciliation.js";
@@ -91,6 +91,7 @@ app.get("/health", (_req, res) => {
     uptimeMs: Date.now() - startupStartedAt,
     timestamp: new Date().toISOString(),
     version: "1.2.0-kwk",
+    releaseCheck: softwareReleaseCheck,
     fix: "paid-status-filter",
     peps4petsCheckoutSchema: isPeps4petsCheckoutSchemaReady() ? "ready" : "pending",
   });
