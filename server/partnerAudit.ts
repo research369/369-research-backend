@@ -20,6 +20,9 @@ export type AuditFinding = {
   code?: string;
   orderId?: string;
   message: string;
+  orderStatus?: string;
+  paymentConfirmed?: boolean;
+  historicalRuleKnown?: boolean;
   expected?: number;
   booked?: number;
 };
@@ -30,6 +33,9 @@ export function auditCommissionRow(
 ): {
   kind: string;
   severity?: "error" | "review";
+  orderStatus?: string;
+  paymentConfirmed?: boolean;
+  historicalRuleKnown?: boolean;
   expected?: number;
   booked?: number;
 } {
@@ -53,6 +59,8 @@ export function auditCommissionRow(
   if (target.length > 1)
     return { kind: "duplicate", severity: "error", ...base };
   const paid = !!row.paid_at && PAID_ORDER_STATUSES.has(row.status);
+  if (!paid && target.length && !row.policy)
+    return { kind: "legacy_unknown", severity: "review", ...base };
   if (!paid)
     return target.length
       ? { kind: "unexpected_booking", severity: "error", ...base }
@@ -224,6 +232,10 @@ export async function runPartnerAudit(req: Request, res: Response) {
         {
           orderId: row.order_id,
           code: row.partner_code,
+          orderStatus: row.status,
+          paymentConfirmed:
+            !!row.paid_at && PAID_ORDER_STATUSES.has(row.status),
+          historicalRuleKnown: !!row.policy,
           expected: result.expected,
           booked: result.booked,
         },

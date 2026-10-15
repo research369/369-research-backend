@@ -118,3 +118,20 @@ test("payment grace, inactive payments, reversals and historical uncertainty nev
     "unattributed_order",
   );
 });
+
+test("legacy shipped orders without payment timestamp or saved rule remain uncertain, not proven financial errors", () => {
+  const legacy = {
+    ...row,
+    status: "versendet",
+    paid_at: null,
+    policy: null,
+    entries: [{ partnerId: 7, amount: 18 }],
+  };
+  assert.equal(auditCommissionRow(legacy, now).kind, "legacy_unknown");
+  assert.equal(auditCommissionRow(legacy, now).severity, "review");
+  assert.equal(
+    auditCommissionRow({ ...legacy, policy: "each_paid_code_order" }, now)
+      .severity,
+    "error",
+  );
+});
