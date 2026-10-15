@@ -9,7 +9,7 @@ export async function hasOtherPaidCodeOrder(
     `SELECT order_id FROM orders
  WHERE upper(coalesce(partner_code, '')) = upper($1) AND lower(email) = lower($2)
  AND ($3::text IS NULL OR order_id <> $3)
- AND status IN ('bezahlt', 'gepackt', 'versendet', 'zugestellt', 'abgeholt') AND paid_at IS NOT NULL LIMIT 1`,
+ AND status::text IN ('bezahlt', 'gepackt', 'versendet', 'zugestellt', 'abgeholt') AND paid_at IS NOT NULL LIMIT 1`,
     [code, email, excludeOrderId],
   );
   return result.rows.length > 0;
