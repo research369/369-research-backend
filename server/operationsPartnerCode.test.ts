@@ -1,3 +1,4 @@
+import { runPartnerAudit } from "./partnerAudit.js";
 import { isolatedOperationsDatabase } from "./operationsTestDatabase.js";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -192,6 +193,53 @@ test(
       assert.equal(
         (await bookPaidPartnerCommission(second)).reason,
         "one_time_already_paid",
+      );
+      // The oldest missing booking must remain visible beyond the old 20-order slice.
+      await pool.query(
+        "UPDATE orders SET partner_commission_policy_snapshot='each_paid_code_order',paid_at=now()-interval '1 day' WHERE order_id=$1",
+        [second],
+      );
+      for (let n = 0; n < 21; n++)
+        await insertOrder("AU-" + tag + "-" + n, "offen", false);
+      const beforeAudit = await snapshot();
+      const audit = await runPartnerAudit({} as any, {} as any);
+      assert.equal(audit.sideEffects, false);
+      assert(audit.counts.partners >= 1);
+      assert(
+        audit.findings.some(
+          (f) => f.orderId === second && f.kind === "missing",
+        ),
+      );
+      assert(
+        audit.cases.some(
+          (c) => c.partnerId === partner && c.status === "passed",
+        ),
+      );
+      assert(!JSON.stringify(audit).includes(email));
+      await pool.query(
+        "UPDATE partner_codes SET code_normalized=code_normalized||'-BROKEN' WHERE id=$1",
+        [codes[1].id],
+      );
+      const brokenAudit = await runPartnerAudit({} as any, {} as any);
+      assert(
+        brokenAudit.findings.some(
+          (f) =>
+            f.partnerId === partner &&
+            f.code === codes[1].display_code &&
+            f.kind === "checkout_failed",
+        ),
+      );
+      await pool.query(
+        "UPDATE partner_codes SET code_normalized=upper(display_code) WHERE id=$1",
+        [codes[1].id],
+      );
+      assert.deepEqual(await snapshot(), beforeAudit);
+      await pool.query("DELETE FROM orders WHERE order_id=ANY($1::text[])", [
+        Array.from({ length: 21 }, (_, n) => "AU-" + tag + "-" + n),
+      ]);
+      await pool.query(
+        "UPDATE orders SET partner_commission_policy_snapshot='first_paid_code_order',paid_at=now() WHERE order_id=$1",
+        [second],
       );
       const afterBooking = await snapshot();
       const diag = await diagnosePartner({ partnerId: partner });
