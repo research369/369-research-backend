@@ -191,7 +191,7 @@ export async function runPartnerAudit(req: Request, res: Response) {
     severity: "error" | "review" = "error",
   ) => {
     const p = partnerId ? byId.get(partnerId) : undefined;
-    const {key: discriminator,...details}=extra;
+    const { key: discriminator, ...details } = extra;
     findings.push({
       key: [
         kind,
@@ -241,7 +241,7 @@ export async function runPartnerAudit(req: Request, res: Response) {
       {
         orderId: row.order_id ?? "Buchung " + row.id,
         booked: Number(row.amount),
-        key:String(row.id),
+        key: String(row.id),
       },
       "review",
     );
@@ -401,10 +401,14 @@ export async function runPartnerAudit(req: Request, res: Response) {
           add(
             functional ? "checkout_failed" : "checkout_unavailable",
             p.id,
-            "Checkout-Prüfung für „" +
-              probe.label +
-              "“ fehlgeschlagen; Code und individuelle Regel prüfen.",
-            { code: code.code, key: code.id+':'+probe.label },
+            functional
+              ? "Checkout-Prüfung für „" +
+                  probe.label +
+                  "“ fehlgeschlagen; Code und individuelle Regel prüfen."
+              : "Prüffall „" +
+                  probe.label +
+                  "“ nicht ausführbar; Datenquelle oder Kundenvoraussetzungen prüfen.",
+            { code: code.code, key: code.id + ":" + probe.label },
             functional ? "error" : "review",
           );
           cases.push({
