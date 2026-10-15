@@ -1,3 +1,4 @@
+import {runPartnerAudit} from "./partnerAudit.js";
 import {operationsDetail} from './operationsDetails.js';
 import { simulateCheckout } from './operationsSimulation.js';
 import { searchOperations } from './operationsSearch.js';
@@ -32,6 +33,7 @@ operationsRouter.post('/simulate', async (req, res) => {
         res.status(e instanceof z.ZodError ? 400 : 409).json({ code: e instanceof z.ZodError ? 'invalid_input' : 'simulation_rejected', message: e instanceof Error ? e.message : 'Simulation nicht verfügbar' });
     }
 });
+operationsRouter.post('/partner-audit', async(req,res)=>{try{z.object({}).strict().parse(req.body);res.json(await runPartnerAudit(req,res));}catch{res.status(503).json({code:'partner_audit_unavailable'});}});
 operationsRouter.post('/partner', async (req, res) => {
     try {
         res.json(await diagnosePartner(req.body));
