@@ -1,3 +1,4 @@
+import { hasOtherPaidCodeOrder } from "./partnerCodeHistory.js";
 /**
  * Partner Router – tRPC routes for partner/affiliate management
  * 
@@ -879,19 +880,11 @@ export const partnerRouter = router({
       // program retains its existing first-paid-code-order policy.
       if (input.customerEmail && discountEligible && !isRepeatCodeUseAllowed(resolved.program)) {
         const customerEmail = input.customerEmail.toLowerCase().trim();
-        // Legacy records are matched by the normalized actual code, not a comma list.
-        const previousOrders = await db.select().from(orders)
-          .where(and(
-            eq(orders.partnerCode, resolved.partnerCode),
-            eq(orders.email, customerEmail)
-          ));
-        const previousPaidOrders = previousOrders.filter(o =>
-          o.status === "bezahlt" || o.status === "gepackt" || o.status === "versendet" || o.status === "zugestellt"
-        );
-        if (previousPaidOrders.length > 0) {
+        const pool = await getPool();
+        if (!pool) throw new Error("Database not available");
+        if (await hasOtherPaidCodeOrder((text, values) => pool.query(text, values), resolved.partnerCode, customerEmail)) {
           discountEligible = false;
           reason = "already_used";
-          console.log(`[Partners] validateCode: Customer ${customerEmail} already has ${previousPaidOrders.length} paid orders with code ${resolved.partnerCode} – discount not eligible`);
         }
       }
 

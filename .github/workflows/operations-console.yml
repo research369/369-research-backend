@@ -35,7 +35,7 @@ jobs:
           psql -h 127.0.0.1 -p 55446 -U postgres -d ops_rehearsal -v ON_ERROR_STOP=1 -c 'CREATE TABLE substitution_config(id integer PRIMARY KEY, enabled boolean DEFAULT false, updated_at timestamp DEFAULT now())'
           psql -h 127.0.0.1 -p 55446 -U postgres -d ops_rehearsal -v ON_ERROR_STOP=1 -f drizzle/migrations/0026_operations_console.sql
           psql -h 127.0.0.1 -p 55446 -U postgres -d ops_rehearsal -v ON_ERROR_STOP=1 -f drizzle/migrations/0027_operations_drafts.sql
-      - run: npx tsx --test --test-concurrency=1 server/operationsStock.test.ts server/operationsPromotion.test.ts server/operationsDraft.test.ts server/operationsSimulation.test.ts server/operationsDetails.test.ts
+      - run: npx tsx --test --test-concurrency=1 server/operationsStock.test.ts server/operationsPromotion.test.ts server/operationsDraft.test.ts server/operationsSimulation.test.ts server/operationsDetails.test.ts server/operationsPartnerCode.test.ts
         env:
           OPS_ISOLATED_REHEARSAL: 'true'
           DATABASE_URL: postgresql://postgres@127.0.0.1:55446/ops_rehearsal

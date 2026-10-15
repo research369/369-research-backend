@@ -8,6 +8,8 @@ import { eq } from "drizzle-orm";
 import { articles, partners, customers } from "../drizzle/schema.js";
 import { getDb, getPool, withReadOnlyDatabase } from "./db.js";
 import { getPublicShopVariants } from "./articleRouter.js";
+import { partnerRouter } from "./partnerRouter.js";
+import { resolveActivePartnerCode } from "./partnerProgramService.js";
 import { orderRouter } from "./orderRouter.js";
 import {
   extractDosageMg,
@@ -35,6 +37,7 @@ export const simulationSchema = z
     country: z.string().min(2).max(100),
     discountCode: z.string().max(80).optional(),
     partnerCode: z.string().max(80).optional(),
+    publicPartnerId: z.number().int().positive().optional(),
     partnerId: z.number().int().positive().optional(),
     creditUsed: z.number().min(0).max(100000).default(0),
     customerId: z.number().int().positive().optional(),
@@ -58,6 +61,48 @@ export async function simulateCheckout(
   return withReadOnlyDatabase(async () => {
     const db = await getDb();
     if (!db) throw Error("unavailable");
+    if (i.publicPartnerId) {
+      if (
+        !i.partnerCode ||
+        i.partnerId ||
+        i.creditUsed ||
+        i.kwkCode ||
+        i.kwkCreditUsed
+      )
+        throw Error(
+          "Fremdkunden-Codeprüfung und Eigenbestellung sind getrennte Fälle.",
+        );
+      const terms = await resolveActivePartnerCode(i.partnerCode);
+      if (!terms || terms.partnerId !== i.publicPartnerId)
+        throw Error(
+          "Der Code ist nicht aktiv oder gehört nicht zum ausgewählten Partner.",
+        );
+      let email = i.contact?.email;
+      if (i.customerId) {
+        const [customer] = await db
+          .select()
+          .from(customers)
+          .where(eq(customers.id, i.customerId))
+          .limit(1);
+        email = customer?.email || undefined;
+      }
+      if (
+        email &&
+        terms.partnerEmail &&
+        email.trim().toLowerCase() === terms.partnerEmail.trim().toLowerCase()
+      )
+        throw Error(
+          "Für die Fremdkundenprüfung einen anderen Kunden auswählen. Eigenbestellungen separat prüfen.",
+        );
+      if (
+        !email &&
+        (terms.program.customerDiscountPolicy !== "each_valid_code_use" ||
+          terms.program.commissionPolicy === "first_paid_code_order")
+      )
+        throw Error(
+          "Für diese individuelle Erstnutzungs-/Kundenregel bitte einen Kunden oder seine E-Mail angeben.",
+        );
+    }
     const inventory = await db.select().from(articles);
     const mutable = inventory
       .filter((a) => a.isActive === 1)
@@ -245,8 +290,31 @@ export async function simulateCheckout(
         paymentMethod: "SEPA",
         date: new Date().toISOString(),
       });
+    const preview = (result as any).operationsPreview;
+    let checkoutCodeValidation;
+    if (i.publicPartnerId) {
+      const validation = await partnerRouter
+        .createCaller({ req, res, user: null })
+        .validateCode({
+          code: i.partnerCode!,
+          customerEmail: customer.email || undefined,
+        });
+      checkoutCodeValidation = {
+        ...validation,
+        consistent:
+          validation.valid &&
+          validation.codeId === preview.partnerCustomerCheck?.codeId &&
+          validation.discountEligible ===
+            preview.partnerCustomerCheck?.customerDiscountEligible &&
+          validation.discountPercent ===
+            (validation.discountEligible
+              ? preview.partnerCustomerCheck?.customerDiscountPercent
+              : 0),
+      };
+    }
     return {
-      ...(result as any).operationsPreview,
+      ...preview,
+      checkoutCodeValidation,
       stockPlan,
       shippingDetails: {
         region: resolveShippingRegion(customer.country),
