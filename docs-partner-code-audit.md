@@ -1,0 +1,9 @@
+# Partner customer-code and commission audit
+
+The authenticated Operations Console can independently audit another customer's use of one selected public partner code. Code ownership is bound to the selected partner; inactive codes, self-order identity and credit/KWK mixing are rejected. Exact per-code rates and program policies are read from the canonical database. A concrete customer/email is mandatory for first-paid rules. It is a read-only operations preview, never an order or a payment.
+
+The preview runs the public checkout code validator and canonical order calculation, reports disagreements, and calculates the commission with the existing ledger amount helpers. Commission is conditional on confirmed payment; no preview can prove a future booking. Existing normal commission ledger entries for the last 20 attributed customer-code orders are compared with stored order amounts and policies, never current rates. Missing, mismatched, duplicate and unconfirmed bookings are identified; legacy missing policy stays unknown. Refund/reversal and payout reconciliation are outside this normal-booking audit.
+
+A shared paid-code-history query removes the old public validator discrepancy: paid_at and all paid fulfillment statuses including abgeholt are required, matching ledger gating. Creator repeat-use and individual code rates remain configured. Historical snapshots are unchanged.
+
+Validation: TypeScript, complete UTC test suite (same timezone as CI), isolated loopback database rehearsal (operationsPartnerCode.test.ts included in CI), existing operations tests, Console security suite and UI walkthrough. The new rehearsal blocks external fetch and verifies preview order/ledger/stock/balance immutability; synthetic paid/unpaid bookings, once-only booking, first-paid exclusion and mismatch reporting use only the disposable ops_rehearsal database. No production business data is changed by acceptance.

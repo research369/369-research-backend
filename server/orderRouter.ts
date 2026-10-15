@@ -1,3 +1,5 @@
+import { publicCodeCommissionPreview } from "./partnerCommissionPreview.js";
+import { hasOtherPaidCodeOrder } from "./partnerCodeHistory.js";
 /**
  * Order Router – tRPC routes for order management (WaWi)
  * Public: createOrder (from checkout)
@@ -292,15 +294,11 @@ export const orderRouter = router({
         );
         const normalizedCustomerEmail = input.customer.email?.trim().toLowerCase() || "";
         if (publicPartnerDiscountEligible && normalizedCustomerEmail && !isRepeatCodeUseAllowed(resolvedPublicPartnerCode.program)) {
-          const previousPaidOrder = await db.select({ orderId: orders.orderId }).from(orders)
-            .where(and(
-              eq(orders.partnerCode, resolvedPublicPartnerCode.partnerCode),
-              eq(orders.email, normalizedCustomerEmail),
-              sql`${orders.status} IN ('bezahlt', 'gepackt', 'versendet', 'zugestellt', 'abgeholt')`,
-              sql`${orders.paidAt} IS NOT NULL`,
-            ))
-            .limit(1);
-          publicPartnerDiscountEligible = previousPaidOrder.length === 0;
+          const pool = await getPool();
+          if (!pool) throw new Error("Database not available");
+          publicPartnerDiscountEligible = !(await hasOtherPaidCodeOrder(
+            (text, values) => pool.query(text, values), resolvedPublicPartnerCode.partnerCode, normalizedCustomerEmail,
+          ));
         }
       }
 
@@ -797,7 +795,22 @@ export const orderRouter = router({
           if(!authenticatedSelfOrderProgram||!canRedeemShopCredit(authenticatedSelfOrderProgram))throw Error('PARTNER_GUTHABEN_PROGRAMM_AUSGESCHLOSSEN');
           if(Number(authenticatedPartner.creditBalance||0)+0.001<(input.creditUsed||0))throw Error('PARTNER_GUTHABEN_NICHT_AUSREICHEND');
         }
-        return {operationsPreview:{subtotal:input.subtotal,shipping:input.shipping,discount:input.discount,total:input.total,discountBreakdown,items:input.items.map(i=>({shopProductId:i.shopProductId,name:i.name,dosage:i.dosage,quantity:i.quantity,price:i.price})),addressChecked:true,addressValidation:await validateGermanAddress(input.customer)}};
+        let partnerCustomerCheck;
+        if (resolvedPublicPartnerCode) {
+          const pool = await getPool();
+          if (!pool) throw new Error("Database not available");
+          const previousPaid = resolvedPublicPartnerCode.program.commissionPolicy === 'first_paid_code_order' && input.customer.email
+            ? await hasOtherPaidCodeOrder((text, values) => pool.query(text, values), resolvedPublicPartnerCode.partnerCode, input.customer.email) : false;
+          partnerCustomerCheck = {
+            ...publicCodeCommissionPreview(resolvedPublicPartnerCode, {
+              subtotal: input.subtotal, discount: input.discount,
+              creditUsed: (input.creditUsed || 0) + (input.kwkCreditUsed || 0), email: input.customer.email || null,
+            }, previousPaid),
+            customerDiscountEligible: publicPartnerDiscountEligible,
+            appliedCustomerDiscount: authoritativePartnerDiscount,
+          };
+        }
+        return {operationsPreview:{partnerCustomerCheck,subtotal:input.subtotal,shipping:input.shipping,discount:input.discount,total:input.total,discountBreakdown,items:input.items.map(i=>({shopProductId:i.shopProductId,name:i.name,dosage:i.dosage,quantity:i.quantity,price:i.price})),addressChecked:true,addressValidation:await validateGermanAddress(input.customer)}};
       }
       const addressValidation = await validateGermanAddress(input.customer);
       const addressWarningNeedsConfirmation = addressValidation.applicable

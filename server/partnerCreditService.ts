@@ -1,3 +1,4 @@
+import { hasOtherPaidCodeOrder } from "./partnerCodeHistory.js";
 import type { PoolClient } from "pg";
 import { getPool } from "./db.js";
 
@@ -281,18 +282,8 @@ export async function bookPaidPartnerCommission(orderId: string): Promise<{
       return { booked: false, amount: 0, balance: existingBalance, reason: "program_without_commission" };
     }
     if (!isOwnOrder && commissionPolicy === "first_paid_code_order") {
-      const previousPaidOrder = await client.query<{ order_id: string }>(
-        `SELECT order_id
-           FROM orders
-          WHERE upper(coalesce(partner_code, '')) = upper($1)
-            AND lower(email) = lower($2)
-            AND order_id <> $3
-            AND status IN ('bezahlt', 'gepackt', 'versendet', 'zugestellt', 'abgeholt')
-            AND paid_at IS NOT NULL
-          LIMIT 1`,
-        [order.partner_code || partner.code, order.email, orderId],
-      );
-      if (previousPaidOrder.rows.length > 0) {
+      const previousPaidOrder = await hasOtherPaidCodeOrder((text,values)=>client.query(text,values),order.partner_code || partner.code,order.email,orderId);
+      if (previousPaidOrder) {
         await client.query("COMMIT");
         client.release();
         return { booked: false, amount: 0, balance: existingBalance, reason: "one_time_already_paid" };
