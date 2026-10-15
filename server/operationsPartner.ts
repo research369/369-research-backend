@@ -54,7 +54,9 @@ export async function diagnosePartner(body: unknown) {
             ? "amount_mismatch"
             : row.policy === "none" && amount > 0
               ? "unexpected_booking"
-              : !row.policy ? "legacy_booking" : "booked";
+              : !row.policy
+                ? "legacy_booking"
+                : "booked";
       else if (!paid) audit = "awaiting_payment";
       else if (!row.policy) audit = "legacy_unknown";
       else if (row.policy === "none" || expected === 0) audit = "no_commission";

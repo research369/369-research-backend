@@ -202,10 +202,24 @@ test(
       assert.equal(evidence.booking_count, 1);
       assert.equal(Number(evidence.booked_amount), 6.38);
       assert.equal(Number(evidence.expected_amount), 6.38);
-    assert.equal(diag.bookingEvidence.find(o=>o.order_id===second)?.audit, 'repeat_excluded');
-    await pool.query("UPDATE partner_transactions SET amount=1 WHERE order_id=$1 AND type='provision'",[orderId]);
-    assert.equal((await diagnosePartner({partnerId:partner})).bookingEvidence.find(o=>o.order_id===orderId)?.audit,'amount_mismatch');
-    await pool.query("UPDATE partner_transactions SET amount=6.38 WHERE order_id=$1 AND type='provision'",[orderId]);
+      assert.equal(
+        diag.bookingEvidence.find((o) => o.order_id === second)?.audit,
+        "repeat_excluded",
+      );
+      await pool.query(
+        "UPDATE partner_transactions SET amount=1 WHERE order_id=$1 AND type='provision'",
+        [orderId],
+      );
+      assert.equal(
+        (await diagnosePartner({ partnerId: partner })).bookingEvidence.find(
+          (o) => o.order_id === orderId,
+        )?.audit,
+        "amount_mismatch",
+      );
+      await pool.query(
+        "UPDATE partner_transactions SET amount=6.38 WHERE order_id=$1 AND type='provision'",
+        [orderId],
+      );
       await pool.query(
         "UPDATE partners SET program_key='creator' WHERE id=$1",
         [partner],
@@ -215,6 +229,16 @@ test(
       assert.equal(r.partnerCustomerCheck.eligible, true);
       assert.equal(r.partnerCustomerCheck.expectedAmount, 6.38);
       assert.equal(r.checkoutCodeValidation?.consistent, true);
+      await pool.query(
+        "UPDATE orders SET partner_commission_policy_snapshot=NULL,partner_commission=0 WHERE order_id=$1",
+        [second],
+      );
+      assert.equal(
+        (await diagnosePartner({ partnerId: partner })).bookingEvidence.find(
+          (o) => o.order_id === second,
+        )?.audit,
+        "legacy_unknown",
+      );
       await preview();
       await diagnosePartner({ partnerId: partner });
       assert.deepEqual(await snapshot(), afterBooking);
