@@ -10,7 +10,7 @@ import { bookPaidPartnerCommission } from "./partnerCreditService.js";
 import { hasOtherPaidCodeOrder } from "./partnerCodeHistory.js";
 
 test(
-  "isolated public code checkout, individual rules, paid ledger and immutable preview",
+  "isolated public code checkout, individual rules, paid-and-dispatched ledger and immutable preview",
   { skip: process.env.OPS_ISOLATED_REHEARSAL !== "true" },
   async () => {
     assert.equal(process.env.DATABASE_URL, isolatedOperationsDatabase());
@@ -163,8 +163,24 @@ test(
         (await bookPaidPartnerCommission(orderId)).reason,
         "order_not_paid",
       );
+      await assert.rejects(bookPaidPartnerCommission("ABSENT-" + tag), /nicht gefunden/);
+      for (const [status, paid, shipped, reason] of [
+        ["offen", false, false, "order_not_paid"],
+        ["bezahlt", true, false, "order_not_shipped"],
+        ["gepackt", true, false, "order_not_shipped"],
+        ["abgeholt", true, false, "order_not_shipped"],
+        ["versendet", false, true, "order_not_paid"],
+        ["versendet", true, false, "order_not_shipped"],
+        ["zugestellt", true, false, "order_not_shipped"],
+        ["storniert", true, true, "order_not_paid"],
+      ] as const) {
+        await pool.query("UPDATE orders SET status=$2,paid_at=CASE WHEN $3 THEN now() ELSE NULL END,shipped_at=CASE WHEN $4 THEN now() ELSE NULL END WHERE order_id=$1", [orderId,status,paid,shipped]);
+        const before = await snapshot();
+        assert.equal((await bookPaidPartnerCommission(orderId)).reason, reason);
+        assert.deepEqual(await snapshot(), before, status + ": no financial writes");
+      }
       await pool.query(
-        "UPDATE orders SET status='abgeholt',paid_at=now() WHERE order_id=$1",
+        "UPDATE orders SET status='versendet',paid_at=now(),shipped_at=now() WHERE order_id=$1",
         [orderId],
       );
       assert.equal(
@@ -181,15 +197,17 @@ test(
       assert.equal(r.partnerCustomerCheck.eligible, false);
       assert.equal(r.partnerCustomerCheck.expectedAmount, 0);
       assert.equal(r.checkoutCodeValidation?.consistent, true);
-      const booked = await bookPaidPartnerCommission(orderId);
-      assert.equal(booked.booked, true);
+      const concurrent = await Promise.all([bookPaidPartnerCommission(orderId), bookPaidPartnerCommission(orderId)]);
+      assert.equal(concurrent.filter(r=>r.booked).length,1);
+      const booked = concurrent.find(r=>r.booked)!;
       assert.equal(booked.amount, 6.38);
       assert.equal(
         (await bookPaidPartnerCommission(orderId)).reason,
         "already_booked",
       );
       const second = "AUB-" + tag;
-      await insertOrder(second, "bezahlt", true);
+      await insertOrder(second, "versendet", true);
+      await pool.query("UPDATE orders SET shipped_at=now()-interval '1 day' WHERE order_id=$1",[second]);
       assert.equal(
         (await bookPaidPartnerCommission(second)).reason,
         "one_time_already_paid",

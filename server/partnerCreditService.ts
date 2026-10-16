@@ -10,6 +10,17 @@ export const PAID_ORDER_STATUSES = new Set([
   "abgeholt",
 ]);
 
+/** Both persisted confirmations are required; packing or collection is not dispatch. */
+export function partnerCommissionBlockReason(order: {
+  status: string;
+  paid_at: unknown;
+  shipped_at: unknown;
+}): "order_not_paid" | "order_not_shipped" | null {
+  if (!order.paid_at || !PAID_ORDER_STATUSES.has(order.status)) return "order_not_paid";
+  if (!order.shipped_at || !["versendet", "zugestellt"].includes(order.status)) return "order_not_shipped";
+  return null;
+}
+
 const roundMoney = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
 
 const parseMoney = (value: unknown): number => {
@@ -53,7 +64,7 @@ export function calculateCommissionAmount(input: {
 
 /**
  * Returns an explicitly approved, order-bound credit amount when present; otherwise
- * applies the standard partner rule. The caller remains responsible for payment gating.
+ * applies the standard partner rule. The caller remains responsible for payment and dispatch gating.
  */
 export function resolveCommissionAmount(
   input: {
@@ -95,6 +106,7 @@ type OrderForCredit = {
   order_id: string;
   status: string;
   paid_at: Date | null;
+  shipped_at: Date | null;
   partner_source_id: number | null;
   partner_code: string | null;
   partner_number: string | null;
@@ -130,7 +142,7 @@ type OrderCreditOverride = {
 
 async function lockOrder(client: PoolClient, orderId: string): Promise<OrderForCredit> {
   const result = await client.query<OrderForCredit>(
-    `SELECT order_id, status, paid_at, partner_source_id, partner_code, partner_number,
+    `SELECT order_id, status, paid_at, shipped_at, partner_source_id, partner_code, partner_number,
             partner_program_snapshot, partner_settlement_method_snapshot,
             partner_commission_policy_snapshot, partner_commission_percent_snapshot,
             partner_commission_base_snapshot, subtotal, discount, credit_used,
@@ -236,7 +248,7 @@ export async function redeemPartnerCreditForOrder(orderId: string): Promise<{ re
 }
 
 /**
- * Credits a partner only after a payment-confirmed order. Repeated status updates are idempotent.
+ * Credits a partner only after persisted payment AND dispatch confirmation. Repeated status updates are idempotent.
  */
 export async function bookPaidPartnerCommission(orderId: string): Promise<{
   booked: boolean;
@@ -247,10 +259,11 @@ export async function bookPaidPartnerCommission(orderId: string): Promise<{
   const { client } = await beginLockedTransaction();
   try {
     const order = await lockOrder(client, orderId);
-    if (!PAID_ORDER_STATUSES.has(order.status) || !order.paid_at) {
+    const blockedReason = partnerCommissionBlockReason(order);
+    if (blockedReason) {
       await client.query("COMMIT");
       client.release();
-      return { booked: false, amount: 0, balance: 0, reason: "order_not_paid" };
+      return { booked: false, amount: 0, balance: 0, reason: blockedReason };
     }
 
     const partner = await lockPartnerForOrder(client, order);
@@ -341,8 +354,8 @@ export async function bookPaidPartnerCommission(orderId: string): Promise<{
         orderId,
         `${order.first_name} ${order.last_name}`.trim(),
         creditOverride
-          ? `Manuell freigegebenes Guthaben für bezahlte Bestellung ${orderId} – ${creditOverride.reason}`
-          : `Provision für bezahlte Bestellung ${orderId} (${order.first_name} ${order.last_name}) – ${label}${order.partner_code ? ` · Code ${order.partner_code}` : ""}`,
+          ? `Manuell freigegebenes Guthaben für bezahlte und versendete Bestellung ${orderId} – ${creditOverride.reason}`
+          : `Provision für bezahlte und versendete Bestellung ${orderId} (${order.first_name} ${order.last_name}) – ${label}${order.partner_code ? ` · Code ${order.partner_code}` : ""}`,
       ],
     );
     await client.query(
