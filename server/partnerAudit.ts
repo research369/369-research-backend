@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { getDb, getPool, withReadOnlyDatabase } from "./db.js";
 import { articles, partners } from "../drizzle/schema.js";
 import {
@@ -25,6 +25,7 @@ export type AuditFinding = {
   historicalRuleKnown?: boolean;
   expected?: number;
   booked?: number;
+  evidenceDigest?: string;
 };
 const cents = (n: number) => Math.round((n + Number.EPSILON) * 100);
 export function auditCommissionRow(
@@ -178,7 +179,41 @@ export async function runPartnerAudit(req: Request, res: Response) {
     const orphans = await pool.query(
       `SELECT t.id,t.partner_id,t.order_id,t.amount FROM partner_transactions t LEFT JOIN orders o ON o.order_id=t.order_id WHERE t.type::text='provision' AND t.status::text='normal' AND o.id IS NULL ORDER BY t.id LIMIT 1001`,
     );
-    return { targets, cart, history: history.rows, orphans: orphans.rows };
+    // Evidence stays inside the read-only scope; only its digest leaves the backend.
+    // Include hidden/reversed entries and failed checkout records so later corrections
+    // invalidate a previously reviewed classification without changing business data.
+    const evidence = await pool.query(`
+      SELECT ids.order_id, jsonb_build_object(
+        'version',1,
+        'order',(SELECT jsonb_build_object(
+          'id',o.id,'status',o.status,'paid_at',o.paid_at,'shipped_at',o.shipped_at,
+          'updated_at',o.updated_at,'customer',md5(lower(trim(o.email))),
+          'financial',jsonb_build_object('subtotal',o.subtotal,'discount',o.discount,'total',o.total,
+          'credit',o.credit_used,'commission',o.partner_commission,'partner',o.partner_source_id,
+          'number',o.partner_number,'code',o.partner_code,'code_id',o.partner_code_id_snapshot,
+          'program',o.partner_program_snapshot,'policy',o.partner_commission_policy_snapshot,
+          'base',o.partner_commission_base_snapshot,'percent',o.partner_commission_percent_snapshot))
+          FROM orders o WHERE o.order_id=ids.order_id),
+        'ledger',(SELECT coalesce(jsonb_agg(jsonb_build_object('id',t.id,'partner',t.partner_id,
+          'type',t.type,'amount',t.amount,'status',t.status,'description',t.description,
+          'note',t.admin_note,'created_at',t.created_at) ORDER BY t.id),'[]'::jsonb)
+          FROM partner_transactions t WHERE t.order_id=ids.order_id),
+        'overrides',(SELECT coalesce(jsonb_agg(to_jsonb(v) ORDER BY v.id),'[]'::jsonb)
+          FROM partner_order_credit_overrides v WHERE v.order_id=ids.order_id),
+        'failed',(SELECT coalesce(jsonb_agg(to_jsonb(f) ORDER BY f.id),'[]'::jsonb)
+          FROM failed_orders f WHERE f.attempted_order_id=ids.order_id),
+        'invoices',(SELECT coalesce(jsonb_agg(jsonb_build_object('id',i.id,'number',i.invoice_number,
+          'total',i.total_gross,'items',i.items,'html',md5(i.html)) ORDER BY i.id),'[]'::jsonb)
+          FROM invoices i WHERE i.order_number=ids.order_id)
+      )::text AS evidence
+      FROM (SELECT order_id FROM orders WHERE partner_source_id IS NOT NULL OR partner_code_id_snapshot IS NOT NULL
+        OR coalesce(partner_code,'')<>'' OR coalesce(partner_number,'')<>''
+        UNION SELECT order_id FROM partner_transactions WHERE type::text='provision' AND order_id IS NOT NULL) ids
+      ORDER BY ids.order_id LIMIT 100001`);
+    const digests = new Map<string,string>(evidence.rows.map(r=>[r.order_id,
+      createHash('sha256').update('partner-reconciliation-v1:' + r.evidence).digest('hex')]));
+    return { targets, cart, history: history.rows, orphans: orphans.rows, digests };
+
   });
   const findings: AuditFinding[] = [];
   const cases: any[] = [];
@@ -220,6 +255,7 @@ export async function runPartnerAudit(req: Request, res: Response) {
       message,
       severity,
       ...details,
+      evidenceDigest: details.orderId ? data.digests.get(details.orderId) : undefined,
     });
   };
   for (const row of data.history.slice(0, 100000)) {
