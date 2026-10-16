@@ -1954,15 +1954,14 @@ export const orderRouter = router({
 
       await db.update(orders).set(updateData).where(eq(orders.orderId, input.orderId));
 
-      // Partner- und KWK-Guthaben sind strikt zahlungsgebunden. Ein späterer
-      // Versand-/Zustellstatus wiederholt die idempotente Prüfung und heilt so
-      // einen unterbrochenen vorherigen Zahlungsstatusweg.
+      // Partnerprovision benötigt bestätigte Zahlung UND Versand; KWK bleibt zahlungsgebunden.
+      // Jeder spätere Versand-/Zustellstatus wiederholt die idempotente Prüfung.
       const [updatedFinancialOrder] = isFinanciallyPaidStatus(input.status)
         ? await db.select({ paidAt: orders.paidAt }).from(orders).where(eq(orders.orderId, input.orderId)).limit(1)
         : [null];
       if (updatedFinancialOrder?.paidAt) {
         const creditResult = await bookPaidPartnerCommission(input.orderId);
-        console.log(`[Partners] Zahlungsgebundene Gutschrift ${input.orderId}: ${creditResult.reason} (${creditResult.amount.toFixed(2)} €)`);
+        console.log(`[Partners] Prüfung Zahlung und Versand ${input.orderId}: ${creditResult.reason} (${creditResult.amount.toFixed(2)} €)`);
         await releaseKwkCreditForPaidOrder(input.orderId);
       }
 
@@ -2131,7 +2130,7 @@ export const orderRouter = router({
         }).where(eq(orders.orderId, order.orderId));
 
         const creditResult = await bookPaidPartnerCommission(order.orderId);
-        console.log(`[Partners] Zahlungsgebundene Gutschrift ${order.orderId}: ${creditResult.reason} (${creditResult.amount.toFixed(2)} €)`);
+        console.log(`[Partners] Prüfung Zahlung und Versand ${order.orderId}: ${creditResult.reason} (${creditResult.amount.toFixed(2)} €)`);
         await releaseKwkCreditForPaidOrder(order.orderId);
 
         usedPaymentIds.add(match.matchedPayment.id);
@@ -2239,7 +2238,7 @@ export const orderRouter = router({
 
       if (input.markAsPaid && order.status === "offen") {
         const creditResult = await bookPaidPartnerCommission(input.orderId);
-        console.log(`[Partners] Zahlungsgebundene Gutschrift ${input.orderId}: ${creditResult.reason} (${creditResult.amount.toFixed(2)} €)`);
+        console.log(`[Partners] Prüfung Zahlung und Versand ${input.orderId}: ${creditResult.reason} (${creditResult.amount.toFixed(2)} €)`);
         await releaseKwkCreditForPaidOrder(input.orderId);
       }
 

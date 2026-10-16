@@ -8,7 +8,7 @@ import {
 import { getPublicShopVariants } from "./articleRouter.js";
 import { simulateCheckout } from "./operationsSimulation.js";
 import { partnerRouter } from "./partnerRouter.js";
-import { PAID_ORDER_STATUSES } from "./partnerCreditService.js";
+import { PAID_ORDER_STATUSES, partnerCommissionBlockReason } from "./partnerCreditService.js";
 import type { Request, Response } from "express";
 export type AuditFinding = {
   key: string;
@@ -67,6 +67,10 @@ export function auditCommissionRow(
       : { kind: "not_paid", ...base };
   if (!row.policy)
     return { kind: "legacy_unknown", severity: "review", ...base };
+  if (partnerCommissionBlockReason(row))
+    return target.length
+      ? { kind: "dispatch_unconfirmed_booking", severity: "review", ...base }
+      : { kind: "not_shipped", ...base };
   const excluded =
     row.policy === "none" ||
     (!own &&
@@ -97,13 +101,14 @@ export function auditCommissionRow(
   if (expected <= 0) return { kind: "not_due", expected, booked: 0 };
   if (Number(row.reversed_count) > 0)
     return { kind: "reversed_paid", severity: "review", ...base };
-  if (now - new Date(row.paid_at).getTime() < 120000)
+  if (now - Math.max(new Date(row.paid_at).getTime(), new Date(row.shipped_at).getTime()) < 120000)
     return { kind: "pending", ...base };
   return { kind: "missing", severity: "error", ...base };
 }
 const messages: Record<string, string> = {
   wrong_recipient: "Provision wurde einem anderen Partner zugeordnet.",
   duplicate: "Mehrere normale Provisionsbuchungen für dieselbe Bestellung.",
+  dispatch_unconfirmed_booking: "Provision bereits gebucht, aber Versand nicht bestätigt; historischen Ablauf prüfen.",
   unexpected_booking: "Provisionsbuchung ohne bestätigten Zahlungsstatus.",
   legacy_unknown:
     "Historische Provisionsregel fehlt; Anspruch nicht automatisch beurteilbar.",
@@ -113,7 +118,7 @@ const messages: Record<string, string> = {
     "Gespeicherter Provisionsbetrag passt nicht zu gespeicherter Basis und Satz.",
   amount_mismatch:
     "Gebuchte Provision weicht vom Anspruch nach gespeicherter Regel ab.",
-  missing: "Fällige Provision fehlt seit mehr als zwei Minuten nach Zahlung.",
+  missing: "Fällige Provision fehlt seit mehr als zwei Minuten nach bestätigter Zahlung und Versand.",
   reversed_paid:
     "Provision einer weiterhin bezahlten Bestellung wurde storniert; bitte prüfen.",
   unattributed_order:
@@ -159,7 +164,7 @@ export async function runPartnerAudit(req: Request, res: Response) {
    SELECT id,row_number() OVER(PARTITION BY upper(regexp_replace(coalesce(partner_code,''),'[[:space:]]+','','g')),lower(trim(email)) ORDER BY paid_at,id) AS paid_rank
    FROM orders WHERE paid_at IS NOT NULL AND status::text IN ('bezahlt','gepackt','versendet','zugestellt','abgeholt')
   ), ledger AS (SELECT order_id,jsonb_agg(jsonb_build_object('partnerId',partner_id,'amount',amount,'id',id)) FILTER(WHERE status::text='normal') AS entries,count(*) FILTER(WHERE status::text='storniert') AS reversed_count FROM partner_transactions WHERE type::text='provision' GROUP BY order_id)
-  SELECT o.id,o.order_id,o.email,o.status,o.paid_at,o.partner_code,o.partner_number,o.partner_source_id,pc.partner_id AS code_partner_id,
+  SELECT o.id,o.order_id,o.email,o.status,o.paid_at,o.shipped_at,o.partner_code,o.partner_number,o.partner_source_id,pc.partner_id AS code_partner_id,
    coalesce(o.partner_source_id,pc.partner_id,ownp.id,legacy.partner_id) AS resolved_partner_id,
    o.partner_commission_policy_snapshot AS policy,o.partner_commission_base_snapshot AS commission_base,o.partner_commission_percent_snapshot AS commission_percent,
    ov.amount AS override_amount,coalesce(ov.amount,o.partner_commission,0) AS expected_amount,coalesce(l.entries,'[]'::jsonb) AS entries,l.reversed_count,paid.paid_rank

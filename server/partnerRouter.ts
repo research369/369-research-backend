@@ -924,9 +924,9 @@ export const partnerRouter = router({
       return { valid: true };
     }),
 
-  // ─── INTERNAL: payment-bound commission booking ────────────────
+  // ─── INTERNAL: payment-and-dispatch-bound commission booking ────────────────
   // Compatibility endpoint: amount and customer data are deliberately ignored.
-  // The persisted paid order is the only source of truth.
+  // Persisted payment and dispatch confirmations are the only source of truth.
   bookCommission: adminProcedure
     .input(z.object({
       orderId: z.string(),
@@ -943,7 +943,7 @@ export const partnerRouter = router({
         newBalance: result.balance,
         reason: result.reason,
         message: result.booked
-          ? "Provision wurde nach bestätigtem Zahlungseingang gebucht"
+          ? "Provision wurde nach bestätigter Zahlung und Versand gebucht"
           : `Keine neue Provision gebucht: ${result.reason}`,
       };
     }),

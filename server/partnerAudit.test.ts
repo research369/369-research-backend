@@ -7,7 +7,8 @@ const row = {
   partner_source_id: 7,
   code_partner_id: 7,
   partner_number: null,
-  status: "bezahlt",
+  status: "versendet",
+  shipped_at: "2026-10-15T13:00:00Z",
   paid_at: "2026-10-15T12:00:00Z",
   policy: "each_paid_code_order",
   expected_amount: "18",
@@ -134,4 +135,11 @@ test("legacy shipped orders without payment timestamp or saved rule remain uncer
       .severity,
     "error",
   );
+});
+
+test("paid orders wait for dispatch; grace starts at the later confirmation", () => {
+  assert.equal(auditCommissionRow({...row,status:"bezahlt",shipped_at:null},now).kind,"not_shipped");
+  assert.equal(auditCommissionRow({...row,status:"versendet",shipped_at:null},now).kind,"not_shipped");
+  assert.equal(auditCommissionRow({...row,shipped_at:new Date(now-60000)},now).kind,"pending");
+  assert.equal(auditCommissionRow({...row,status:"bezahlt",shipped_at:null,entries:[{partnerId:7,amount:18}]},now).kind,"dispatch_unconfirmed_booking");
 });
