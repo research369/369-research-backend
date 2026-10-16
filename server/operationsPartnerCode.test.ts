@@ -219,6 +219,10 @@ test(
       );
       for (let n = 0; n < 21; n++)
         await insertOrder("AU-" + tag + "-" + n, "offen", false);
+      await pool.query(`CREATE TABLE IF NOT EXISTS failed_orders (
+        id SERIAL PRIMARY KEY, attempted_order_id VARCHAR(50), customer_name VARCHAR(200),
+        customer_email VARCHAR(320), customer_phone VARCHAR(50), total DECIMAL(10,2),
+        items_json TEXT,input_json TEXT,error_message TEXT,created_at TIMESTAMP DEFAULT NOW())`);
       const beforeAudit = await snapshot();
       const audit = await runPartnerAudit({} as any, {} as any);
       assert.equal(audit.sideEffects, false);
@@ -234,6 +238,17 @@ test(
         ),
       );
       assert(!JSON.stringify(audit).includes(email));
+      const originalDigest = audit.findings.find(f=>f.orderId===second)?.evidenceDigest;
+      assert.match(originalDigest ?? "",/^[a-f0-9]{64}$/);
+      assert.deepEqual(await snapshot(),beforeAudit);
+      await pool.query("INSERT INTO failed_orders(attempted_order_id,customer_email,error_message) VALUES($1,$2,'Synthetic blocked attempt')",[second,email]);
+      const revisedEvidence = await runPartnerAudit({} as any,{} as any);
+      const changedDigest = revisedEvidence.findings.find(f=>f.orderId===second)?.evidenceDigest;
+      assert.notEqual(changedDigest,originalDigest,"Changed failed-checkout evidence must invalidate a review");
+      assert(!JSON.stringify(revisedEvidence).includes(email));
+      assert(!JSON.stringify(revisedEvidence).includes('Synthetic blocked attempt'));
+      await pool.query("DELETE FROM failed_orders WHERE attempted_order_id=$1",[second]);
+
       await pool.query(
         "UPDATE partner_codes SET code_normalized=code_normalized||'-BROKEN' WHERE id=$1",
         [codes[1].id],
