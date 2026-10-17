@@ -103,6 +103,15 @@ jobs:
           grep -q 'suppressExternalNotifications' server/orderRouter.ts
           grep -q 'isBackupSchedulerDisabledForCommerceStaging' server/backupService.ts
 
+      - name: Require fail-closed Railway pre-deploy manifest
+        shell: bash
+        run: |
+          test -x scripts/checkout-v2-commerce-staging-predeploy.sh
+          grep -Fq '"preDeployCommand": "sh scripts/checkout-v2-commerce-staging-predeploy.sh"' railway.json
+          grep -Fq '"healthcheckPath": "/health"' railway.json
+          grep -Fq 'checkout-v2-commerce-staging-bootstrap.ts' scripts/checkout-v2-commerce-staging-predeploy.sh
+          grep -Fq 'checkout-v2-commerce-staging-smoke.ts' scripts/checkout-v2-commerce-staging-predeploy.sh
+
   deploy_commerce_staging:
     name: Deploy pinned revision to isolated backend staging
     needs: test_contract
