@@ -1,3 +1,5 @@
+import {checkCustomerCreationMaintenance} from './customerCreationMaintenance.js';
+import {getPool} from './db.js';
 import { initTRPC, TRPCError } from "@trpc/server";
 import superjson from "superjson";
 import type { Request, Response } from "express";
@@ -22,7 +24,12 @@ const t = initTRPC.context<Context>().create({
 });
 
 export const router = t.router;
-export const publicProcedure = t.procedure;
+const creationGuard=t.middleware(async ({path,type,next})=>{
+ if(type==='mutation'&&['order.create','customer.create','customer.backfillFromOrders'].includes(path))await checkCustomerCreationMaintenance(path,type,await getPool());
+ return next();
+});
+const guardedProcedure=t.procedure.use(creationGuard);
+export const publicProcedure = guardedProcedure;
 export const middleware = t.middleware;
 
 const isAuthed = middleware(({ ctx, next }) => {
@@ -42,8 +49,8 @@ const isAdmin = middleware(({ ctx, next }) => {
   return next({ ctx: { ...ctx, user: ctx.user } });
 });
 
-export const protectedProcedure = t.procedure.use(isAuthed);
-export const adminProcedure = t.procedure.use(isAdmin);
+export const protectedProcedure = guardedProcedure.use(isAuthed);
+export const adminProcedure = guardedProcedure.use(isAdmin);
 
 // Product Manager: role = "admin" OR role = "product_manager"
 // Kein Zugriff auf orders, customers, invoices, payments, checkout, users, migrations
