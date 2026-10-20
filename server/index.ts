@@ -1,3 +1,4 @@
+import {customerCreationActivity} from './customerCreationMaintenance.js';
 // Zeitzone auf Deutschland setzen (muss vor allen anderen Imports stehen)
 process.env.TZ = "Europe/Berlin";
 
@@ -53,6 +54,10 @@ import {pepgptOffersRouter} from './pepgptOffersRouter.js';
 import {operationsRouter} from './operationsRouter.js';
 
 const app = express();
+app.get('/_internal/customer-creation-activity',(req,res)=>{
+ if(!['127.0.0.1','::1','::ffff:127.0.0.1'].includes(req.socket.remoteAddress||'')){res.sendStatus(404);return;}
+ res.set('Cache-Control','no-store').json(customerCreationActivity());
+});
 
 // Railway must be able to observe a live process while the application performs
 // its additive schema checks. Operational routes stay unavailable until the

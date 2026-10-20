@@ -1,3 +1,4 @@
+import {trackCustomerCreation} from './customerCreationMaintenance.js';
 import { initTRPC, TRPCError } from "@trpc/server";
 import superjson from "superjson";
 import type { Request, Response } from "express";
@@ -22,7 +23,8 @@ const t = initTRPC.context<Context>().create({
 });
 
 export const router = t.router;
-export const publicProcedure = t.procedure;
+const tracked=t.procedure.use(t.middleware(({path,type,next})=>trackCustomerCreation(path,type,next)));
+export const publicProcedure = tracked;
 export const middleware = t.middleware;
 
 const isAuthed = middleware(({ ctx, next }) => {
@@ -42,8 +44,8 @@ const isAdmin = middleware(({ ctx, next }) => {
   return next({ ctx: { ...ctx, user: ctx.user } });
 });
 
-export const protectedProcedure = t.procedure.use(isAuthed);
-export const adminProcedure = t.procedure.use(isAdmin);
+export const protectedProcedure = tracked.use(isAuthed);
+export const adminProcedure = tracked.use(isAdmin);
 
 // Product Manager: role = "admin" OR role = "product_manager"
 // Kein Zugriff auf orders, customers, invoices, payments, checkout, users, migrations
