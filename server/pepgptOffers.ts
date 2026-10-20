@@ -6,7 +6,7 @@ export type OfferArticle={id:number;name:string;sku:string;shop_product_id:strin
 const norm=(s:unknown)=>String(s??'').toLowerCase().replace(/retatrutid[e]?|r3ta|\breta\b/g,'3g').replace(/[^a-z0-9äöüß]+/g,' ').trim();
 const number=(v:unknown)=>v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v))?Number(v):null;
 export function projectOffers(articles:OfferArticle[],promos:any[],globalValue:string|null,input:{search:string;dosage?:string;quantity:number;country:string},now:Date){
-  const words=norm(input.search).split(' ').filter(w=>w.length>1&&!['was','kostet','das','denn','ich','möchte','bestellen','preis','für','und','mit','haben','sie','ihr','bitte','wie','ist','der','die','ein','eine','von','auf','hallo','hi','mir'].includes(w));
+  const words=norm(input.search).split(' ').filter(w=>w.length>1&&!/^\d+$|^(mg|mcg|iu|ml)$/.test(w)&&!['was','kostet','das','denn','ich','möchte','bestellen','preis','für','und','mit','haben','sie','ihr','bitte','wie','ist','der','die','ein','eine','von','auf','hallo','hi','mir'].includes(w));
   const parents=articles.filter(a=>a.is_active===1&&a.shop_visible===1).map(a=>({a,score:words.reduce((n,w)=>n+(norm(a.name+' '+a.sku+' '+a.shop_product_id).split(' ').includes(w)?1:0),0)})).filter(x=>x.score>0).sort((a,b)=>b.score-a.score);
   const top=parents[0]?.score??0;const selected=parents.filter(x=>x.score===top).slice(0,2);
   const catalog=articles.map(a=>({sku:a.sku,name:a.name,shopProductId:a.shop_product_id,sellingPrice:a.selling_price,salePrice:a.sale_price,variants:a.variants,isActive:a.is_active,shopVisible:a.shop_visible}));
@@ -44,8 +44,8 @@ export function projectOffers(articles:OfferArticle[],promos:any[],globalValue:s
         const rawPromo=promos.find(p=>p.code===rule.code);if(!rawPromo)return[];
         const preceding=global?.stackWithPromotionCodes?automatic:0;
         const discount=calculatePromoDiscount({subtotal,items:[item],precedingProductDiscount:preceding,promo:{discountType:rawPromo.discount_type,percentage:Number(rawPromo.percentage||0),fixedAmount:Number(rawPromo.fixed_amount||0),description:rawPromo.description}});
-        if(discount<=0)return[];
         const shipping=calculateAuthoritativeShipping({country:input.country,items:[{name:a.name,variant:label}],promoDescription:rawPromo.description});
+        if(discount<=0&&shipping>=standardShipping)return[];
         const productTotal=roundMoney(subtotal-preceding-discount);
         // Keinen Code als Vorteil nennen, wenn er einen höheren Endpreis verursacht.
         if(productTotal+shipping>subtotal-automatic+standardShipping)return[];
