@@ -1,3 +1,4 @@
+import type { PoolClient } from "pg";
 import { randomUUID, randomBytes, createHash } from "node:crypto";
 import {
   quoteRequest,
@@ -39,14 +40,32 @@ export type PricedSnapshot = {
     selected_code: string | null;
   };
   customer_resolution: {
+    customer_ref?: string | null;
     status: "existing" | "new" | "conflict" | "ambiguous" | "blocked";
   };
   [key: string]: unknown;
 };
 export interface Phase1Backend {
-  catalog(): Promise<CatalogItem[]>;
+  catalog(client?: PoolClient): Promise<CatalogItem[]>;
   /** Backend-owned canonical checkout pricing; never accept client money or customer IDs. */
-  quote(request: QuoteRequest, skus: string[]): Promise<PricedSnapshot>;
+  quote(
+    request: QuoteRequest,
+    skus: string[],
+    client?: PoolClient,
+  ): Promise<PricedSnapshot>;
+  book?(
+    client: PoolClient,
+    request: QuoteRequest,
+    priced: PricedSnapshot,
+    context: {
+      execution_id: string;
+      quote_id: string;
+      quote_revision: number;
+      quote_hash: string;
+      conversation: string;
+      owner: string;
+    },
+  ): Promise<any>;
 }
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
 const publicQuote = (q: any) => ({
@@ -93,13 +112,13 @@ export class WhatsappOrderService {
         })),
     };
   }
-  private async price(request: QuoteRequest) {
+  private async price(request: QuoteRequest, client?: PoolClient) {
     const skus = request.lines.map((l) =>
       verifyCatalog(l.catalog_item_id, this.signingKey),
     );
     if (new Set(skus).size !== skus.length)
       throw Error("duplicate_catalog_item");
-    const catalog = await this.backend.catalog();
+    const catalog = await this.backend.catalog(client);
     for (let n = 0; n < skus.length; n++) {
       const item = catalog.find((i) => i.sku === skus[n]);
       if (!item) throw Error("unsupported_catalog_item");
@@ -111,7 +130,7 @@ export class WhatsappOrderService {
       )
         throw Error("delivery_type_not_allowed_for_cart");
     }
-    const priced = await this.backend.quote(request, skus);
+    const priced = await this.backend.quote(request, skus, client);
     if (!["existing", "new"].includes(priced.customer_resolution.status))
       throw Error("customer_review_required");
     const sum = priced.order_summary;
@@ -349,43 +368,58 @@ export class WhatsappOrderService {
         [tenant, q.conversation, q.draft_id],
       );
       if (intent.rows.length) throw Error("intent_already_executed");
-      const snapshot = await this.price(q.snapshot.request);
+      const snapshot = await this.price(q.snapshot.request, c);
       if (orderHash(snapshot) !== q.fingerprint) throw Error("quote_stale");
-      // Rehearsal side effects exclusively in test tables, all guarded in this transaction.
-      for (const line of snapshot.priced.order_summary.lines) {
-        const r = await c.query(
-          "UPDATE wop_test_inventory SET stock=stock-$2 WHERE sku=$1 AND stock >= $2 RETURNING sku",
-          [line.sku, line.quantity],
+      let result: any;
+      if (this.backend.book) {
+        result = {
+          ...(await this.backend.book(c, snapshot.request, snapshot.priced, {
+            execution_id: input.execution_id,
+            quote_id: q.id,
+            quote_revision: q.revision,
+            quote_hash: q.hash,
+            conversation: q.conversation,
+            owner: q.approval_actor,
+          })),
+          rehearsal_only: true,
+        };
+      } else {
+        // Rehearsal side effects exclusively in test tables, all guarded in this transaction.
+        for (const line of snapshot.priced.order_summary.lines) {
+          const r = await c.query(
+            "UPDATE wop_test_inventory SET stock=stock-$2 WHERE sku=$1 AND stock >= $2 RETURNING sku",
+            [line.sku, line.quantity],
+          );
+          if (!r.rows.length) throw Error("stock_changed");
+        }
+        const promo = snapshot.priced.promotion_selection.selected_code;
+        if (promo) {
+          const r = await c.query(
+            "UPDATE wop_test_promos SET used=used+1 WHERE code=$1 AND (max_uses=0 OR used<max_uses) RETURNING code",
+            [promo],
+          );
+          if (!r.rows.length) throw Error("promotion_changed");
+        }
+        const id = randomUUID();
+        await c.query(
+          "INSERT INTO wop_test_orders(id,execution_id,snapshot,order_origin,payment_method) VALUES($1,$2,$3,'whatsapp_bot','SEPA')",
+          [id, input.execution_id, snapshot],
         );
-        if (!r.rows.length) throw Error("stock_changed");
+        result = {
+          state: "succeeded",
+          rehearsal_only: true,
+          order: { order_id: "TEST-" + id, ...snapshot.priced.order_summary },
+          payment: {
+            method: "bank_transfer",
+            payment_reference: "TEST-" + id,
+            amount_cents: snapshot.priced.order_summary.total_cents,
+          },
+          confirmation: {
+            email: "not_requested",
+            whatsapp_dedup_key: input.execution_id,
+          },
+        };
       }
-      const promo = snapshot.priced.promotion_selection.selected_code;
-      if (promo) {
-        const r = await c.query(
-          "UPDATE wop_test_promos SET used=used+1 WHERE code=$1 AND (max_uses=0 OR used<max_uses) RETURNING code",
-          [promo],
-        );
-        if (!r.rows.length) throw Error("promotion_changed");
-      }
-      const id = randomUUID();
-      await c.query(
-        "INSERT INTO wop_test_orders(id,execution_id,snapshot,order_origin,payment_method) VALUES($1,$2,$3,'whatsapp_bot','SEPA')",
-        [id, input.execution_id, snapshot],
-      );
-      const result = {
-        state: "succeeded",
-        rehearsal_only: true,
-        order: { order_id: "TEST-" + id, ...snapshot.priced.order_summary },
-        payment: {
-          method: "bank_transfer",
-          payment_reference: "TEST-" + id,
-          amount_cents: snapshot.priced.order_summary.total_cents,
-        },
-        confirmation: {
-          email: "not_requested",
-          whatsapp_dedup_key: input.execution_id,
-        },
-      };
       await c.query(
         "INSERT INTO wop_executions(id,tenant,quote_id,hash,result) VALUES($1,$2,$3,$4,$5)",
         [input.execution_id, tenant, q.id, q.hash, result],

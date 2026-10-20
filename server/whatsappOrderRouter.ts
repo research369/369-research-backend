@@ -5,9 +5,7 @@ import { WhatsappOrderService } from "./whatsappOrderService.js";
 export function createWhatsappOrderRouter(
   service: WhatsappOrderService,
   keys: { read: string; write: string; owner: string },
-  verifyOwner: (
-    receipt: string,
-  ) => Promise<{
+  verifyOwner: (receipt: string) => Promise<{
     user: string;
     chat: string;
     private_chat: boolean;
@@ -104,14 +102,12 @@ export function createWhatsappOrderRouter(
     } catch (e) {
       const message = e instanceof Error ? e.message : "";
       const allowed =
-        /^(stock_changed|quote_stale|quote_mismatch|both_approvals_required|quote_already_executed|intent_already_executed|idempotency_conflict|owner_not_authorized|approval_mismatch|unsupported_catalog_item|delivery_type_not_allowed_for_cart|customer_review_required|promotion_changed|invalid_catalog_item)$/;
-      res
-        .status(409)
-        .json({
-          error: allowed.test(message)
-            ? message
-            : "invalid_or_unavailable_request",
-        });
+        /^(promotion_not_eligible|customer_number_migration_required|stock_changed|quote_stale|quote_mismatch|both_approvals_required|quote_already_executed|intent_already_executed|idempotency_conflict|owner_not_authorized|approval_mismatch|unsupported_catalog_item|delivery_type_not_allowed_for_cart|customer_review_required|promotion_changed|invalid_catalog_item)$/;
+      res.status(409).json({
+        error: allowed.test(message)
+          ? message
+          : "invalid_or_unavailable_request",
+      });
     }
   });
   return router;

@@ -1,3 +1,4 @@
+import {nextCustomerNumber} from './customerNumberService.js';
 import { publicCodeCommissionPreview } from "./partnerCommissionPreview.js";
 import { hasOtherPaidCodeOrder } from "./partnerCodeHistory.js";
 /**
@@ -1674,15 +1675,7 @@ export const orderRouter = router({
         console.log(`[Customers] Linked order ${orderId} to existing customer #${existingCustomer.customerNumber} (${fullName})`);
       } else {
           // Generate next customer number (starting at 1210)
-          const maxResult = await db.execute(sql`SELECT COALESCE(MAX(CAST(customer_number AS INTEGER)), 1209) as max_num FROM customers WHERE customer_number ~ '^[0-9]+$'`);
-          const rows = maxResult as any;
-          let nextNum = 1210;
-          if (rows && rows.length > 0 && rows[0].max_num) {
-            nextNum = parseInt(rows[0].max_num) + 1;
-          } else if (rows?.rows && rows.rows.length > 0) {
-            nextNum = parseInt(rows.rows[0].max_num) + 1;
-          }
-          if (nextNum < 1210) nextNum = 1210;
+          const nextNum = await nextCustomerNumber(db);
 
           // Determine acquisition source
           const acquiredBy = partnerSourceId ? "partner" as const : "shop" as const;
