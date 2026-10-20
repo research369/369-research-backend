@@ -1,3 +1,4 @@
+import {nextCustomerNumber,requireCustomerNumberMigration} from './customerNumberService.js';
 import {checkCustomerCreationMaintenance} from './customerCreationMaintenance.js';
 /**
  * Customer Router – tRPC routes for CRM / customer management
@@ -300,16 +301,8 @@ export const customerRouter = router({
         throw new Error(`ADRESSPRUEFUNG_BESTAETIGUNG_ERFORDERLICH: ${addressValidation!.warnings.map((warning) => warning.message).join(" ")}`);
       }
 
-      // Generate next customer number
-      const maxResult = await db.execute(sql`SELECT COALESCE(MAX(CAST(customer_number AS INTEGER)), 1209) as max_num FROM customers WHERE customer_number ~ '^[0-9]+$'`);
-      const rows = maxResult as any;
-      let nextNum = 1210;
-      if (rows && rows.length > 0 && rows[0].max_num) {
-        nextNum = parseInt(rows[0].max_num) + 1;
-      } else if (rows?.rows && rows.rows.length > 0) {
-        nextNum = parseInt(rows.rows[0].max_num) + 1;
-      }
-      if (nextNum < 1210) nextNum = 1210;
+      // Sequence is allocated once and reused for the inserted record lookup.
+      const nextNum = await nextCustomerNumber(db);
 
       console.log(`[customer.create] houseNumber=${JSON.stringify(input.houseNumber)}, street=${JSON.stringify(input.street)}, zip=${JSON.stringify(input.zip)}, city=${JSON.stringify(input.city)}`);
       await db.insert(customers).values({
@@ -989,16 +982,11 @@ export const customerRouter = router({
       };
     }
 
+    await requireCustomerNumberMigration(db);
     // Execute backfill
     let created = 0;
     let linked = 0;
 
-    // Get starting customer number
-    const maxResult = await db.execute(sql`SELECT COALESCE(MAX(CAST(customer_number AS INTEGER)), 1209) as max_num FROM customers WHERE customer_number ~ '^[0-9]+$'`);
-    const maxRows = maxResult as any;
-    let nextNum = 1210;
-    const rawMax = maxRows?.rows?.[0]?.max_num ?? maxRows?.[0]?.max_num;
-    if (rawMax) nextNum = Math.max(1210, parseInt(rawMax) + 1);
 
     for (const [, grpOrders] of Object.entries(groups)) {
       const o = grpOrders[grpOrders.length - 1];
@@ -1013,7 +1001,7 @@ export const customerRouter = router({
 
       try {
         const [newCustomer] = await db.insert(customers).values({
-          customerNumber: String(nextNum),
+          customerNumber: await nextCustomerNumber(db),
           name,
           firstName: firstName || null,
           lastName: lastName || null,
@@ -1043,7 +1031,6 @@ export const customerRouter = router({
         const pk = normalizePhone(o.phone || '');
         if (pk.length >= 7) phoneToCustomer[pk] = newCustomer;
 
-        nextNum++;
         created++;
       } catch (_e) { /* skip on duplicate */ }
     }

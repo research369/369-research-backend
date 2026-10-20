@@ -1,3 +1,4 @@
+import {nextCustomerNumber,requireCustomerNumberMigration} from '../customerNumberService.js';
 import {checkCustomerCreationMaintenance} from '../customerCreationMaintenance.js';
 import { getPool } from "../db.js";
 
@@ -41,10 +42,6 @@ export async function runLegacyCustomerBackfill(): Promise<number> {
   const ordersResult = await pool.query(
     "SELECT * FROM orders WHERE customer_id IS NULL ORDER BY order_date DESC",
   );
-  const maxNumberResult = await pool.query(
-    "SELECT COALESCE(MAX(CAST(customer_number AS INTEGER)), 1209) AS max_num FROM customers WHERE customer_number ~ '^[0-9]+$'",
-  );
-  let nextCustomerNumber = Math.max(1210, Number(maxNumberResult.rows[0]?.max_num || 1209) + 1);
 
   const groups = new Map<string, any[]>();
   for (const order of ordersResult.rows) {
@@ -62,6 +59,7 @@ export async function runLegacyCustomerBackfill(): Promise<number> {
     groups.set(groupKey, group);
   }
 
+  await requireCustomerNumberMigration(pool);
   let created = 0;
   for (const group of groups.values()) {
     const firstOrder = group[0];
@@ -84,7 +82,7 @@ export async function runLegacyCustomerBackfill(): Promise<number> {
            total_orders, total_spent, first_order_date, last_order_date, created_at, updated_at)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW(),NOW())`,
         [
-          String(nextCustomerNumber), name, firstName || null, lastName || null,
+          await nextCustomerNumber(pool), name, firstName || null, lastName || null,
           firstOrder.phone || null, hasUsableEmail ? firstOrder.email : null, firstOrder.company || null,
           firstOrder.street || null, firstOrder.house_number || null, firstOrder.zip || null,
           firstOrder.city || null, firstOrder.country || null, "backfill",
@@ -95,7 +93,7 @@ export async function runLegacyCustomerBackfill(): Promise<number> {
       if (hasUsableEmail) existingEmails.add(email);
       const phone = normalizePhone(String(firstOrder.phone || ""));
       if (phone.length >= 8) existingPhones.add(phone);
-      nextCustomerNumber += 1;
+
       created += 1;
     } catch {
       // A concurrent/manual correction may make this historic row a duplicate.

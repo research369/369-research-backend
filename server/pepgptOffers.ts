@@ -5,12 +5,14 @@ import {projectDiscountRules} from './guardianDiscounts.js';
 export type OfferArticle={id:number;name:string;sku:string;shop_product_id:string|null;selling_price:string|null;sale_price:string|null;stock:number;is_active:number;shop_visible:number;variants:unknown};
 const norm=(s:unknown)=>String(s??'').toLowerCase().replace(/retatrutid[e]?|r3ta|\breta\b/g,'3g').replace(/[^a-z0-9äöüß]+/g,' ').trim();
 const number=(v:unknown)=>v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v))?Number(v):null;
-export function projectOffers(articles:OfferArticle[],promos:any[],globalValue:string|null,input:{search:string;dosage?:string;quantity:number;country:string},now:Date){
+export function projectOffers(articles:OfferArticle[],promos:any[],globalValue:string|null,input:{search:string;dosage?:string;quantity:number;country:string;promotion?:{mode:'none'}|{mode:'explicit_code';code:string}},now:Date){
   const words=norm(input.search).split(' ').filter(w=>w.length>1&&!/^\d+$|^(mg|mcg|iu|ml)$/.test(w)&&!['was','kostet','das','denn','ich','möchte','bestellen','preis','für','und','mit','haben','sie','ihr','bitte','wie','ist','der','die','ein','eine','von','auf','hallo','hi','mir'].includes(w));
   const parents=articles.filter(a=>a.is_active===1&&a.shop_visible===1).map(a=>({a,score:words.reduce((n,w)=>n+(norm(a.name+' '+a.sku+' '+a.shop_product_id).split(' ').includes(w)?1:0),0)})).filter(x=>x.score>0).sort((a,b)=>b.score-a.score);
   const top=parents[0]?.score??0;const selected=parents.filter(x=>x.score===top).slice(0,2);
   const catalog=articles.map(a=>({sku:a.sku,name:a.name,shopProductId:a.shop_product_id,sellingPrice:a.selling_price,salePrice:a.sale_price,variants:a.variants,isActive:a.is_active,shopVisible:a.shop_visible}));
-  const rules=projectDiscountRules(promos,[],now).codes.filter(c=>c.active&&c.customer_limit===0);
+  const selectedCode=input.promotion?.mode==='explicit_code'?input.promotion.code.trim().toUpperCase():null;
+  const rules=projectDiscountRules(promos,[],now).codes.filter(c=>!!selectedCode&&c.code.toUpperCase()===selectedCode&&c.active&&c.customer_limit===0);
+  if(selectedCode&&!rules.length)throw Error('promotion_not_eligible');
   const global=getActiveGlobalAutomaticDiscount(parseGlobalAutomaticDiscountConfig(globalValue),now);
   const offers:any[]=[];
   for(const {a} of selected){
@@ -51,6 +53,7 @@ export function projectOffers(articles:OfferArticle[],promos:any[],globalValue:s
         if(productTotal+shipping>subtotal-automatic+standardShipping)return[];
         return[{code:rule.code,discount:roundMoney(discount),percentage:rule.percentage,fixed_amount:rule.fixed_amount,min_order:rule.min_order,product_total:productTotal,shipping,total:roundMoney(productTotal+shipping),valid_until:rawPromo.valid_until,valid_until_exact:rawPromo.valid_until_exact,quantity:input.quantity}];
       }).sort((x,y)=>x.total-y.total||x.code.localeCompare(y.code));
+      if(selectedCode&&promotions.length===0)throw Error('promotion_not_eligible');
       offers.push({product_id:a.shop_product_id||a.sku,name:a.name,variant:label,inventory_article_id:inventory?.id??null,sku:inventory?.sku??null,unit_price:unitPrice,quantity:input.quantity,stock,available:stock===null?null:stock>=input.quantity,subtotal,automatic_discount:automatic,product_total:subtotal===null?null:roundMoney(subtotal-automatic),shipping:standardShipping,total:subtotal===null?null:roundMoney(subtotal-automatic+standardShipping),promotions});
     }
   }

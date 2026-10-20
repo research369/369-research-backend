@@ -126,6 +126,7 @@ export type InsertStockHistory = typeof stockHistory.$inferInsert;
 export const customers = pgTable("customers", {
   id: serial("id").primaryKey(),
   customerNumber: varchar("customer_number", { length: 20 }).unique(),
+  preferredDeliveryType: varchar("preferred_delivery_type", { length: 20 }),
   name: varchar("name", { length: 200 }).notNull(),
   firstName: varchar("first_name", { length: 200 }),
   lastName: varchar("last_name", { length: 200 }),
@@ -461,6 +462,7 @@ export type InsertEmailCampaign = typeof emailCampaigns.$inferInsert;
 export const orders = pgTable("orders", {
   id: serial("id").primaryKey(),
   orderId: varchar("order_id", { length: 32 }).notNull().unique(),
+  orderOrigin: varchar("order_origin", { length: 32 }),
   // Additive storefront metadata. Existing 369 orders retain the default and NULL values.
   storeKey: varchar("store_key", { length: 32 }).notNull().default("369research"),
   externalOrderReference: varchar("external_order_reference", { length: 32 }),
