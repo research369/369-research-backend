@@ -49,6 +49,7 @@ import { ensureSwissCustomsSchema } from "./swissCustomsSchema.js";
 import {jarvyOrderRouter} from "./jarvyOrderRouter.js";
 import { jarvyReadRouter } from "./jarvyReadRouter.js";
 import {guardianInventoryRouter} from './guardianInventoryRouter.js';
+import {pepgptOffersRouter} from './pepgptOffersRouter.js';
 import {operationsRouter} from './operationsRouter.js';
 
 const app = express();
@@ -151,6 +152,7 @@ app.use(qrRedirectRouter);
 
 app.use("/api/jarvy-read", jarvyReadRouter);
 app.use('/api/guardian', guardianInventoryRouter);
+app.use('/api/pepgpt-read', pepgptOffersRouter);
 app.use('/api/operations', operationsRouter);
 app.use("/api/jarvy-orders", jarvyOrderRouter);
 
