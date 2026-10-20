@@ -1,3 +1,4 @@
+import {checkCustomerCreationMaintenance} from '../customerCreationMaintenance.js';
 import { getPool } from "../db.js";
 
 const PLACEHOLDER_EMAILS = new Set([
@@ -21,6 +22,7 @@ export async function runLegacyCustomerBackfill(): Promise<number> {
   const pool = await getPool();
   if (!pool) throw new Error("Database not available");
 
+  await checkCustomerCreationMaintenance('customer.backfillFromOrders','mutation',pool);
   const customersResult = await pool.query("SELECT id, email, phone FROM customers");
   const existingEmails = new Set<string>();
   const existingPhones = new Set<string>();
