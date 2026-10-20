@@ -315,6 +315,10 @@ export class WhatsappWawiAdapter implements Phase1Backend {
         ["wawi-contact:" + identity],
       );
     let customerId = await this.resolveCustomer(r, client);
+    if (customerId)
+      await client.query("SELECT id FROM customers WHERE id=$1 FOR UPDATE", [
+        customerId,
+      ]);
     if (
       priced.customer_resolution.customer_ref &&
       (!customerId ||
