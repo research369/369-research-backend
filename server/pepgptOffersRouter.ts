@@ -4,13 +4,14 @@ import rateLimit from 'express-rate-limit';
 import {timingSafeEqual} from 'node:crypto';
 import {z} from 'zod';
 import {getPool} from './db.js';
+import {promotionSchema} from './whatsappOrderContract.js';
 import {projectOffers} from './pepgptOffers.js';
 export function validOffersKey(value:string|undefined){
  const expected=process.env.PEPGPT_OFFERS_READ_KEY;
  if(!expected||expected.length<40||!value?.startsWith('Bearer '))return false;
  const a=Buffer.from(value.slice(7)),b=Buffer.from(expected);return a.length===b.length&&timingSafeEqual(a,b);
 }
-const input=z.object({search:z.string().trim().min(2).max(1000),dosage:z.string().trim().min(1).max(100).optional(),quantity:z.number().int().min(1).max(100).default(1),country:z.enum(['DE','AT','CH','FR','NL','BE','IT','ES']).default('DE')}).strict();
+const input=z.object({search:z.string().trim().min(2).max(1000),dosage:z.string().trim().min(1).max(100).optional(),quantity:z.number().int().min(1).max(100).default(1),country:z.enum(['DE','AT','CH','FR','NL','BE','IT','ES']).default('DE'),promotion:promotionSchema.default({mode:'none'})}).strict();
 export const pepgptOffersRouter=Router();
 pepgptOffersRouter.use((req,res,next)=>{
  res.set('Cache-Control','no-store');
@@ -33,6 +34,6 @@ pepgptOffersRouter.post('/offers',async(req,res)=>{
   if(articles.rows.length>5000||promos.rows.length>500)throw Error('limit');
   const result=projectOffers(articles.rows,promos.rows,settings.rows[0]?.value??null,parsed.data,new Date(as_of));
   await client.query('COMMIT');res.json(result);
- }catch{await client?.query('ROLLBACK').catch(()=>{});res.status(503).json({error:'wawi_offers_unavailable'});}
+ }catch(error){await client?.query('ROLLBACK').catch(()=>{});if(error instanceof Error&&error.message==='promotion_not_eligible')res.status(409).json({error:'promotion_not_eligible'});else res.status(503).json({error:'wawi_offers_unavailable'});}
  finally{client?.release();}
 });
