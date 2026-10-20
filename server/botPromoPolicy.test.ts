@@ -15,7 +15,7 @@ test('best eligible approved code only; private/unapproved never selected',()=>{
  assert.equal(o.unit_price,100);assert.equal(o.promotions.length,1);assert.equal(o.promotions[0].code,'PUBLIC20');assert.equal(o.promotions[0].total,88);assert.equal(o.promotions[0].bot_approved,true);
 });
 test('expired, future, exhausted, minimum, product and personal restrictions stay enforced',()=>{
- for(const extra of [{valid_until:'2026-10-18'},{valid_from:'2026-11-01'},{max_uses:1,current_uses:1},{min_order:101},{description:' | {"restrict":["other"]}'},{description:' | {"maxPerCustomer":1}'}]) {
+ for(const extra of [{valid_until:'2026-10-18'},{valid_from:'2026-11-01'},{max_uses:1,current_uses:1},{min_order:101},{description:' | {"restrict":["other"]}'}]) {
  const o=projectOffers([article],[promo('PUBLIC10',{bot_auto_apply:true,...extra})],null,input,now).offers[0];assert.equal(o.promotions.length,0,JSON.stringify(extra));
  }
 });
@@ -23,3 +23,11 @@ test('none still no automatic promotion; explicit retains exact code',()=>{
  assert.equal(projectOffers([article],[promo('PUBLIC10',{bot_auto_apply:true})],null,{...input,promotion:{mode:'none'}},now).offers[0].promotions.length,0);
  assert.equal(projectOffers([article],[promo('MYCODE')],null,{...input,promotion:{mode:'explicit_code',code:'MYCODE'}},now).offers[0].promotions[0].code,'MYCODE');
 });
+
+ test('Public customer-limited codes are conditional, never silently confirmed',()=>{
+ const o=projectOffers([article],[promo('NEWME',{bot_auto_apply:true,description:'Neukunden | {"maxPerCustomer":1}'})],null,input,now).offers[0];
+ assert.equal(o.promotions[0].requires_customer_eligibility_check,true);assert.equal(o.promotions[0].customer_limit,1);assert.equal(o.promotions[0].new_customer_only,true);
+ const unconditional=projectOffers([article],[promo('PUBLIC5',{percentage:'5',bot_auto_apply:true}),promo('NEWME',{bot_auto_apply:true,description:'Neukunden | {"maxPerCustomer":1}'})],null,input,now).offers[0];
+ assert.equal(unconditional.promotions[0].code,'PUBLIC5');
+ assert.throws(()=>projectOffers([article],[promo('NEWME',{description:'Neukunden | {"maxPerCustomer":1}'})],null,{...input,promotion:{mode:'explicit_code',code:'NEWME'}},now),/promotion_not_eligible/);
+ });

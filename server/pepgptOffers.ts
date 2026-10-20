@@ -13,7 +13,7 @@ export function projectOffers(articles:OfferArticle[],promos:any[],globalValue:s
   const selectedCode=input.promotion?.mode==='explicit_code'?input.promotion.code.trim().toUpperCase():null;
   const auto=input.promotion?.mode==='bot_approved';
   const eligiblePromos=auto?promos.filter(p=>p.bot_auto_apply===true):promos;
-  const rules=projectDiscountRules(eligiblePromos,[],now).codes.filter(c=>(auto||!!selectedCode&&c.code.toUpperCase()===selectedCode)&&c.active&&c.customer_limit===0);
+  const rules=projectDiscountRules(eligiblePromos,[],now).codes.filter(c=>(auto||!!selectedCode&&c.code.toUpperCase()===selectedCode)&&c.active&&(auto||c.customer_limit===0));
   if(selectedCode&&!rules.length)throw Error('promotion_not_eligible');
   const global=getActiveGlobalAutomaticDiscount(parseGlobalAutomaticDiscountConfig(globalValue),now);
   const offers:any[]=[];
@@ -53,8 +53,8 @@ export function projectOffers(articles:OfferArticle[],promos:any[],globalValue:s
         const productTotal=roundMoney(subtotal-preceding-discount);
         // Keinen Code als Vorteil nennen, wenn er einen höheren Endpreis verursacht.
         if(productTotal+shipping>subtotal-automatic+standardShipping)return[];
-        return[{code:rule.code,...(auto?{bot_approved:true,bot_priority:rawPromo.bot_priority??0}:{}),discount:roundMoney(discount),percentage:rule.percentage,fixed_amount:rule.fixed_amount,min_order:rule.min_order,product_total:productTotal,shipping,total:roundMoney(productTotal+shipping),valid_until:rawPromo.valid_until,valid_until_exact:rawPromo.valid_until_exact,quantity:input.quantity}];
-      }).sort((x,y)=>x.total-y.total||(y.bot_priority??0)-(x.bot_priority??0)||x.code.localeCompare(y.code));
+        return[{code:rule.code,...(auto?{bot_approved:true,bot_priority:rawPromo.bot_priority??0,customer_limit:rule.customer_limit,requires_customer_eligibility_check:rule.customer_limit>0||/neukund/i.test(String(rawPromo.description??'')),new_customer_only:/neukund/i.test(String(rawPromo.description??''))}:{}),discount:roundMoney(discount),percentage:rule.percentage,fixed_amount:rule.fixed_amount,min_order:rule.min_order,product_total:productTotal,shipping,total:roundMoney(productTotal+shipping),valid_until:rawPromo.valid_until,valid_until_exact:rawPromo.valid_until_exact,quantity:input.quantity}];
+      }).sort((x,y)=>Number(x.requires_customer_eligibility_check??false)-Number(y.requires_customer_eligibility_check??false)||x.total-y.total||(y.bot_priority??0)-(x.bot_priority??0)||x.code.localeCompare(y.code));
       if(auto)promotions.splice(1);
       if(selectedCode&&promotions.length===0)throw Error('promotion_not_eligible');
       offers.push({product_id:a.shop_product_id||a.sku,name:a.name,variant:label,inventory_article_id:inventory?.id??null,sku:inventory?.sku??null,unit_price:unitPrice,quantity:input.quantity,stock,available:stock===null?null:stock>=input.quantity,subtotal,automatic_discount:automatic,product_total:subtotal===null?null:roundMoney(subtotal-automatic),shipping:standardShipping,total:subtotal===null?null:roundMoney(subtotal-automatic+standardShipping),promotions});
