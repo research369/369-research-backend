@@ -1,6 +1,7 @@
 -- EXPLICIT MAINTENANCE MIGRATION. No startup execution. Pause all legacy customer writers first.
 BEGIN;
 SET LOCAL lock_timeout='5s';
+DO $$ BEGIN IF to_regprocedure('next_order_id()') IS NULL THEN RAISE EXCEPTION 'existing_order_number_function_required'; END IF; END $$;
 LOCK TABLE customers IN SHARE ROW EXCLUSIVE MODE;
 CREATE UNIQUE INDEX IF NOT EXISTS customers_customer_number_phase1_unique ON customers(customer_number);
 CREATE SEQUENCE IF NOT EXISTS customer_number_seq AS bigint MINVALUE 1210 START WITH 1210;

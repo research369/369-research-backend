@@ -1,3 +1,4 @@
+import { calculateCustomerOrderMetrics } from "./customerOrderMetrics.js";
 import { createHmac } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { normalizeWhatsappContactPhone } from "./whatsappContactIdentity.js";
@@ -420,9 +421,28 @@ export class WhatsappWawiAdapter implements Phase1Backend {
       );
       if (used.rowCount !== 1) throw Error("promotion_changed");
     }
+    const linked = (
+      await client.query(
+        "SELECT total,status,order_date FROM orders WHERE customer_id=$1",
+        [customerId],
+      )
+    ).rows;
+    const metrics = calculateCustomerOrderMetrics(
+      linked.map((row) => ({
+        total: row.total,
+        status: row.status,
+        orderDate: row.order_date,
+      })),
+    );
     await client.query(
-      "UPDATE customers SET total_orders=total_orders+1,total_spent=total_spent+$2,first_order_date=coalesce(first_order_date,now()),last_order_date=now(),updated_at=now() WHERE id=$1",
-      [customerId, money(summary.total_cents)],
+      "UPDATE customers SET total_orders=$2,total_spent=$3,first_order_date=$4,last_order_date=$5,updated_at=now() WHERE id=$1",
+      [
+        customerId,
+        metrics.totalOrders,
+        metrics.totalSpent.toFixed(2),
+        metrics.firstOrderDate,
+        metrics.lastOrderDate,
+      ],
     );
     await client.query(
       "INSERT INTO whatsapp_order_provenance(execution_id,order_id,quote_id,quote_revision,quote_hash,conversation_hash,owner_actor) VALUES($1,$2,$3,$4,$5,$6,$7)",
