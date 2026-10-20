@@ -1,4 +1,5 @@
 import {nextCustomerNumber,requireCustomerNumberMigration} from './customerNumberService.js';
+import {checkCustomerCreationMaintenance} from './customerCreationMaintenance.js';
 /**
  * Customer Router – tRPC routes for CRM / customer management
  * Features: CRUD, advanced filtering, communication history, email sending, CSV export
@@ -6,7 +7,7 @@ import {nextCustomerNumber,requireCustomerNumberMigration} from './customerNumbe
 import { z } from "zod";
 import { eq, desc, sql, and, gte, lte, like, or, inArray } from "drizzle-orm";
 import { router, adminProcedure } from "./trpc.js";
-import { getDb } from "./db.js";
+import { getDb, getPool } from "./db.js";
 import { customers, orders, orderItems, customerCommunications, emailTemplates, emailCampaigns, partners } from "../drizzle/schema.js";
 import { queueCustomerDuplicateReview } from "./customerIntegrityService.js";
 import { persistAddressValidation, validateGermanAddress } from "./addressValidationService.js";
@@ -290,6 +291,7 @@ export const customerRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
+      await checkCustomerCreationMaintenance('customer.create','mutation',await getPool());
       const addressHasInput = [input.street, input.houseNumber, input.zip, input.city, input.country].some((value) => !!value?.trim());
       const addressValidation = addressHasInput ? await validateGermanAddress({
         street: input.street || "", houseNumber: input.houseNumber || "", zip: input.zip || "", city: input.city || "", country: input.country || "",
@@ -872,6 +874,8 @@ export const customerRouter = router({
     .mutation(async ({ input }) => {
     const db = await getDb();
     if (!db) throw new Error("Database not available");
+
+    if(!input?.dryRun)await checkCustomerCreationMaintenance('customer.backfillFromOrders','mutation',await getPool());
 
     const PLACEHOLDER_EMAILS = new Set([
       'keine@angabe.de', 'noemail@noemail.de', 'no@email.de', 'noreply@noreply.de',

@@ -1,4 +1,5 @@
 import {nextCustomerNumber} from './customerNumberService.js';
+import {checkCustomerCreationMaintenance} from './customerCreationMaintenance.js';
 import { publicCodeCommissionPreview } from "./partnerCommissionPreview.js";
 import { hasOtherPaidCodeOrder } from "./partnerCodeHistory.js";
 /**
@@ -238,6 +239,7 @@ export const orderRouter = router({
         .mutation(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
+      await checkCustomerCreationMaintenance('order.create','mutation',await getPool());
       const communicationLanguage = normalizeCommunicationLanguage(input.communicationLanguage);
 
       const isRequestedWawiManualSale = input.orderSource === "wawi_manual";
