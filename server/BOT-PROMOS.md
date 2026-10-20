@@ -13,3 +13,6 @@ Zusätzlich werden bestehende persönliche Zuordnungen, Follow-up-Codes, Erinner
 Antwort enthält regulären Angebotspreis und separat die serverseitig berechnete Promo-Summe samt Versand/Endpreis. bot_approved:true kennzeichnet nur tatsächlich über diese positive Liste ausgewählte Codes. Warenbestand wird nicht reserviert. Vor späterem Senden prüft der Bot erneut; geänderte Werte benötigen neue Telegram-Freigabe.
 
 Isolierte Tests verwenden synthetische Codes. Keine Order-, Kunden-, Mail- oder Bestandsmutation in diesem Modul. Der Shop-Checkout und normale Promo-Verwaltung bleiben unverändert.
+
+## Öffentliche Codes mit Neukunden-/Nutzungslimit
+Wenn ein ausdrücklich bot-freigegebener öffentlicher Code ein Limit pro Kunde hat oder als Neukundenaktion beschrieben ist, bleiben diese Voraussetzungen erhalten. Ohne Kundendatenzugriff liefert die reine Angebotsabfrage requires_customer_eligibility_check:true, customer_limit und new_customer_only. Der Bot muss den Rabatt dann ausdrücklich bedingt formulieren. Das ist keine geprüfte persönliche Einlöseberechtigung und keine Anwendung einer Bestellung. Ein bedingungslos zulässiger Code wird gegenüber einem nur bedingt passenden bevorzugt. Die spätere Bestellprüfung bleibt separat; kein Order-Vertrag wird gelockert. Partner-/Creator-Codekollisionen werden zusätzlich anhand partner_codes und partners ausgeschlossen.
