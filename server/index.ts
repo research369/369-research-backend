@@ -31,6 +31,7 @@ import { ensureNasalDiySetSchema } from "./nasalDiySetSchema.js";
 import { ensureAddressValidationSchema } from "./addressValidationSchema.js";
 import { ensureCustomerDossierSchema } from "./customerDossierSchema.js";
 import { ensureQrCampaignSchema } from "./qrCampaignSchema.js";
+import { ensureInternalBarcodeSchema } from "./internalBarcodeSchema.js";
 import { ensureDiscountProvenanceSchema } from "./discountProvenanceSchema.js";
 import { ensureShipmentLabelOverrideConfig } from "./shipmentLabelOverrideConfig.js";
 import { ensurePartnerAddressRequestSchema } from "./partnerAddressRequestSchema.js";
@@ -431,6 +432,14 @@ async function start() {
     await ensureQrCampaignSchema();
   } catch (err) {
     console.warn("[Server] QR campaign schema migration failed:", err);
+  }
+
+  // Additive, admin-only registry for reusable internal variant barcodes.
+  try {
+    await ensureInternalBarcodeSchema();
+    console.log("[Server] Internal article barcode schema ready");
+  } catch (err) {
+    console.warn("[Server] Internal article barcode schema migration failed:", err);
   }
 
   // Additive Rabattprovenienz: Rabattbetrag und bestehende Rabattcodes bleiben unverändert.
