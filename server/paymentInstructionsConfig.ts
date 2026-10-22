@@ -49,32 +49,50 @@ export function parseBankTransferPaymentInstructions(value: string | undefined):
   }
 }
 
+function toWiseOnlyPaymentInstructions(config: BankTransferPaymentInstructionsConfig | null): BankTransferPaymentInstructionsConfig | null {
+  if (!config || !config.enabled) return config;
+  const wiseAccounts = config.accounts.filter((account) => /\bwise\b/i.test([account.id, account.labelDe, account.labelEn, account.bankAddress || ""].join(" ")));
+  // Fail closed: no payment details are released unless there is exactly one
+  // existing account explicitly identified as Wise.
+  if (wiseAccounts.length !== 1) return null;
+  return {
+    ...config,
+    checkoutLabelDe: "SEPA- & Echtzeitüberweisung (Wise)",
+    checkoutLabelEn: "SEPA & instant bank transfer (Wise)",
+    checkoutHintDe: "Die Wise-Bankverbindung und dein persönlicher Verwendungszweck werden nach erfolgreicher Bestellung freigegeben.",
+    checkoutHintEn: "The Wise bank account and your personal payment reference are released after your order is created.",
+    accounts: wiseAccounts,
+  };
+}
+
 export async function getBankTransferPaymentInstructionsConfig(): Promise<BankTransferPaymentInstructionsConfig | null> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
   const [setting] = await db.select().from(shopSettings)
     .where(eq(shopSettings.key, PAYMENT_INSTRUCTIONS_CONFIG_KEY))
     .limit(1);
-  return parseBankTransferPaymentInstructions(setting?.value);
+  return toWiseOnlyPaymentInstructions(parseBankTransferPaymentInstructions(setting?.value));
 }
 
 export function toPublicBankTransferPresentation(config: BankTransferPaymentInstructionsConfig | null): PublicBankTransferPresentation | null {
-  if (!config || !config.enabled) return null;
+  const wiseOnly = toWiseOnlyPaymentInstructions(config);
+  if (!wiseOnly || !wiseOnly.enabled) return null;
   return {
     enabled: true,
-    accountCount: config.accounts.length,
-    checkoutLabelDe: config.checkoutLabelDe,
-    checkoutLabelEn: config.checkoutLabelEn,
-    checkoutHintDe: config.checkoutHintDe,
-    checkoutHintEn: config.checkoutHintEn,
+    accountCount: wiseOnly.accounts.length,
+    checkoutLabelDe: wiseOnly.checkoutLabelDe,
+    checkoutLabelEn: wiseOnly.checkoutLabelEn,
+    checkoutHintDe: wiseOnly.checkoutHintDe,
+    checkoutHintEn: wiseOnly.checkoutHintEn,
   };
 }
 
 export function toReleasedBankTransferInstructions(config: BankTransferPaymentInstructionsConfig | null): ReleasedBankTransferInstructions | null {
-  if (!config || !config.enabled) return null;
+  const wiseOnly = toWiseOnlyPaymentInstructions(config);
+  if (!wiseOnly || !wiseOnly.enabled) return null;
   return {
-    accountCount: config.accounts.length,
-    accounts: config.accounts,
+    accountCount: wiseOnly.accounts.length,
+    accounts: wiseOnly.accounts,
   };
 }
 

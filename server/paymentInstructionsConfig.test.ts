@@ -13,9 +13,9 @@ const config: BankTransferPaymentInstructionsConfig = {
   checkoutHintDe: "Zwei Konten nach Bestellung.",
   checkoutHintEn: "Two accounts after order.",
   accounts: [{
-    id: "test-account",
-    labelDe: "Testbank",
-    labelEn: "Test bank",
+    id: "wise",
+    labelDe: "Wise",
+    labelEn: "Wise",
     accountHolder: "369 Research",
     iban: "DE00123456789012345678",
     bic: "TESTDEFFXXX",
@@ -34,4 +34,17 @@ test("Kontodaten werden ausschließlich in der Bestellfreigabe bereitgestellt", 
   assert.ok(released);
   assert.equal(released.accounts[0].iban, "DE00123456789012345678");
   assert.equal(released.accounts[0].bic, "TESTDEFFXXX");
+});
+
+
+test("Bunq-Konten werden niemals in einer Kunden-Zahlungsausgabe freigegeben", () => {
+  const mixed = { ...config, accounts: [
+    ...config.accounts,
+    { ...config.accounts[0], id: "bunq", labelDe: "Bunq", labelEn: "Bunq" },
+  ] };
+  const released = toReleasedBankTransferInstructions(mixed);
+  assert.ok(released);
+  assert.equal(released.accountCount, 1);
+  assert.equal(released.accounts[0].id, "wise");
+  assert.doesNotMatch(JSON.stringify(released), /bunq/i);
 });
