@@ -11,3 +11,18 @@ test('Globalrabatt und Code korrekt nacheinander',()=>{const global=JSON.stringi
 test('Keine Schreibroute oder Kundenzugriff',async()=>{process.env.PEPGPT_OFFERS_READ_KEY='t'.repeat(64);const app=express();app.use(express.json());app.use('/api/pepgpt-read',pepgptOffersRouter);const server=createServer(app);await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));const base='http://127.0.0.1:'+(server.address() as any).port+'/api/pepgpt-read';try{assert.equal((await fetch(base+'/offers',{method:'POST'})).status,401);const headers={authorization:'Bearer '+'t'.repeat(64),'Content-Type':'application/json'};for(const endpoint of ['/orders','/customers'])assert.equal((await fetch(base+endpoint,{method:'POST',headers})).status,405);assert.equal((await fetch(base+'/offers',{method:'POST',headers,body:JSON.stringify({...input,sql:'x'})})).status,400);}finally{server.close();}});
 
 test('Phase 1 bietet ohne expliziten Code keinen automatischen Code an',()=>{assert.equal(projectOffers([parent,stock(2,3)],[code()],null,{...input,promotion:{mode:'none'}},now).offers[0].promotions.length,0);});
+test('Freigegebene WaWi-Substitution erfüllt 20 mg mit 2x10 mg ohne Preisänderung oder Bestandsbuchung',()=>{
+ const articles=[parent,stock(2,2),stock(3,0)],before=JSON.stringify(articles);
+ const o=projectOffers(articles,[code()],null,{...input,dosage:'20 mg'},now,true).offers[0];
+ assert.equal(o.available,true);assert.equal(o.stock,0);assert.equal(o.unit_price,120);assert.equal(o.promotions[0].product_total,108);
+ assert.deepEqual(o.fulfillment.components.map((c:any)=>[c.inventory_article_id,c.quantity,c.content_mg]),[[2,2,10]]);assert.equal(o.fulfillment.total_content_mg,20);assert.equal(JSON.stringify(articles),before);
+});
+test('Substitution bleibt bei ausgeschaltetem Schalter, falscher Form/Familie und fehlendem Bestand gesperrt',()=>{
+ const q={...input,dosage:'20 mg',promotion:{mode:'none' as const}};
+ for(const articles of [[parent,stock(2,1),stock(3,0)],[parent,{...stock(2,4),shop_product_id:'anderes-produkt'},stock(3,0)],[parent,{...stock(2,4),category:'Kapseln'},stock(3,0)]])assert.equal(projectOffers(articles,[],null,q,now,true).offers[0].available,false);
+ assert.equal(projectOffers([parent,stock(2,4),stock(3,0)],[],null,q,now,false).offers[0].available,false);
+});
+test('Teilbestand wird gemeinsam mit kleineren freigegebenen Varianten exakt geplant',()=>{
+ const o=projectOffers([parent,stock(2,2),stock(3,1)],[],null,{...input,dosage:'20 mg',quantity:2,promotion:{mode:'none'}},now,true).offers[0];
+ assert.equal(o.available,true);assert.equal(o.fulfillment.total_content_mg,40);assert.deepEqual(o.fulfillment.components.map((c:any)=>[c.quantity,c.content_mg]),[[1,20],[2,10]]);
+});
