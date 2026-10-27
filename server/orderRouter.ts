@@ -24,13 +24,10 @@ import { resolveQrAttribution } from "./qrCampaignService.js";
 import { withStoreSourceMarker } from "./storeSource.js";
 import {
   calculateAuthoritativeKwkOrder,
-  calculateAuthoritativeShipping,
   calculatePromoDiscount,
-  requiresColdChainShipping,
   normalizeKwkPhone,
   roundMoney,
   resolveAuthoritativeItemPrice,
-  resolveShippingRegion,
   type PromoDefinition,
 } from "./kwkCheckoutPricing.js";
 import { verifyKwkToken } from "./kwkAuth.js";
@@ -72,7 +69,7 @@ const createOrderSchema = z.object({
     quantity: z.number(),
     type: z.string(),
     shopProductId: z.string().optional(), // product id from shop (e.g. '3g-triple-g')
-    isNasalSpray: z.boolean().optional(), // Legacy: fertig gemischtes Nasenspray
+    isNasalSpray: z.boolean().optional(),
     // DIY-Set: Vial plus BAC Wasser, Flasche, Aufziehspritze und Kanüle (+7 €).
     isNasalDiySet: z.boolean().optional(),
     isPlugPlay: z.boolean().optional(),   // Plug&Play Patrone (+15€ Aufpreis)
@@ -179,26 +176,6 @@ export async function createOrderFromTrustedInput(
         input.subtotal = roundMoney(input.items.reduce((sum, item) => sum + item.price * item.quantity, 0));
       }
 
-        // Kühlpflichtige Artikel dürfen niemals mit der normalen DHL-Gebühr
-        // durchrutschen. Ein bereits gewährter Gratisversand (0 €) bleibt dabei
-        // ausdrücklich erhalten; alle normalen Versandbeträge werden mindestens
-        // auf die serverseitig berechnete Kühlversandpauschale angehoben.
-        const serverBaseShipping = calculateAuthoritativeShipping({
-          country: input.customer.country,
-          items: [],
-        });
-        const serverColdShipping = calculateAuthoritativeShipping({
-          country: input.customer.country,
-          items: input.items,
-        });
-        if (
-          input.items.some(requiresColdChainShipping)
-          && input.shipping >= serverBaseShipping
-          && input.shipping < serverColdShipping
-        ) {
-          input.shipping = serverColdShipping;
-          input.shippingCountry = resolveShippingRegion(input.customer.country);
-        }
 
         const lineSubtotal = roundMoney(input.items.reduce((sum, item) => sum + item.price * item.quantity, 0));
       if (!hasKwkRequest && Math.abs(lineSubtotal - roundMoney(input.subtotal)) > 0.02) {
@@ -299,12 +276,10 @@ export async function createOrderFromTrustedInput(
 
         const promoDiscount = calculatePromoDiscount({
           subtotal: input.subtotal,
-          items: input.items,
           promo: promoDefinition,
         });
         input.shipping = calculateAuthoritativeShipping({
           country: input.customer.country,
-          items: input.items,
           promoDescription: promoDefinition?.description,
         });
         input.shippingCountry = resolveShippingRegion(input.customer.country);

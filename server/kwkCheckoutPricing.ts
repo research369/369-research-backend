@@ -119,37 +119,16 @@ export function resolveShippingRegion(country: string): "de" | "eu" | "ch" {
   return "eu";
 }
 
-export type ShippingCheckoutItem = {
-  name?: string;
-  variant?: string;
-  isPlugPlay?: boolean;
-  isNasalSpray?: boolean;
-  isNasalDiySet?: boolean;
-};
-
-/**
- * Plug&Play bleibt die Markenbezeichnung für die Double-Chamber-Patrone,
- * löst aber keinen Kühlversand oder Packstationsausschluss mehr aus.
- * Kühlpflichtig sind nur fertig gemischte Nasensprays. Die Rückfallerkennung
- * schützt weiterhin ältere Bundlepositionen mit dem Variantenhinweis „Nasenspray“.
- */
-export function requiresColdChainShipping(item: ShippingCheckoutItem): boolean {
-  if (item.isNasalDiySet === true) return false;
-  if (item.isNasalSpray === true) return true;
-  const descriptor = `${item.name || ""} ${item.variant || ""}`.toLowerCase();
-  return descriptor.includes("nasenspray") && !descriptor.includes("diy");
-}
 
 export function calculateAuthoritativeShipping(input: {
   country: string;
-  items: ShippingCheckoutItem[];
   promoDescription?: string | null;
 }): number {
   const region = resolveShippingRegion(input.country);
   const { freeShipping } = parsePromoMetadata(input.promoDescription);
   if (freeShipping.some((entry) => entry.toLowerCase() === region)) return 0;
   const base = region === "de" ? 8 : region === "ch" ? 18 : 15;
-  return base + (input.items.some(requiresColdChainShipping) ? 7 : 0);
+  return base;
 }
 
 function productMatchesRestriction(productId: string, restriction: string): boolean {

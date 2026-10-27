@@ -155,41 +155,36 @@ test("Checkout V2 refuses to combine a partner route with a referral route", () 
   );
 });
 
-test("Checkout V2 permits Plug&Play Double-Chamber at Packstation with standard shipping", () => {
+test("Checkout V2 permits Plug&Play at Packstation with standard shipping", () => {
   const result = calculateCheckoutV2Quote({
     selections: [{ shopProductId: "adamax", dosage: "10 mg", quantity: 1, isPlugPlay: true }],
     delivery: { country: "Deutschland", deliveryType: "packstation" },
     catalog,
   });
-  assert.equal(result.coldChainRequired, false);
   assert.equal(result.shipping, 8);
 });
 
-test("Checkout V2 permits Plug&Play Double-Chamber at Postfiliale with standard shipping", () => {
+test("Checkout V2 permits Plug&Play at Postfiliale with standard shipping", () => {
   const result = calculateCheckoutV2Quote({
     selections: [{ shopProductId: "adamax", dosage: "10 mg", quantity: 1, isPlugPlay: true }],
     delivery: { country: "Deutschland", deliveryType: "postfiliale" },
     catalog,
   });
-  assert.equal(result.coldChainRequired, false);
   assert.equal(result.shipping, 8);
 });
 
-test("Checkout V2 rejects Packstation when cold-chain delivery is required", () => {
-  assert.throws(
-    () => calculateCheckoutV2Quote({
-      selections: [{ shopProductId: "ready-nasal", dosage: "10 mg", quantity: 1, isNasalSpray: true }],
-      delivery: { country: "Deutschland", deliveryType: "packstation" },
-      catalog,
-    }),
-    (error: unknown) => error instanceof CheckoutV2QuoteError && error.code === "PICKUP_POINT_NOT_AVAILABLE",
-  );
+test("Checkout V2 permits Packstation for all selectable product formats", () => {
+  const result = calculateCheckoutV2Quote({
+    selections: [{ shopProductId: "ready-nasal", dosage: "10 mg", quantity: 1, isNasalSpray: true }],
+    delivery: { country: "Deutschland", deliveryType: "packstation" },
+    catalog,
+  });
+  assert.equal(result.shipping, 8);
 });
 
 test("Checkout V2 permits all seven approved DIY nasal product families and adds the configured kit surcharge", () => {
   const result = quote({ shopProductId: "semax-selank", dosage: "10 mg", quantity: 1, isNasalDiySet: true });
   assert.equal(result.lines[0]?.unitPrice, 65);
-  assert.equal(result.coldChainRequired, false);
   assert.equal(result.total, 73);
 });
 
@@ -236,15 +231,13 @@ test("Checkout V2 refuses a quote when a required Gratis-BAC item is out of stoc
   );
 });
 
-test("Checkout V2 rejects Postfiliale when cold-chain delivery is required", () => {
-  assert.throws(
-    () => calculateCheckoutV2Quote({
-      selections: [{ shopProductId: "ready-nasal", dosage: "10 mg", quantity: 1, isNasalSpray: true }],
-      delivery: { country: "Deutschland", deliveryType: "postfiliale" },
-      catalog,
-    }),
-    (error: unknown) => error instanceof CheckoutV2QuoteError && error.code === "PICKUP_POINT_NOT_AVAILABLE",
-  );
+test("Checkout V2 permits Postfiliale for all selectable product formats", () => {
+  const result = calculateCheckoutV2Quote({
+    selections: [{ shopProductId: "ready-nasal", dosage: "10 mg", quantity: 1, isNasalSpray: true }],
+    delivery: { country: "Deutschland", deliveryType: "postfiliale" },
+    catalog,
+  });
+  assert.equal(result.shipping, 8);
 });
 
 test("Checkout V2 derives partner self-discount and credit only from server-provided session values", () => {

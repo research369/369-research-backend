@@ -1,7 +1,6 @@
 import {
   calculateAuthoritativeShipping,
   calculatePromoDiscount,
-  requiresColdChainShipping,
   resolveAuthoritativeItemPrice,
   roundMoney,
   type KwkCatalogArticle,
@@ -94,7 +93,6 @@ export type CheckoutV2Quote = {
   shipping: number;
   discount: number;
   total: number;
-  coldChainRequired: boolean;
   deliveryType: "home" | "packstation" | "postfiliale";
   discountLines: CheckoutV2DiscountLine[];
 };
@@ -346,11 +344,6 @@ export function calculateCheckoutV2Quote(input: {
 
   const lines = input.selections.map((selection) => resolveLine(selection, input.catalog));
   assertNasalKitAvailability(input.selections, input.catalog);
-  const coldChainRequired = lines.some(requiresColdChainShipping);
-  if ((input.delivery.deliveryType === "packstation" || input.delivery.deliveryType === "postfiliale") && coldChainRequired) {
-    throw new CheckoutV2QuoteError("PICKUP_POINT_NOT_AVAILABLE", "Für diese Bestellung ist eine Hausadresse erforderlich.");
-  }
-
   const benefits = normalizeBenefits(input.benefit, input.benefits);
   const bacWater = input.catalog.find((article) => article.isActive === 1 && normalizeId(article.shopProductId || "") === "bac-wasser-3ml");
   const giftLines = calculateCheckoutV2AutomaticGiftLines({
@@ -361,7 +354,6 @@ export function calculateCheckoutV2Quote(input: {
   assertAggregateAvailability({ lines, giftLines, catalog: input.catalog });
   const shipping = calculateAuthoritativeShipping({
     country,
-    items: lines,
     promoDescription: benefits.promotion?.kind === "promo" ? benefits.promotion.promo.description : undefined,
   });
   const subtotal = roundMoney(lines.reduce((sum, line) => sum + line.lineTotal, 0));
@@ -373,7 +365,6 @@ export function calculateCheckoutV2Quote(input: {
     shipping,
     discount: discount.discount,
     total: discount.total,
-    coldChainRequired,
     deliveryType: input.delivery.deliveryType,
     discountLines: discount.discountLines,
   };
