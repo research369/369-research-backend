@@ -88,9 +88,10 @@ test("catalog prices and option surcharges are authoritative", () => {
   assert.equal(resolveAuthoritativeItemPrice({ shopProductId: "test", dosage: "10 mg", price: 1, quantity: 1, isPlugPlay: true }, catalog), 70);
 });
 
-test("shipping comes from the delivery country and is never discounted by KWK", () => {
+test("shipping comes from the delivery country; Plug&Play Double-Chamber uses standard shipping", () => {
   assert.equal(calculateAuthoritativeShipping({ country: "Deutschland", items: [] }), 8);
-  assert.equal(calculateAuthoritativeShipping({ country: "Schweiz", items: [{ isPlugPlay: true }] }), 25);
+  assert.equal(requiresColdChainShipping({ isPlugPlay: true }), false);
+  assert.equal(calculateAuthoritativeShipping({ country: "Schweiz", items: [{ isPlugPlay: true }] }), 18);
   assert.equal(calculateAuthoritativeShipping({ country: "Deutschland", items: [{ isPlugPlay: true }], promoDescription: 'Aktion | {"freeShipping":["de"]}' }), 0);
 });
 

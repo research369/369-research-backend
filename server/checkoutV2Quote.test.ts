@@ -155,6 +155,26 @@ test("Checkout V2 refuses to combine a partner route with a referral route", () 
   );
 });
 
+test("Checkout V2 permits Plug&Play Double-Chamber at Packstation with standard shipping", () => {
+  const result = calculateCheckoutV2Quote({
+    selections: [{ shopProductId: "adamax", dosage: "10 mg", quantity: 1, isPlugPlay: true }],
+    delivery: { country: "Deutschland", deliveryType: "packstation" },
+    catalog,
+  });
+  assert.equal(result.coldChainRequired, false);
+  assert.equal(result.shipping, 8);
+});
+
+test("Checkout V2 permits Plug&Play Double-Chamber at Postfiliale with standard shipping", () => {
+  const result = calculateCheckoutV2Quote({
+    selections: [{ shopProductId: "adamax", dosage: "10 mg", quantity: 1, isPlugPlay: true }],
+    delivery: { country: "Deutschland", deliveryType: "postfiliale" },
+    catalog,
+  });
+  assert.equal(result.coldChainRequired, false);
+  assert.equal(result.shipping, 8);
+});
+
 test("Checkout V2 rejects Packstation when cold-chain delivery is required", () => {
   assert.throws(
     () => calculateCheckoutV2Quote({

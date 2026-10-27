@@ -128,12 +128,12 @@ export type ShippingCheckoutItem = {
 };
 
 /**
- * Kühlversand ist für Plug&Play und fertig gemischte Nasensprays verpflichtend.
- * Neben dem persistierten Flag schützt die Rückfallerkennung Bestellungen aus
- * älteren Bundleversionen, deren Variantenbezeichnung „Nasenspray“ enthält.
+ * Plug&Play bleibt die Markenbezeichnung für die Double-Chamber-Patrone,
+ * löst aber keinen Kühlversand oder Packstationsausschluss mehr aus.
+ * Kühlpflichtig sind nur fertig gemischte Nasensprays. Die Rückfallerkennung
+ * schützt weiterhin ältere Bundlepositionen mit dem Variantenhinweis „Nasenspray“.
  */
 export function requiresColdChainShipping(item: ShippingCheckoutItem): boolean {
-  if (item.isPlugPlay === true) return true;
   if (item.isNasalDiySet === true) return false;
   if (item.isNasalSpray === true) return true;
   const descriptor = `${item.name || ""} ${item.variant || ""}`.toLowerCase();
