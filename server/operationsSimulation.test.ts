@@ -32,7 +32,7 @@ test(
         JSON.stringify({
           enabled: true,
           percentage: 20,
-          expiresAt: null,
+          expiresAt: new Date(Date.now() + 3600000).toISOString(),
           stackWithPromotionCodes: true,
           labelDe: "Testaktion",
           labelEn: "Test discount",

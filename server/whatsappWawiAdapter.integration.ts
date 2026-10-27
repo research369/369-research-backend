@@ -388,7 +388,7 @@ test("Native Mehrpositionsquote übernimmt Sale, Dauerrabatt und Code aus den ka
         enabled: true,
         percentage: 20,
         startsAt: null,
-        expiresAt: null,
+        expiresAt: new Date(Date.now() + 3600000).toISOString(),
         stackWithPromotionCodes: true,
         labelDe: "Test",
         labelEn: "Test",
@@ -409,6 +409,48 @@ test("Native Mehrpositionsquote übernimmt Sale, Dauerrabatt und Code aus den ka
         .current_uses,
       1,
     );
+  } finally {
+    await pool.query(
+      "DELETE FROM shop_settings WHERE key='global_automatic_discount'",
+    );
+  }
+});
+
+test("WhatsApp-Quote respektiert nicht kombinierbare Codes und globalen Freiversand", async () => {
+  await pool.query(
+    "INSERT INTO shop_settings(key,value) VALUES('global_automatic_discount',$1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+    [
+      JSON.stringify({
+        enabled: true,
+        percentage: 20,
+        startsAt: null,
+        expiresAt: new Date(Date.now() + 3600000).toISOString(),
+        freeShippingEnabled: true,
+        freeShippingMinOrder: 50,
+        freeShippingRegions: ["de"],
+        stackWithPromotionCodes: false,
+        stackWithPartnerCreatorCodes: true,
+        stackWithKwk: true,
+        labelDe: "Test",
+        labelEn: "Test",
+      }),
+    ],
+  );
+  try {
+    const withoutCode = await service.quote(
+      "phase1-bot",
+      await request("ALPHA", { promotion: { mode: "none" } }),
+    );
+    assert.equal(withoutCode.order_summary.discount_total_cents, 1400);
+    assert.equal(withoutCode.order_summary.shipping_cents, 0);
+    assert.equal(withoutCode.order_summary.total_cents, 5600);
+
+    const withCode = await service.quote("phase1-bot", await request("ALPHA"));
+    // Der Code bleibt gültig; er ersetzt bei ausgeschalteter Kombination sowohl
+    // Dauerrabatt als auch dessen Freiversand.
+    assert.equal(withCode.order_summary.discount_total_cents, 700);
+    assert.equal(withCode.order_summary.shipping_cents, 800);
+    assert.equal(withCode.order_summary.total_cents, 7100);
   } finally {
     await pool.query(
       "DELETE FROM shop_settings WHERE key='global_automatic_discount'",

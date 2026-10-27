@@ -17,6 +17,7 @@ import {
 import {
   parseGlobalAutomaticDiscountConfig,
   getActiveGlobalAutomaticDiscount,
+  resolveGlobalAutomaticDiscountBenefits,
 } from "./globalAutomaticDiscountConfig.js";
 import { orderHash } from "./jarvyOrderContract.js";
 import type { QuoteRequest } from "./whatsappOrderContract.js";
@@ -182,10 +183,17 @@ export class WhatsappWawiAdapter implements Phase1Backend {
       parseGlobalAutomaticDiscountConfig(setting ?? null),
       new Date(),
     );
-    const automatic = calculateAutomaticGlobalDiscount(
+    const globalBenefits = resolveGlobalAutomaticDiscountBenefits(global, {
+      merchandiseSubtotal: subtotal,
+      shippingRegion: resolveShippingRegion(request.delivery.country_code),
+      hasPromotionCode: request.promotion.mode === "explicit_code",
+    });
+    const automatic = globalBenefits.globalDiscountApplies
+      ? calculateAutomaticGlobalDiscount(
       subtotal,
       global?.percentage ?? 0,
-    );
+      )
+      : 0;
     let discount = automatic,
       shipping = calculateAuthoritativeShipping({
         country: request.delivery.country_code,
@@ -209,7 +217,7 @@ export class WhatsappWawiAdapter implements Phase1Backend {
         subtotal < rule.min_order
       )
         throw Error("promotion_not_eligible");
-      const preceding = global?.stackWithPromotionCodes ? automatic : 0;
+      const preceding = automatic;
       const codeDiscount = calculatePromoDiscount({
         subtotal,
         items,
@@ -228,13 +236,8 @@ export class WhatsappWawiAdapter implements Phase1Backend {
       });
       if (codeDiscount <= 0 && promoShipping >= shipping)
         throw Error("promotion_not_eligible");
-      if (
-        subtotal - preceding - codeDiscount + promoShipping >
-        subtotal - automatic + shipping
-      )
-        throw Error("promotion_not_eligible");
       discount = roundMoney(preceding + codeDiscount);
-      shipping = promoShipping;
+      shipping = globalBenefits.globalFreeShippingApplies ? 0 : promoShipping;
       if (preceding)
         discounts.push({
           source: "automatic_global_percent",
@@ -248,12 +251,15 @@ export class WhatsappWawiAdapter implements Phase1Backend {
           code: request.promotion.code,
           amount_cents: cents(codeDiscount),
         });
-    } else if (automatic)
-      discounts.push({
-        source: "automatic_global_percent",
-        label: "Dauerrabatt",
-        amount_cents: cents(automatic),
-      });
+    } else {
+      if (globalBenefits.globalFreeShippingApplies) shipping = 0;
+      if (automatic)
+        discounts.push({
+          source: "automatic_global_percent",
+          label: "Dauerrabatt",
+          amount_cents: cents(automatic),
+        });
+    }
     return {
       order_summary: {
         currency: "EUR",

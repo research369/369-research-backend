@@ -47,7 +47,10 @@ import {
   type PromoDefinition,
 } from "./kwkCheckoutPricing.js";
 import { verifyKwkToken } from "./kwkAuth.js";
-import { getActiveGlobalAutomaticDiscountFromDb } from "./globalAutomaticDiscountConfig.js";
+import {
+  getActiveGlobalAutomaticDiscountFromDb,
+  resolveGlobalAutomaticDiscountBenefits,
+} from "./globalAutomaticDiscountConfig.js";
 import { calculateAuthoritativeWawiManualOrder, normalizeDiscountCodeForOrderSource } from "./manualWawiPricing.js";
 import { calculateAuthoritativeShopCheckoutPricing } from "./shopCheckoutPricing.js";
 import { shouldSendOrderConfirmation } from "./orderConfirmationPolicy.js";
@@ -273,13 +276,6 @@ export const orderRouter = router({
         || requestedKwkCredit > 0
         || (input.kwkDiscount || 0) > 0;
       const configuredGlobalDiscount = await getActiveGlobalAutomaticDiscountFromDb();
-      // Falls die Kombination mit Aktionscodes deaktiviert wurde, bleibt ein
-      // gültiger Aktionscode bewusst allein maßgeblich. Diese Entscheidung wird
-      // aus der DB getroffen; der Browser kann die Konfiguration nicht setzen.
-      const activeGlobalDiscount = configuredGlobalDiscount
-        && (configuredGlobalDiscount.stackWithPromotionCodes || !input.discountCode?.trim())
-        ? configuredGlobalDiscount
-        : null;
 
       // A public Creator/Partner code is a server-authoritative commercial term.
       // Its customer discount is never accepted from the browser. Creator codes
@@ -422,7 +418,7 @@ export const orderRouter = router({
         isAuthenticatedWawiManualSale,
         sendOrderConfirmation: input.sendOrderConfirmation,
       });
-      if (!isAuthenticatedWawiManualSale && (hasKwkRequest || activeGlobalDiscount || resolvedPublicPartnerCode || authenticatedPartner)) {
+      if (!isAuthenticatedWawiManualSale && (hasKwkRequest || configuredGlobalDiscount || resolvedPublicPartnerCode || authenticatedPartner)) {
         const catalog = await db.select({
           sku: articles.sku,
           shopProductId: articles.shopProductId,
@@ -440,10 +436,36 @@ export const orderRouter = router({
         input.subtotal = roundMoney(input.items.reduce((sum, item) => sum + item.price * item.quantity, 0));
       }
 
-      const automaticGlobalDiscountAmount = activeGlobalDiscount
+      // Kombinationen werden erst entschieden, nachdem gültige Codes und deren
+      // serverseitige Gegenstücke aufgelöst sind. Ein nicht stackbarer Code bleibt
+      // gültig; ausschließlich beide globalen Vorteile entfallen.
+      const globalBenefitResolution = resolveGlobalAutomaticDiscountBenefits(
+        configuredGlobalDiscount,
+        {
+          merchandiseSubtotal: input.subtotal,
+          shippingRegion: resolveShippingRegion(input.customer.country),
+          hasPromotionCode: Boolean(resolvedPromoCode),
+          hasPartnerCreatorCode: Boolean(resolvedPublicPartnerCode || authenticatedPartner),
+          hasKwk: hasKwkRequest,
+        },
+      );
+      const activeGlobalDiscount = configuredGlobalDiscount;
+      const automaticGlobalDiscountAmount = globalBenefitResolution.globalDiscountApplies && activeGlobalDiscount
         ? calculateAutomaticGlobalDiscount(input.subtotal, activeGlobalDiscount.percentage)
         : 0;
-      if (resolvedPromoCode) {
+      // Browserwerte für Versand sind niemals maßgeblich. Jeder öffentliche
+      // Checkout startet mit der kanonischen Länder-/Positionsberechnung;
+      // erst ein serverseitig freigegebener Promo- oder Dauervorteil darf sie
+      // auf null setzen. Das verhindert kostenlose Versandwege durch eine
+      // manipulierte Checkout-Payload.
+      if (!isAuthenticatedWawiManualSale) {
+        input.shipping = calculateAuthoritativeShipping({
+          country: input.customer.country,
+          items: input.items,
+          promoDescription: resolvedPromoCode?.description,
+        });
+        input.shippingCountry = resolveShippingRegion(input.customer.country);
+      } else if (resolvedPromoCode) {
         const [promo] = await db.select({ minOrder: promoCodes.minOrder })
           .from(promoCodes)
           .where(eq(promoCodes.id, resolvedPromoCodeRecord!.id))
@@ -457,6 +479,10 @@ export const orderRouter = router({
           promoDescription: resolvedPromoCode.description,
           coldChainRequested: coldShippingRequestedByWawi,
         });
+        input.shippingCountry = resolveShippingRegion(input.customer.country);
+      }
+      if (globalBenefitResolution.globalFreeShippingApplies) {
+        input.shipping = 0;
         input.shippingCountry = resolveShippingRegion(input.customer.country);
       }
       // The catalog-backed subtotal is available now. Every public shop term is
@@ -644,6 +670,9 @@ export const orderRouter = router({
           promoDescription: promoDefinition?.description,
           coldChainRequested: coldShippingRequestedByWawi,
         });
+        if (globalBenefitResolution.globalFreeShippingApplies) {
+          input.shipping = 0;
+        }
         input.shippingCountry = resolveShippingRegion(input.customer.country);
         const authoritative = calculateAuthoritativeKwkOrder({
           subtotal: input.subtotal,

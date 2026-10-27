@@ -3,14 +3,14 @@ import { z } from 'zod';
 import type { Pool } from 'pg';
 import type { OpsActor } from './operationsAuth.js';
 import { orderHash } from './jarvyOrderContract.js';
-import { globalAutomaticDiscountConfigSchema, parseGlobalAutomaticDiscountConfig, getActiveGlobalAutomaticDiscount } from './globalAutomaticDiscountConfig.js';
+import { assertGlobalAutomaticDiscountConfigCanBeSaved, globalAutomaticDiscountConfigSchema, parseGlobalAutomaticDiscountConfig, getActiveGlobalAutomaticDiscount } from './globalAutomaticDiscountConfig.js';
 function admin(a: OpsActor) { if (a.role !== 'admin')
     throw Error('role_denied'); if (process.env.OPS_PROMOTION_ENABLED !== 'true')
     throw Error('promotion_not_enabled'); }
 export async function promotionCurrent(pool: Pool) { const r = await pool.query("SELECT value,updated_at FROM shop_settings WHERE key='global_automatic_discount'"); const config = parseGlobalAutomaticDiscountConfig(r.rows[0]?.value); return { config, active: getActiveGlobalAutomaticDiscount(config), serverTime: new Date().toISOString() }; }
 export async function promotionPreview(pool: Pool, a: OpsActor, body: unknown) { admin(a); const config = globalAutomaticDiscountConfigSchema.strict().parse(body); if (config.startsAt && config.expiresAt && config.startsAt >= config.expiresAt)
     throw Error('invalid_period'); if (config.enabled && (!config.expiresAt || Date.parse(config.expiresAt) <= Date.now()))
-    throw Error('expiry_required'); const before = await promotionCurrent(pool); const id = randomUUID(), key = randomUUID(); const { rows: [p] } = await pool.query("INSERT INTO ops_console_previews(id,actor_id,operation_type,target_id,target_sku,before_snapshot,planned_mutation,expected_hash,idempotency_key,expires_at) VALUES($1,$2,'promotion',0,'global_automatic_discount',$3,$4,$5,$6,now()+interval '5 minutes') RETURNING expires_at", [id, a.id, before.config, config, orderHash(before.config), key]); return { previewId: id, idempotencyKey: key, before: before.config, after: config, expiresAt: p.expires_at, confirmation: 'RABATTAKTION' }; }
+    throw Error('expiry_required'); assertGlobalAutomaticDiscountConfigCanBeSaved(config); const before = await promotionCurrent(pool); const id = randomUUID(), key = randomUUID(); const { rows: [p] } = await pool.query("INSERT INTO ops_console_previews(id,actor_id,operation_type,target_id,target_sku,before_snapshot,planned_mutation,expected_hash,idempotency_key,expires_at) VALUES($1,$2,'promotion',0,'global_automatic_discount',$3,$4,$5,$6,now()+interval '5 minutes') RETURNING expires_at", [id, a.id, before.config, config, orderHash(before.config), key]); return { previewId: id, idempotencyKey: key, before: before.config, after: config, expiresAt: p.expires_at, confirmation: 'RABATTAKTION' }; }
 export async function promotionExecute(pool: Pool, a: OpsActor, body: unknown) {
     admin(a);
     const i = z.object({ previewId: z.string().uuid(), confirmation: z.literal('RABATTAKTION') }).strict().parse(body);

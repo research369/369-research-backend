@@ -18,10 +18,11 @@ import {
   upsertBankTransferPaymentInstructionsConfig,
 } from "./paymentInstructionsConfig.js";
 import {
+  assertGlobalAutomaticDiscountConfigCanBeSaved,
   defaultGlobalAutomaticDiscountConfig,
   getActiveGlobalAutomaticDiscount,
   getGlobalAutomaticDiscountConfig,
-  globalAutomaticDiscountConfigSchema,
+  globalAutomaticDiscountConfigInputSchema,
   upsertGlobalAutomaticDiscountConfig,
 } from "./globalAutomaticDiscountConfig.js";
 
@@ -221,28 +222,15 @@ export const shopSettingsRouter = router({
     })),
 
   setGlobalAutomaticDiscount: adminProcedure
-    .input(globalAutomaticDiscountConfigSchema.pick({
-      enabled: true,
-      percentage: true,
-      expiresAt: true,
-      stackWithPromotionCodes: true,
-    }))
+    .input(globalAutomaticDiscountConfigInputSchema)
     .mutation(async ({ input }) => {
-      if (input.enabled) {
-        if (!input.expiresAt) {
-          throw new Error("Für einen aktiven Dauerrabatt ist ein Endzeitpunkt erforderlich");
-        }
-        if (new Date(input.expiresAt).getTime() <= Date.now()) {
-          throw new Error("Der Endzeitpunkt muss in der Zukunft liegen");
-        }
-      }
-
       const current = await getGlobalAutomaticDiscountConfig();
       const config = {
         ...defaultGlobalAutomaticDiscountConfig,
         ...current,
         ...input,
       };
+      assertGlobalAutomaticDiscountConfigCanBeSaved(config);
       await upsertGlobalAutomaticDiscountConfig(config);
       return { config, discount: getActiveGlobalAutomaticDiscount(config) };
     }),
@@ -347,6 +335,9 @@ export const shopSettingsRouter = router({
   set: adminProcedure
     .input(z.object({ key: z.string(), value: z.string() }))
     .mutation(async ({ input }) => {
+      if (input.key === "global_automatic_discount") {
+        throw new Error("Die globale Dauerrabatt-Aktion darf nur über setGlobalAutomaticDiscount geändert werden");
+      }
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
