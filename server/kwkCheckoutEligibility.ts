@@ -7,6 +7,12 @@ export async function assertKwkNewCustomer(db: any, customer: {
 }) {
     const normalizedEmail = (customer.email || '').trim().toLowerCase();
     const normalizedPhone = normalizeKwkPhone(customer.phone);
+    // A referral discount is restricted to a verifiable first customer. Normal
+    // shop checkouts may still use the existing contact rules, but this special
+    // benefit must never treat two absent identifiers as a new identity.
+    if (!normalizedEmail && !normalizedPhone) {
+        throw new Error("KWK_KONTAKT_ERFORDERLICH: Für den Empfehlungsrabatt ist eine E-Mail-Adresse oder Telefonnummer erforderlich.");
+    }
     const previousOrderConditions = [];
     if (normalizedEmail) {
         previousOrderConditions.push(sql `LOWER(TRIM(${orders.email})) = ${normalizedEmail}`);

@@ -42,7 +42,6 @@ import {
   requiresColdChainShipping,
   normalizeKwkPhone,
   roundMoney,
-  resolveAuthoritativeItemPrice,
   resolveShippingRegion,
   type PromoDefinition,
 } from "./kwkCheckoutPricing.js";
@@ -75,6 +74,10 @@ import { reconcileFreeBacWaterForShopOrder } from "./freeBacWaterService.js";
 import { refreshCustomerOrderMetrics } from "./customerMetricsService.js";
 import { isCommercialOrder, isCompletedCommercialOrder } from "./commercialOrderMetrics.js";
 import { shouldKeepClientDiscountBreakdownSource } from "./discountBreakdownRules.js";
+import {
+  assertPromotionMinimumOrder,
+  repricePublicCheckoutItems,
+} from "./publicCheckoutPricing.js";
 import { assertNoActiveCheckoutBlock, CUSTOMER_ORDER_BLOCKED_CODE, findActiveCheckoutBlock } from "./customerOrderBlockService.js";
 import {
   getPersonalPromoAssignmentsForOrderIds,
@@ -307,7 +310,7 @@ export const orderRouter = router({
       // shop discount -> promo code -> public partner code. Shipping is never
       // discounted by the partner code. The browser cannot choose a rate.
       let resolvedPromoCode: PromoDefinition | null = null;
-      let resolvedPromoCodeRecord: { id: number; code: string } | null = null;
+      let resolvedPromoCodeRecord: { id: number; code: string; minimumOrder: number } | null = null;
       const normalizedPromotionCode = input.discountCode?.trim().toUpperCase() || "";
       if (normalizedPromotionCode) {
         if (resolvedPublicPartnerCode && normalizedPromotionCode === resolvedPublicPartnerCode.partnerCode.replace(/\s+/g, "").toUpperCase()) {
@@ -319,11 +322,9 @@ export const orderRouter = router({
         if (!promo) throw new Error("AKTIONSCODE_UNGUELTIG");
 
         const now = new Date();
-        const minimumOrder = Number(promo.minOrder || 0);
         if ((promo.validFrom && now < promo.validFrom)
           || isPromoCodeExpired(promo, now)
-          || ((promo.maxUses || 0) > 0 && promo.currentUses >= (promo.maxUses || 0))
-          || (minimumOrder > 0 && input.subtotal < minimumOrder)) {
+          || ((promo.maxUses || 0) > 0 && promo.currentUses >= (promo.maxUses || 0))) {
           throw new Error("AKTIONSCODE_UNGUELTIG");
         }
         resolvedPromoCode = {
@@ -332,7 +333,11 @@ export const orderRouter = router({
           fixedAmount: Number(promo.fixedAmount || 0),
           description: promo.description,
         };
-        resolvedPromoCodeRecord = { id: promo.id, code: promo.code };
+        resolvedPromoCodeRecord = {
+          id: promo.id,
+          code: promo.code,
+          minimumOrder: Number(promo.minOrder || 0),
+        };
         input.discountCode = promo.code;
       }
 
@@ -418,19 +423,11 @@ export const orderRouter = router({
         isAuthenticatedWawiManualSale,
         sendOrderConfirmation: input.sendOrderConfirmation,
       });
-      // Optionen mit eigenem Aufpreis werden unabhängig von einer gerade aktiven
-      // Rabattaktion aus dem Katalog aufgebaut. Dadurch bleibt insbesondere der
-      // Plug&Play-Aufpreis nicht vom Browserpreis abhängig.
-      const hasCatalogPricedCheckoutOption = input.items.some((item) =>
-        item.isPlugPlay === true || item.isNasalDiySet === true,
-      );
-      if (!isAuthenticatedWawiManualSale && (
-        hasKwkRequest
-        || configuredGlobalDiscount
-        || resolvedPublicPartnerCode
-        || authenticatedPartner
-        || hasCatalogPricedCheckoutOption
-      )) {
+      // Every public checkout is rebuilt from the current catalog before any
+      // commercial term is evaluated. The authenticated manual WaWi workflow is
+      // intentionally excluded because its manually entered prices have a
+      // separate, server-authorized business process.
+      if (!isAuthenticatedWawiManualSale) {
         const catalog = await db.select({
           sku: articles.sku,
           shopProductId: articles.shopProductId,
@@ -441,11 +438,18 @@ export const orderRouter = router({
           isActive: articles.isActive,
           shopVisible: articles.shopVisible,
         }).from(articles);
-        input.items = input.items.map((item) => ({
-          ...item,
-          price: resolveAuthoritativeItemPrice(item, catalog),
-        }));
-        input.subtotal = roundMoney(input.items.reduce((sum, item) => sum + item.price * item.quantity, 0));
+        const repriced = repricePublicCheckoutItems(input.items, catalog);
+        input.items = repriced.items;
+        input.subtotal = repriced.subtotal;
+      }
+      // A standalone public code's minimum order is evaluated only after the
+      // server owns every item price and the pre-discount merchandise subtotal.
+      // KWK retains its dedicated validation and customer-facing error below.
+      if (!isAuthenticatedWawiManualSale && resolvedPromoCodeRecord && !hasKwkRequest) {
+        assertPromotionMinimumOrder(
+          resolvedPromoCodeRecord.minimumOrder,
+          input.subtotal,
+        );
       }
 
       // Kombinationen werden erst entschieden, nachdem gültige Codes und deren
@@ -482,9 +486,10 @@ export const orderRouter = router({
           .from(promoCodes)
           .where(eq(promoCodes.id, resolvedPromoCodeRecord!.id))
           .limit(1);
-        if (!promo || Number(promo.minOrder || 0) > input.subtotal) {
+        if (!promo) {
           throw new Error("AKTIONSCODE_UNGUELTIG");
         }
+        assertPromotionMinimumOrder(Number(promo.minOrder || 0), input.subtotal);
         input.shipping = calculateAuthoritativeShipping({
           country: input.customer.country,
           items: input.items,
@@ -626,13 +631,16 @@ export const orderRouter = router({
           const now = new Date();
           const validUntil = promo.validUntil ? new Date(promo.validUntil) : null;
           if (validUntil) validUntil.setHours(23, 59, 59, 999);
-          const minimumOrder = Number(promo.minOrder || 0);
           if ((promo.validFrom && now < promo.validFrom)
             || (validUntil && now > validUntil)
-            || ((promo.maxUses || 0) > 0 && promo.currentUses >= (promo.maxUses || 0))
-            || (minimumOrder > 0 && input.subtotal < minimumOrder)) {
+            || ((promo.maxUses || 0) > 0 && promo.currentUses >= (promo.maxUses || 0))) {
             throw new Error("KWK_AKTIONSCODE_UNGUELTIG: Der allgemeine Aktionscode ist für diese Bestellung nicht gültig.");
           }
+          assertPromotionMinimumOrder(
+            Number(promo.minOrder || 0),
+            input.subtotal,
+            "KWK_AKTIONSCODE_UNGUELTIG: Der allgemeine Aktionscode ist für diese Bestellung nicht gültig.",
+          );
 
           promoDefinition = {
             discountType: promo.discountType,
