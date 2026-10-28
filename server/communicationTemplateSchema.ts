@@ -15,14 +15,14 @@ const DE: Array<Omit<SeedTemplate, "channel" | "language">> = [
     key: "order_confirmation",
     title: "Bestellbestätigung",
     subject: "Bestellbestätigung {{orderId}}",
-    body: "Hallo {{firstName}},\n\nvielen Dank für deine Bestellung bei 369 Research.\n\nBestellnummer: {{orderId}}\n{{items}}\n\nGesamtbetrag: {{total}}\n\nSobald deine Zahlung eingegangen ist, bereiten wir deine Bestellung für den Versand vor.\n\nBei Fragen erreichst du uns jederzeit unter {{supportEmail}}.\n\nViele Grüße\n369 Research",
+    body: "Hallo {{firstName}},\n\nvielen Dank für deine Bestellung bei 369 Research.\n\nBestellnummer: {{orderId}}\n{{items}}\n\nGesamtbetrag: {{total}}\n\nNach Zahlungseingang erfolgt der Versand spätestens innerhalb von 48 Stunden an Werktagen (Montag bis Freitag). Wochenenden und gesetzliche Feiertage sind ausgenommen; die Zustellzeit richtet sich nach dem Versanddienstleister.\n\nBei Fragen erreichst du uns jederzeit unter {{supportEmail}}.\n\nViele Grüße\n369 Research",
     sortOrder: 10,
   },
   {
     key: "payment_received",
     title: "Zahlung eingegangen",
     subject: "Zahlung zu {{orderId}} eingegangen",
-    body: "Hallo {{firstName}},\n\ndeine Zahlung für die Bestellung {{orderId}} ist bei uns eingegangen. Vielen Dank.\n\nWir bereiten deine Bestellung jetzt sorgfältig für den Versand vor. Sobald dein Paket bei DHL registriert ist, erhältst du die Versandinformation.\n\nViele Grüße\n369 Research",
+    body: "Hallo {{firstName}},\n\ndeine Zahlung für die Bestellung {{orderId}} ist bei uns eingegangen. Vielen Dank.\n\nWir bereiten deine Bestellung jetzt sorgfältig für den Versand vor. Der Versand erfolgt spätestens innerhalb von 48 Stunden an Werktagen (Montag bis Freitag); Wochenenden und gesetzliche Feiertage sind ausgenommen. Sobald dein Paket bei DHL registriert ist, erhältst du die Versandinformation.\n\nViele Grüße\n369 Research",
     sortOrder: 20,
   },
   {
@@ -81,14 +81,14 @@ const EN: Array<Omit<SeedTemplate, "channel" | "language">> = [
     key: "order_confirmation",
     title: "Order confirmation",
     subject: "Order confirmation {{orderId}}",
-    body: "Hello {{firstName}},\n\nthank you for your order with 369 Research.\n\nOrder number: {{orderId}}\n{{items}}\n\nOrder total: {{total}}\n\nAs soon as your payment has been received, we will prepare your order for dispatch.\n\nFor any questions, please contact us at {{supportEmail}}.\n\nKind regards\n369 Research",
+    body: "Hello {{firstName}},\n\nthank you for your order with 369 Research.\n\nOrder number: {{orderId}}\n{{items}}\n\nOrder total: {{total}}\n\nAfter payment has been received, orders are dispatched no later than 48 hours on business days (Monday to Friday). Weekends and public holidays are excluded; delivery time depends on the carrier.\n\nFor any questions, please contact us at {{supportEmail}}.\n\nKind regards\n369 Research",
     sortOrder: 10,
   },
   {
     key: "payment_received",
     title: "Payment received",
     subject: "Payment received for {{orderId}}",
-    body: "Hello {{firstName}},\n\nwe have received your payment for order {{orderId}}. Thank you.\n\nWe are now carefully preparing your order for dispatch. Once your parcel is registered with DHL, you will receive the shipping update.\n\nKind regards\n369 Research",
+    body: "Hello {{firstName}},\n\nwe have received your payment for order {{orderId}}. Thank you.\n\nWe are now carefully preparing your order for dispatch. Orders are dispatched no later than 48 hours on business days (Monday to Friday); weekends and public holidays are excluded. Once your parcel is registered with DHL, you will receive the shipping update.\n\nKind regards\n369 Research",
     sortOrder: 20,
   },
   {

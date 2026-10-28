@@ -122,7 +122,7 @@ function buildOrderConfirmationHtml(data: OrderEmailData): string {
     <!-- Warning Banner -->
     <div style="background:#fef3c7;border-left:4px solid #f59e0b;padding:16px 20px;margin:0;">
       <p style="margin:0;font-size:14px;font-weight:600;color:#92400e;">⚠ Wichtiger Hinweis zur Zahlung</p>
-      <p style="margin:6px 0 0;font-size:13px;color:#78350f;">Bitte überweise den Betrag eigenständig. Der Versand erfolgt erst nach Zahlungseingang auf unserem Konto.</p>
+      <p style="margin:6px 0 0;font-size:13px;color:#78350f;">Bitte überweise den Betrag eigenständig. Nach Zahlungseingang erfolgt der Versand spätestens innerhalb von 48 Stunden an Werktagen (Montag bis Freitag); Wochenenden und gesetzliche Feiertage sind ausgenommen. Die Zustellzeit richtet sich nach dem Versanddienstleister.</p>
     </div>
 
     <!-- Content -->
@@ -190,7 +190,7 @@ function buildOrderConfirmationHtml(data: OrderEmailData): string {
       <h3 style="font-size:16px;color:#166534;margin:0 0 12px;">Nächste Schritte</h3>
       <ol style="margin:0;padding:0 0 0 20px;font-size:14px;color:#15803d;line-height:1.8;">
         <li>Überweise <strong>${data.total.toFixed(2)} €</strong> mit dem Verwendungszweck <strong>${data.orderId}</strong></li>
-        <li>Nach Zahlungseingang wird deine Bestellung verpackt</li>
+        <li>Nach Zahlungseingang wird deine Bestellung vorbereitet und spätestens innerhalb von 48 Stunden an Werktagen (Montag bis Freitag) versendet</li>
         <li>Du erhältst eine Versandbenachrichtigung mit Tracking-Nummer</li>
       </ol>
       <div style="margin-top:16px;padding:12px;background:#dcfce7;border-radius:8px;font-size:13px;color:#166534;">
@@ -323,8 +323,7 @@ export async function sendAdminOrderNotification(data: OrderEmailData): Promise<
       <table style="width:100%;border-collapse:collapse;">
         <tr><td style="padding:3px 0;font-size:13px;color:#6b7280;">Zwischensumme</td><td style="padding:3px 0;font-size:13px;text-align:right;">${data.subtotal.toFixed(2)} €</td></tr>
         ${data.discount > 0 ? `<tr><td style="padding:3px 0;font-size:13px;color:#059669;">Rabatt${data.discountCode ? ` (${data.discountCode})` : ""}</td><td style="padding:3px 0;font-size:13px;text-align:right;color:#059669;">-${data.discount.toFixed(2)} €</td></tr>` : ""}
-        <tr><td style="padding:3px 0;font-size:13px;color:#6b7280;">Versand${data.items.some(i => (i as any).isNasalSpray && !(i as any).isNasalDiySet) ? ' \u2744\ufe0f' : ''}</td><td style="padding:3px 0;font-size:13px;text-align:right;">${data.shipping > 0 ? data.shipping.toFixed(2) + " €" : "Kostenlos"}</td></tr>
-        ${data.items.some(i => (i as any).isNasalSpray && !(i as any).isNasalDiySet) ? '<tr><td colspan="2" style="padding:1px 0 4px;font-size:11px;color:#0284c7;">\u2744\ufe0f Inkl. Aufpreis f\u00fcr gek\u00fchlten Versand (+7 \u20ac)</td></tr>' : ''}
+        <tr><td style="padding:3px 0;font-size:13px;color:#6b7280;">Versand</td><td style="padding:3px 0;font-size:13px;text-align:right;">${data.shipping > 0 ? data.shipping.toFixed(2) + " €" : "Kostenlos"}</td></tr>
         <tr><td style="padding:8px 0 0;font-size:16px;font-weight:700;color:#111827;border-top:2px solid #e5e7eb;">Gesamt</td><td style="padding:8px 0 0;font-size:16px;font-weight:700;text-align:right;color:#111827;border-top:2px solid #e5e7eb;">${data.total.toFixed(2)} €</td></tr>
       </table>
     </div>
