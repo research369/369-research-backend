@@ -12,7 +12,6 @@ export const CHECKOUT_V2_NON_VIAL_CATEGORIES = new Set([
   "Zubehör",
 ]);
 
-export const CHECKOUT_V2_FREE_BAC_WATER_THRESHOLD = 50;
 export const CHECKOUT_V2_FREE_BAC_WATER_PRODUCT_ID = "bac-wasser-3ml";
 
 export type CheckoutV2Promotion2for3 = {
@@ -91,7 +90,6 @@ function isFreeBacEligible(line: CheckoutV2AutomaticEligibleLine): boolean {
     && !line.isNasalSpray
     && !line.isNasalDiySet
     && !isCheckoutV2NonVial(line)
-    && line.unitPrice >= CHECKOUT_V2_FREE_BAC_WATER_THRESHOLD
     && !normaliseProductId(line.shopProductId).startsWith("bac");
 }
 

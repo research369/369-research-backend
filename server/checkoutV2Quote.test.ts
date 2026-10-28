@@ -8,6 +8,18 @@ import {
 
 const catalog: CheckoutV2CatalogArticle[] = [
   {
+    sku: "BPC-157-5MG",
+    shopProductId: "bpc-157",
+    name: "BPC-157 (5 mg)",
+    sellingPrice: "28.00",
+    salePrice: null,
+    variants: [{ dosage: "5 mg", price: 28 }],
+    isActive: 1,
+    shopVisible: 1,
+    stock: 12,
+    category: "Peptide",
+  },
+  {
     sku: "ADAMAX-10MG",
     shopProductId: "adamax",
     name: "Adamax (10 mg)",
@@ -80,6 +92,22 @@ test("Checkout V2 ignores client price and resolves the current catalog price", 
   assert.equal(result.subtotal, 62);
   assert.equal(result.shipping, 8);
   assert.equal(result.total, 70);
+});
+
+test("Checkout V2 derives BAC Wasser 3 ml serverseitig auch für ein Peptid-Vial unter 50 €", () => {
+  const result = quote({ shopProductId: "bpc-157", dosage: "5 mg", quantity: 2 });
+
+  assert.deepEqual(result.giftLines, [{
+    source: "free_bac_water",
+    shopProductId: "bac-wasser-3ml",
+    name: "BAC Wasser 3ml",
+    dosage: "3ml",
+    quantity: 2,
+    type: "accessory",
+    isNasalDiySet: false,
+    isNasalSpray: false,
+    isPlugPlay: false,
+  }]);
 });
 
 test("Checkout V2 refuses active articles hidden from the shop", () => {

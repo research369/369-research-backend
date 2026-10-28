@@ -29,19 +29,32 @@ test("Checkout V2 derives 2-for-3 gifts only from an active server setting", () 
   const gifts = calculateCheckoutV2AutomaticGiftLines({
     lines: [line({ quantity: 5, unitPrice: 49 })],
     promotion2for3: activePromo,
-    freeBacWaterProduct: null,
+    freeBacWaterProduct: bac3ml,
   });
-  assert.deepEqual(gifts, [{
-    source: "promo_2for3",
-    shopProductId: "adamax",
-    name: "Adamax (10 mg)",
-    dosage: "10 mg",
-    quantity: 2,
-    type: "peptide",
-    isNasalDiySet: false,
-    isNasalSpray: false,
-    isPlugPlay: false,
-  }]);
+  assert.deepEqual(gifts, [
+    {
+      source: "promo_2for3",
+      shopProductId: "adamax",
+      name: "Adamax (10 mg)",
+      dosage: "10 mg",
+      quantity: 2,
+      type: "peptide",
+      isNasalDiySet: false,
+      isNasalSpray: false,
+      isPlugPlay: false,
+    },
+    {
+      source: "free_bac_water",
+      shopProductId: "bac-wasser-3ml",
+      name: "BAC Wasser 3ml",
+      dosage: "3ml",
+      quantity: 5,
+      type: "accessory",
+      isNasalDiySet: false,
+      isNasalSpray: false,
+      isPlugPlay: false,
+    },
+  ]);
 });
 
 test("Checkout V2 never applies 2-for-3 to excluded product types", () => {
@@ -61,20 +74,22 @@ test("Checkout V2 honours include and exclude product filters for 2-for-3", () =
   const include = calculateCheckoutV2AutomaticGiftLines({
     lines: [line({ shopProductId: "adamax", quantity: 2, unitPrice: 49 })],
     promotion2for3: { enabled: true, mode: "include", products: ["other"] },
-    freeBacWaterProduct: null,
+    freeBacWaterProduct: bac3ml,
   });
   const exclude = calculateCheckoutV2AutomaticGiftLines({
     lines: [line({ shopProductId: "adamax", quantity: 2, unitPrice: 49 })],
     promotion2for3: { enabled: true, mode: "exclude", products: ["adamax"] },
-    freeBacWaterProduct: null,
+    freeBacWaterProduct: bac3ml,
   });
-  assert.equal(include.length, 0);
-  assert.equal(exclude.length, 0);
+  assert.equal(include.some((gift) => gift.source === "promo_2for3"), false);
+  assert.equal(exclude.some((gift) => gift.source === "promo_2for3"), false);
+  assert.equal(include.find((gift) => gift.source === "free_bac_water")?.quantity, 2);
+  assert.equal(exclude.find((gift) => gift.source === "free_bac_water")?.quantity, 2);
 });
 
-test("Checkout V2 derives Gratis-BAC-Wasser per qualifying paid vial unit", () => {
+test("Checkout V2 derives Gratis-BAC-Wasser per eligible paid vial unit unabhängig vom Preis", () => {
   const gifts = calculateCheckoutV2AutomaticGiftLines({
-    lines: [line({ quantity: 3, unitPrice: 62 })],
+    lines: [line({ quantity: 3, unitPrice: 28 })],
     promotion2for3: disabledPromo,
     freeBacWaterProduct: bac3ml,
   });
@@ -91,12 +106,13 @@ test("Checkout V2 derives Gratis-BAC-Wasser per qualifying paid vial unit", () =
   }]);
 });
 
-test("Checkout V2 excludes nasal, plug-and-play and sub-threshold lines from Gratis-BAC", () => {
+test("Checkout V2 excludes nasal, plug-and-play and non-vial lines from Gratis-BAC", () => {
   const gifts = calculateCheckoutV2AutomaticGiftLines({
     lines: [
       line({ isNasalSpray: true, quantity: 2 }),
       line({ isPlugPlay: true, quantity: 2 }),
-      line({ unitPrice: 49.99, quantity: 2 }),
+      line({ categories: ["Nasensprays"], quantity: 2 }),
+      line({ category: "Kapseln", quantity: 2 }),
       line({ category: "Forscher-Bundles", quantity: 2 }),
     ],
     promotion2for3: disabledPromo,

@@ -394,7 +394,11 @@ export const checkoutV2Router = router({
       ...quote.giftLines.map((line) => ({
         name: line.name,
         dosage: line.dosage || "",
-        variant: line.source === "promo_2for3" ? "2-für-3 Gratis" : "Gratisbeigabe",
+        variant: line.source === "promo_2for3"
+          ? "2-für-3 Gratis"
+          : line.source === "free_bac_water"
+            ? "BAC Wasser 3 ml · kostenlos"
+            : "Gratisbeigabe",
         price: 0,
         quantity: line.quantity,
         type: line.type,

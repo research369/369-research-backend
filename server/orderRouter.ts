@@ -24,9 +24,11 @@ import { resolveQrAttribution } from "./qrCampaignService.js";
 import { withStoreSourceMarker } from "./storeSource.js";
 import {
   calculateAuthoritativeKwkOrder,
+  calculateAuthoritativeShipping,
   calculatePromoDiscount,
   normalizeKwkPhone,
   roundMoney,
+  resolveShippingRegion,
   resolveAuthoritativeItemPrice,
   type PromoDefinition,
 } from "./kwkCheckoutPricing.js";
@@ -276,6 +278,7 @@ export async function createOrderFromTrustedInput(
 
         const promoDiscount = calculatePromoDiscount({
           subtotal: input.subtotal,
+          items: input.items,
           promo: promoDefinition,
         });
         input.shipping = calculateAuthoritativeShipping({
