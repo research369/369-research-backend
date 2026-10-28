@@ -418,7 +418,19 @@ export const orderRouter = router({
         isAuthenticatedWawiManualSale,
         sendOrderConfirmation: input.sendOrderConfirmation,
       });
-      if (!isAuthenticatedWawiManualSale && (hasKwkRequest || configuredGlobalDiscount || resolvedPublicPartnerCode || authenticatedPartner)) {
+      // Optionen mit eigenem Aufpreis werden unabhängig von einer gerade aktiven
+      // Rabattaktion aus dem Katalog aufgebaut. Dadurch bleibt insbesondere der
+      // Plug&Play-Aufpreis nicht vom Browserpreis abhängig.
+      const hasCatalogPricedCheckoutOption = input.items.some((item) =>
+        item.isPlugPlay === true || item.isNasalDiySet === true,
+      );
+      if (!isAuthenticatedWawiManualSale && (
+        hasKwkRequest
+        || configuredGlobalDiscount
+        || resolvedPublicPartnerCode
+        || authenticatedPartner
+        || hasCatalogPricedCheckoutOption
+      )) {
         const catalog = await db.select({
           sku: articles.sku,
           shopProductId: articles.shopProductId,
