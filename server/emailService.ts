@@ -78,13 +78,12 @@ function buildShippingResearchResourcesHtml(): string {
 function getBankDetails(method: string): string {
   if (method === "wise") {
     return `
-      <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">Bank</td><td style="padding:8px 12px;font-size:14px;font-weight:600;">Wise (TransferWise)</td></tr>
+      <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">Bank</td><td style="padding:8px 12px;font-size:14px;font-weight:600;">Wise</td></tr>
       <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">IBAN</td><td style="padding:8px 12px;font-size:14px;font-weight:600;">BE35 9675 0012 9437</td></tr>
       <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">BIC/Swift</td><td style="padding:8px 12px;font-size:14px;font-weight:600;">TRWIBEB1XXX</td></tr>
       <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">Adresse</td><td style="padding:8px 12px;font-size:14px;">Wise, Rue du Trône 100, Brussels, Belgium</td></tr>
     `;
   }
-  // Standard: SEPA / Bunq / Kreditkarte
   return `
     <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">Bank</td><td style="padding:8px 12px;font-size:14px;font-weight:600;">Bunq B.V.</td></tr>
     <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">IBAN</td><td style="padding:8px 12px;font-size:14px;font-weight:600;">DE81 3701 9000 1011 3936 89</td></tr>
@@ -163,8 +162,8 @@ function buildOrderConfirmationHtml(data: OrderEmailData): string {
     <div style="background:#eff6ff;border:1px solid #bfdbfe;border-top:none;padding:24px;">
       <h3 style="font-size:16px;color:#1e40af;margin:0 0 12px;">Zahlungsinformationen</h3>
       <table style="width:100%;border-collapse:collapse;">
-        <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">Zahlungsart</td><td style="padding:8px 12px;font-size:14px;font-weight:600;">${getPaymentMethodLabel(data.paymentMethod)}</td></tr>
-        ${getBankDetails(data.paymentMethod)}
+        <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">Zahlungsart</td><td style="padding:8px 12px;font-size:14px;font-weight:600;">SEPA- &amp; Echtzeitüberweisung (Wise)</td></tr>
+        ${getBankDetails("wise")}
         <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">Empfänger</td><td style="padding:8px 12px;font-size:14px;font-weight:600;">369 Research</td></tr>
         <tr style="background:#dbeafe;">
           <td style="padding:12px;color:#1e40af;font-size:14px;font-weight:600;">Verwendungszweck</td>
@@ -193,11 +192,6 @@ function buildOrderConfirmationHtml(data: OrderEmailData): string {
         <li>Nach Zahlungseingang wird deine Bestellung vorbereitet und spätestens innerhalb von 48 Stunden an Werktagen (Montag bis Freitag) versendet</li>
         <li>Du erhältst eine Versandbenachrichtigung mit Tracking-Nummer</li>
       </ol>
-      <div style="margin-top:16px;padding:12px;background:#dcfce7;border-radius:8px;font-size:13px;color:#166534;">
-        <strong>Alternativ per Kreditkarte</strong> (bis 500 €):<br>
-        <a href="https://bunq.me/369Research" style="color:#15803d;font-weight:700;">https://bunq.me/369Research</a><br>
-        <span style="font-size:12px;color:#4ade80;">Bitte den Betrag selbst eingeben und Bestellnummer als Verwendungszweck angeben.</span>
-      </div>
     </div>
 
     <!-- Footer -->

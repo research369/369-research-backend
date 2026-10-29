@@ -41,12 +41,15 @@ test("Peps4pets-Bestellmail nutzt P4P-Referenz mit vorläufigem Coreversand-Abse
 });
 
 test("bestehende 369-Bestellmail bleibt auf kanonischer Referenz und ohne P4P-Profil", () => {
-  const presentation = getOrderConfirmationPresentation(baseOrder);
+  const presentation = getOrderConfirmationPresentation({ ...baseOrder, paymentMethod: "bunq" });
 
   assert.ok(presentation);
   assert.equal(presentation.subject, "Bestellbestätigung 369-10607 – 369 Research");
   assert.equal(presentation.profile, undefined);
   assert.match(presentation.html, /369-10607/);
+  assert.match(presentation.html, /SEPA- &amp; Echtzeitüberweisung \(Wise\)/);
+  assert.match(presentation.html, /TRWIBEB1XXX/);
+  assert.doesNotMatch(presentation.html, /bunq\.me|Kreditkarte|BUNQDE82/);
 });
 
 test("eine P4P-Bestellmail ohne externe Referenz wird nicht vorbereitet", () => {
