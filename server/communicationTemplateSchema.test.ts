@@ -21,8 +21,14 @@ test("CRM-Bestellbestätigungen enthalten freigegebene Zahlungsplatzhalter", () 
   assert.match(DE_ORDER_CONFIRMATION_BODY, /Es tut uns leid/);
   assert.match(DE_ORDER_CONFIRMATION_BODY, /Kreditkartenzahlungen können in unserer Branche technisch nicht immer verarbeitet werden/);
   assert.match(DE_ORDER_CONFIRMATION_BODY, /Überweisung funktioniert zuverlässig/);
+  assert.match(DE_ORDER_CONFIRMATION_BODY, /auf unser Wise-Konto/);
+  assert.doesNotMatch(DE_ORDER_CONFIRMATION_BODY, /eines der folgenden Konten/);
+  assert.doesNotMatch(DE_ORDER_CONFIRMATION_BODY, /eines der oben genannten Konten/);
   assert.match(EN_ORDER_CONFIRMATION_BODY, /We are sorry/);
   assert.match(EN_ORDER_CONFIRMATION_BODY, /card payments may not always be processed successfully in our industry/);
+  assert.match(EN_ORDER_CONFIRMATION_BODY, /to our Wise bank account/);
+  assert.doesNotMatch(EN_ORDER_CONFIRMATION_BODY, /one of the following accounts/);
+  assert.doesNotMatch(EN_ORDER_CONFIRMATION_BODY, /one of the accounts above/);
 });
 
 test("CRM-Upgrade erkennt ausschließlich die unangetasteten Altvorlagen", () => {

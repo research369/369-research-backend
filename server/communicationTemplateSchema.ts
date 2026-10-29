@@ -16,10 +16,10 @@ type SeedTemplate = {
 // WaWi. The legacy values let this release upgrade only untouched originals.
 export const LEGACY_DE_ORDER_CONFIRMATION_BODY = "Hallo {{firstName}},\n\nvielen Dank für deine Bestellung bei 369 Research.\n\nBestellnummer: {{orderId}}\n{{items}}\n\nGesamtbetrag: {{total}}\n\nSobald deine Zahlung eingegangen ist, bereiten wir deine Bestellung für den Versand vor.\n\nBei Fragen erreichst du uns jederzeit unter {{supportEmail}}.\n\nViele Grüße\n369 Research";
 export const PREVIOUS_DE_ORDER_CONFIRMATION_BODY = "Hallo {{firstName}},\n\nvielen Dank für deine Bestellung bei 369 Research.\n\nBestellnummer: {{orderId}}\n{{items}}\n\nGesamtbetrag: {{total}}\n\nBitte überweise den Gesamtbetrag per SEPA- oder Echtzeitüberweisung auf eines der folgenden Konten:\n\n{{paymentDetails}}\n\nVerwendungszweck: {{orderId}}\n\nSobald deine Zahlung eingegangen ist, bereiten wir deine Bestellung für den Versand vor.\n\nBei Fragen erreichst du uns jederzeit unter {{supportEmail}}.\n\nViele Grüße\n369 Research";
-export const DE_ORDER_CONFIRMATION_BODY = "Hallo {{firstName}},\n\nvielen Dank für deine Bestellung bei 369 Research.\n\nBestellnummer: {{orderId}}\n{{items}}\n\nGesamtbetrag: {{total}}\n\nBitte überweise den Gesamtbetrag per SEPA- oder Echtzeitüberweisung auf eines der folgenden Konten:\n\n{{paymentDetails}}\n\nVerwendungszweck: {{orderId}}\n\nHinweis zur Kreditkarte: Der Zahlungslink ist ein zusätzliches Angebot. Es tut uns leid: Kreditkartenzahlungen können in unserer Branche technisch nicht immer verarbeitet werden. Falls der Link oder die Kartenzahlung nicht funktioniert, überweise den Betrag bitte einfach per SEPA- oder Echtzeitüberweisung auf eines der oben genannten Konten – Überweisung funktioniert zuverlässig.\n\nSobald deine Zahlung eingegangen ist, bereiten wir deine Bestellung für den Versand vor.\n\nBei Fragen erreichst du uns jederzeit unter {{supportEmail}}.\n\nViele Grüße\n369 Research";
+export const DE_ORDER_CONFIRMATION_BODY = "Hallo {{firstName}},\n\nvielen Dank für deine Bestellung bei 369 Research.\n\nBestellnummer: {{orderId}}\n{{items}}\n\nGesamtbetrag: {{total}}\n\nBitte überweise den Gesamtbetrag per SEPA- oder Echtzeitüberweisung auf unser Wise-Konto:\n\n{{paymentDetails}}\n\nVerwendungszweck: {{orderId}}\n\nHinweis zur Kreditkarte: Der Zahlungslink ist ein zusätzliches Angebot. Es tut uns leid: Kreditkartenzahlungen können in unserer Branche technisch nicht immer verarbeitet werden. Falls der Link oder die Kartenzahlung nicht funktioniert, überweise den Betrag bitte einfach per SEPA- oder Echtzeitüberweisung auf unser Wise-Konto – Überweisung funktioniert zuverlässig.\n\nSobald deine Zahlung eingegangen ist, bereiten wir deine Bestellung für den Versand vor.\n\nBei Fragen erreichst du uns jederzeit unter {{supportEmail}}.\n\nViele Grüße\n369 Research";
 export const LEGACY_EN_ORDER_CONFIRMATION_BODY = "Hello {{firstName}},\n\nthank you for your order with 369 Research.\n\nOrder number: {{orderId}}\n{{items}}\n\nOrder total: {{total}}\n\nAs soon as your payment has been received, we will prepare your order for dispatch.\n\nFor any questions, please contact us at {{supportEmail}}.\n\nKind regards\n369 Research";
 export const PREVIOUS_EN_ORDER_CONFIRMATION_BODY = "Hello {{firstName}},\n\nthank you for your order with 369 Research.\n\nOrder number: {{orderId}}\n{{items}}\n\nOrder total: {{total}}\n\nPlease transfer the total amount by SEPA or instant bank transfer to one of the following accounts:\n\n{{paymentDetails}}\n\nPayment reference: {{orderId}}\n\nAs soon as your payment has been received, we will prepare your order for dispatch.\n\nFor any questions, please contact us at {{supportEmail}}.\n\nKind regards\n369 Research";
-export const EN_ORDER_CONFIRMATION_BODY = "Hello {{firstName}},\n\nthank you for your order with 369 Research.\n\nOrder number: {{orderId}}\n{{items}}\n\nOrder total: {{total}}\n\nPlease transfer the total amount by SEPA or instant bank transfer to one of the following accounts:\n\n{{paymentDetails}}\n\nPayment reference: {{orderId}}\n\nCard payment notice: The payment link is an additional option. We are sorry: card payments may not always be processed successfully in our industry. If the link or card payment does not work, please simply transfer the amount by SEPA or instant bank transfer to one of the accounts above – bank transfer works reliably.\n\nAs soon as your payment has been received, we will prepare your order for dispatch.\n\nFor any questions, please contact us at {{supportEmail}}.\n\nKind regards\n369 Research";
+export const EN_ORDER_CONFIRMATION_BODY = "Hello {{firstName}},\n\nthank you for your order with 369 Research.\n\nOrder number: {{orderId}}\n{{items}}\n\nOrder total: {{total}}\n\nPlease transfer the total amount by SEPA or instant bank transfer to our Wise bank account:\n\n{{paymentDetails}}\n\nPayment reference: {{orderId}}\n\nCard payment notice: The payment link is an additional option. We are sorry: card payments may not always be processed successfully in our industry. If the link or card payment does not work, please simply transfer the amount by SEPA or instant bank transfer to our Wise bank account – bank transfer works reliably.\n\nAs soon as your payment has been received, we will prepare your order for dispatch.\n\nFor any questions, please contact us at {{supportEmail}}.\n\nKind regards\n369 Research";
 export const LEGACY_EN_WHATSAPP_SHIPPING_REGISTERED_BODY = "Hello {{firstName}},\n\nyour parcel for order {{orderId}} has been carefully packed and registered with {{carrier}} for dispatch. It will be handed in later today.\n\nTracking number: {{trackingNumber}}\nTrack your parcel: {{trackingUrl}}\n\nInformation on dosing, mixing and pen settings: {{penCalculatorUrl}}\nHow to use your pen system with the Plug&Play cartridge: {{plugAndPlayUrl}}\n\nFor offers, insights and research protocols, join our WhatsApp channel: {{whatsappChannelUrl}}\n\nKind regards\n369 Research";
 export const EN_WHATSAPP_SHIPPING_REGISTERED_BODY = "Hello {{firstName}} 👋\n\n📦 *Your parcel is registered for dispatch*\nYour order {{orderId}} has been carefully packed and registered with *{{carrier}}* for dispatch.\n\nIt will be handed over to {{carrier}} later today.\n\n🔍 *Track your shipment:*\nTracking number: `{{trackingNumber}}`\n{{trackingUrl}}\n\n💉 *Dosing, mixing & pen settings*\n{{penCalculatorUrl}}\n\n📖 *Pen system & Plug&Play*\nGuide for using your pen system with the Plug&Play cartridge:\n{{plugAndPlayUrl}}\n\n📲 *369 Research WhatsApp Channel*\nOffers, research protocols & insights directly on your phone:\n{{whatsappChannelUrl}}\n\n🤝 *Refer a Friend*\n\n• *10% off* for your referred new customer\n• *10% credit* for you after their payment has been confirmed\n\nRegister quickly, share your link & earn credit:\nhttps://www.369research.eu/kwk/register\n\nBest regards,\n369 Research 🔬";
 
@@ -265,6 +265,53 @@ export async function ensureCommunicationTemplateSchema(): Promise<void> {
         `INSERT INTO communication_template_audit (template_id, action, previous_value, next_value, changed_by)
          VALUES ($1, 'system_migration', $2::jsonb, $3::jsonb, $4)`,
         [updated.id, JSON.stringify(previousValue), JSON.stringify(nextValue), "system:order-confirmation-card-fallback-v3"],
+      );
+    }
+  }
+
+  // Normalize only the obsolete multi-account wording in existing order
+  // confirmation templates. Custom WaWi wording remains otherwise untouched.
+  const wiseAccountWordingNormalizations = [
+    { language: "de", from: "auf eines der folgenden Konten", to: "auf unser Wise-Konto" },
+    { language: "de", from: "auf eines der oben genannten Konten", to: "auf unser Wise-Konto" },
+    { language: "en", from: "to one of the following accounts", to: "to our Wise bank account" },
+    { language: "en", from: "to one of the accounts above", to: "to our Wise bank account" },
+  ] as const;
+  for (const normalization of wiseAccountWordingNormalizations) {
+    const result = await pool.query(
+      `WITH candidates AS (
+         SELECT id, body_template AS previous_body
+         FROM communication_templates
+         WHERE template_key = 'order_confirmation'
+           AND language = $1
+           AND body_template LIKE '%' || $2 || '%'
+       ), updated AS (
+         UPDATE communication_templates AS template
+         SET body_template = REPLACE(candidates.previous_body, $2, $3),
+             version = template.version + 1,
+             updated_at = NOW()
+         FROM candidates
+         WHERE template.id = candidates.id
+         RETURNING template.id, template.title, template.subject_template,
+                   template.body_template, template.is_active, template.sort_order,
+                   template.version, template.created_at, template.updated_at
+       )
+       SELECT updated.*, candidates.previous_body
+       FROM updated
+       JOIN candidates ON candidates.id = updated.id`,
+      [normalization.language, normalization.from, normalization.to],
+    );
+    for (const row of result.rows) {
+      const { previous_body: previousBody, ...updated } = row;
+      const previousValue = {
+        ...updated,
+        body_template: previousBody,
+        version: Number(updated.version) - 1,
+      };
+      await pool.query(
+        `INSERT INTO communication_template_audit (template_id, action, previous_value, next_value, changed_by)
+         VALUES ($1, 'system_migration', $2::jsonb, $3::jsonb, $4)`,
+        [updated.id, JSON.stringify(previousValue), JSON.stringify(updated), "system:wise-single-account-wording-v1"],
       );
     }
   }

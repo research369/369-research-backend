@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { getOrderConfirmationPresentation } from "./emailService.js";
+import {
+  buildEnglishOrderConfirmationHtml,
+  buildOrderConfirmationHtml,
+  getOrderConfirmationPresentation,
+} from "./emailService.js";
 
 const baseOrder = {
   orderId: "369-10607",
@@ -47,6 +51,21 @@ test("bestehende 369-Bestellmail bleibt auf kanonischer Referenz und ohne P4P-Pr
   assert.equal(presentation.subject, "Bestellbestätigung 369-10607 – 369 Research");
   assert.equal(presentation.profile, undefined);
   assert.match(presentation.html, /369-10607/);
+});
+
+test("Bestellmail nennt bei vorhandenen Zahlungsdaten ausschließlich das Wise-Konto", () => {
+  const bankDetailsHtml = "<tr><td>Wise</td><td>Bankdaten</td></tr>";
+  const german = buildOrderConfirmationHtml(baseOrder, bankDetailsHtml);
+  const english = buildEnglishOrderConfirmationHtml({ ...baseOrder, communicationLanguage: "en" }, bankDetailsHtml);
+
+  assert.match(german, /auf <strong>unser Wise-Konto<\/strong> überweisen/);
+  assert.match(german, /auf unser Wise-Konto mit dem Verwendungszweck/);
+  assert.doesNotMatch(german, /eines der oben genannten Konten/);
+  assert.doesNotMatch(german, /eine der folgenden Bankverbindungen/);
+  assert.match(english, /to <strong>our Wise bank account<\/strong>/);
+  assert.match(english, /to our Wise bank account using/);
+  assert.doesNotMatch(english, /one of the bank accounts above/);
+  assert.doesNotMatch(english, /one of the following bank accounts/);
 });
 
 test("Bestellmail erklärt Überweisung als zuverlässigen Fallback für die optionale Kartenzahlung", async () => {
