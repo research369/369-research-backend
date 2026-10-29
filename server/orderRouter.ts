@@ -74,7 +74,7 @@ const createOrderSchema = z.object({
     isNasalSpray: z.boolean().optional(),
     // DIY-Set: Vial plus BAC Wasser, Flasche, Aufziehspritze und Kanüle (+7 €).
     isNasalDiySet: z.boolean().optional(),
-    isPlugPlay: z.boolean().optional(),   // Plug&Play Patrone (+15€ Aufpreis)
+    isPlugPlay: z.boolean().optional(),   // Plug&Play Patrone (Aufpreis wird serverseitig ermittelt)
     isFreeGift: z.boolean().optional(),   // Servergenerierte Gratisposition; Bestand wird ebenfalls geprüft und gebucht.
   })),
   customer: z.object({

@@ -94,6 +94,13 @@ test("Checkout V2 ignores client price and resolves the current catalog price", 
   assert.equal(result.total, 70);
 });
 
+test("Checkout V2 adds the centrally configured Plug&Play surcharge server-side", () => {
+  const result = quote({ shopProductId: "adamax", dosage: "10 mg", quantity: 1, isPlugPlay: true });
+
+  assert.equal(result.lines[0]?.unitPrice, 77);
+  assert.equal(result.subtotal, 77);
+});
+
 test("Checkout V2 derives BAC Wasser 3 ml serverseitig auch für ein Peptid-Vial unter 50 €", () => {
   const result = quote({ shopProductId: "bpc-157", dosage: "5 mg", quantity: 2 });
 

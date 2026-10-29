@@ -1,4 +1,5 @@
 import { KWK_DISCOUNT_PERCENT } from "./kwkService.js";
+import { NASAL_DIY_SET_SURCHARGE, PLUGPLAY_SURCHARGE } from "./checkoutFormatSurcharges.js";
 
 export type KwkCheckoutItem = {
   shopProductId?: string;
@@ -108,7 +109,8 @@ export function resolveAuthoritativeItemPrice(
     throw new Error(`KWK_ARTIKELPREIS_NICHT_ERMITTELBAR: ${item.shopProductId}`);
   }
 
-  const optionSurcharge = (item.isPlugPlay ? 15 : 0) + (item.isNasalDiySet ? 7 : 0);
+  const optionSurcharge = (item.isPlugPlay ? PLUGPLAY_SURCHARGE : 0)
+    + (item.isNasalDiySet ? NASAL_DIY_SET_SURCHARGE : 0);
   return roundMoney(basePrice + optionSurcharge);
 }
 
