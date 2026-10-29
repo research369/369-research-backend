@@ -16,6 +16,10 @@ import {
   type CheckoutV2GiftLine,
   type CheckoutV2Promotion2for3,
 } from "./checkoutV2AutomaticBenefits.js";
+import {
+  calculateCheckoutV2QuantityDiscount,
+  isCheckoutV2QuantityDiscountEligible,
+} from "./checkoutV2QuantityDiscount.js";
 
 /**
  * Checkout V2 accepts only a customer's selection. It never accepts a
@@ -79,7 +83,7 @@ export type CheckoutV2QuoteLine = {
 };
 
 export type CheckoutV2DiscountLine = {
-  source: "promotion_code" | "partner_code" | "partner_self_discount" | "partner_credit" | "kwk_referral" | "kwk_credit";
+  source: "quantity_discount" | "promotion_code" | "partner_code" | "partner_self_discount" | "partner_credit" | "kwk_referral" | "kwk_credit";
   label: string;
   amount: number;
   code?: string;
@@ -239,22 +243,39 @@ function resolveDiscount(input: {
   }
 
   const discountLines: CheckoutV2DiscountLine[] = [];
+  const quantityDiscount = calculateCheckoutV2QuantityDiscount(lines);
+  if (quantityDiscount.amount > 0) {
+    discountLines.push({
+      source: "quantity_discount",
+      label: `369 Mengen-Vorteil (${quantityDiscount.percentage}%)`,
+      amount: quantityDiscount.amount,
+      percentage: quantityDiscount.percentage,
+    });
+  }
+  const subtotalAfterQuantityDiscount = roundMoney(Math.max(0, subtotal - quantityDiscount.amount));
   let promotionDiscount = 0;
   if (promotion?.kind === "promo") {
+    const promotionItems = lines.map((line) => ({
+      shopProductId: line.shopProductId,
+      price: isCheckoutV2QuantityDiscountEligible(line)
+        ? roundMoney(line.unitPrice * (1 - quantityDiscount.percentage / 100))
+        : line.unitPrice,
+      quantity: line.quantity,
+    }));
     promotionDiscount = calculatePromoDiscount({
-      subtotal,
-      items: lines.map((line) => ({ shopProductId: line.shopProductId, price: line.unitPrice, quantity: line.quantity })),
+      subtotal: subtotalAfterQuantityDiscount,
+      items: promotionItems,
       promo: promotion.promo,
     });
     if (promotionDiscount > 0) discountLines.push({ source: "promotion_code", label: "Aktionsrabatt", amount: promotionDiscount, code: promotion.code });
   }
   if (promotion?.kind === "partner") {
     const percentage = Math.max(0, Math.min(100, Number(promotion.percent) || 0));
-    promotionDiscount = roundMoney(subtotal * percentage / 100);
+    promotionDiscount = roundMoney(subtotalAfterQuantityDiscount * percentage / 100);
     if (promotionDiscount > 0) discountLines.push({ source: "partner_code", label: "Partnervorteil", amount: promotionDiscount, code: promotion.code, percentage });
   }
 
-  const postPromotionValue = roundMoney(Math.max(0, subtotal - promotionDiscount));
+  const postPromotionValue = roundMoney(Math.max(0, subtotalAfterQuantityDiscount - promotionDiscount));
   let partnerSelfDiscount = 0;
   let partnerCreditDiscount = 0;
   if (benefits.partnerSelf) {
@@ -288,7 +309,7 @@ function resolveDiscount(input: {
     if (creditDiscount > 0) discountLines.push({ source: "kwk_credit", label: "Guthaben", amount: creditDiscount });
   }
 
-  const discount = roundMoney(promotionDiscount + partnerSelfDiscount + partnerCreditDiscount + referralDiscount + creditDiscount);
+  const discount = roundMoney(quantityDiscount.amount + promotionDiscount + partnerSelfDiscount + partnerCreditDiscount + referralDiscount + creditDiscount);
   return { discount, total: roundMoney(subtotal - discount + shipping), discountLines };
 }
 

@@ -37,6 +37,7 @@ import { verifyKwkToken } from "./kwkAuth.js";
 // Zod schemas
 const discountBreakdownEntrySchema = z.object({
   source: z.enum([
+    "quantity_discount",
     "promotion_code",
     "partner_self_discount",
     "partner_credit",

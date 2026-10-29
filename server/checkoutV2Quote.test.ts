@@ -16,7 +16,7 @@ const catalog: CheckoutV2CatalogArticle[] = [
     variants: [{ dosage: "5 mg", price: 28 }],
     isActive: 1,
     shopVisible: 1,
-    stock: 12,
+    stock: 50,
     category: "Peptide",
   },
   {
@@ -39,7 +39,7 @@ const catalog: CheckoutV2CatalogArticle[] = [
     variants: [{ dosage: "3ml", price: 5 }],
     isActive: 1,
     shopVisible: 1,
-    stock: 20,
+    stock: 50,
     category: "Zubehör",
   },
   {
@@ -138,6 +138,21 @@ test("Checkout V2 calculates restricted promotion and its shipping rule from ser
   assert.equal(result.shipping, 0);
   assert.equal(result.total, 55.8);
   assert.deepEqual(result.discountLines, [{ source: "promotion_code", label: "Aktionsrabatt", amount: 6.2, code: "SAVE10" }]);
+});
+
+test("Checkout V2 applies a valid promotion after the quantity tier", () => {
+  const result = quote(
+    { shopProductId: "bpc-157", dosage: "5 mg", quantity: 36 },
+    { kind: "promo", code: "SAVE10", promo: { discountType: "percent", percentage: 10, fixedAmount: 0 } },
+  );
+
+  assert.equal(result.subtotal, 1008);
+  assert.equal(result.discount, 418.32);
+  assert.equal(result.total, 597.68);
+  assert.deepEqual(result.discountLines, [
+    { source: "quantity_discount", label: "369 Mengen-Vorteil (35%)", amount: 352.8, percentage: 35 },
+    { source: "promotion_code", label: "Aktionsrabatt", amount: 65.52, code: "SAVE10" },
+  ]);
 });
 
 test("Checkout V2 keeps partner advantage server-shaped and limited to products", () => {
