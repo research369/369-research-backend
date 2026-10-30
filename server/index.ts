@@ -47,6 +47,7 @@ import { ensureCommunicationLanguageSchema } from "./communicationLanguageServic
 import { ensureWawiPerformanceIndexes } from "./wawiPerformanceSchema.js";
 import { ensureSwissCustomsSchema } from "./swissCustomsSchema.js";
 import { ensureOrderCommunicationPhoneSchema } from "./orderCommunicationPhoneService.js";
+import { ensureKwkDemoSchema } from "./kwkDemoService.js";
 
 import {jarvyOrderRouter} from "./jarvyOrderRouter.js";
 import { jarvyReadRouter } from "./jarvyReadRouter.js";
@@ -392,6 +393,15 @@ async function start() {
     console.log("[Server] Order communication phone override schema ready");
   } catch (err) {
     console.warn("[Server] Order communication phone override schema migration failed:", err);
+  }
+
+  // KWK-Schauzugang: vollständig getrennte Vorführdaten ohne Zugriff auf
+  // Orders, Kunden, Zahlungen, Abrechnung, Versand oder produktives Guthaben.
+  try {
+    await ensureKwkDemoSchema();
+    console.log("[Server] KWK demo schema ready");
+  } catch (err) {
+    console.warn("[Server] KWK demo schema migration failed:", err);
   }
 
   // Persönliche Bestellcodes erhalten ausschließlich intern eine Erinnerung,

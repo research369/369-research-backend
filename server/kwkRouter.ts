@@ -47,7 +47,16 @@ import {
   syncKwkAccountCache,
 } from "./kwkService.js";
 import type { Request } from "express";
-import { createKwkToken, verifyKwkToken } from "./kwkAuth.js";
+import { createKwkDemoToken, createKwkToken, verifyKwkDemoToken, verifyKwkToken } from "./kwkAuth.js";
+import {
+  getKwkDemoAccountByEmail,
+  getKwkDemoAccountById,
+  getKwkDemoBalance,
+  listKwkDemoLedger,
+  listKwkDemoReferrals,
+  normalizeKwkDemoEmail,
+  recordKwkDemoLogin,
+} from "./kwkDemoService.js";
 
 // ── KWK Auth Helpers ──────────────────────────────────────────────────────
 
@@ -81,6 +90,31 @@ const kwkAuthMiddleware = middleware(async ({ ctx, next }) => {
 
 const kwkProcedure = publicProcedure.use(kwkAuthMiddleware);
 
+async function getKwkDemoFromRequest(req: Request): Promise<{ demoAccountId: number } | null> {
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
+  if (!token) return null;
+  return verifyKwkDemoToken(token);
+}
+
+// The demo middleware intentionally only accepts `kwk_demo` tokens. It never
+// reads productive KWK accounts or accepts productive KWK tokens.
+const kwkDemoAuthMiddleware = middleware(async ({ ctx, next }) => {
+  const demoAuth = await getKwkDemoFromRequest(ctx.req as Request);
+  if (!demoAuth) throw new Error("Demo-Authentifizierung erforderlich");
+  const account = await getKwkDemoAccountById(demoAuth.demoAccountId);
+  if (!account) throw new Error("Demo-Schauaccount ist nicht aktiv");
+  return next({ ctx: { ...ctx, kwkDemoAccountId: account.id } });
+});
+
+const kwkDemoProcedure = publicProcedure.use(kwkDemoAuthMiddleware);
+
+function requireKwkDemoAccountId(context: unknown): number {
+  const value = (context as { kwkDemoAccountId?: unknown }).kwkDemoAccountId;
+  if (!Number.isInteger(value)) throw new Error("Demo-Authentifizierung erforderlich");
+  return value as number;
+}
+
 // Middleware: Feature Flag prüfen
 const kwkEnabledMiddleware = middleware(async ({ next }) => {
   const enabled = await isKwkEnabled();
@@ -96,6 +130,81 @@ const kwkAuthProcedure = kwkProcedure.use(kwkEnabledMiddleware);
 // ── Router ────────────────────────────────────────────────────────────────
 
 export const kwkRouter = router({
+
+  // ── DEMO: ausschließlich getrennte, lesende Schau-Daten ─────────────────
+  // These endpoints never consult kwk_accounts, kwk_ledger, kwk_referrals,
+  // orders, customers, checkout or any payment/fulfilment operation.
+  demoLogin: publicProcedure
+    .input(z.object({
+      email: z.string().email().max(320),
+      password: z.string().min(1).max(100),
+    }))
+    .mutation(async ({ input }) => {
+      const account = await getKwkDemoAccountByEmail(normalizeKwkDemoEmail(input.email));
+      if (!account || !(await bcrypt.compare(input.password, account.password_hash))) {
+        throw new Error("Ungültige Demo-Anmeldedaten");
+      }
+
+      await recordKwkDemoLogin(account.id);
+      const balance = await getKwkDemoBalance(account.id);
+      return {
+        success: true,
+        token: createKwkDemoToken(account.id),
+        demo: true,
+        name: account.name,
+        email: account.email,
+        demoNumber: account.demo_number,
+        creditAvailable: balance.available,
+        creditPending: balance.pending,
+        creditRedeemed: balance.redeemed,
+      };
+    }),
+
+  demoGetProfile: kwkDemoProcedure
+    .query(async ({ ctx }) => {
+      const account = await getKwkDemoAccountById(requireKwkDemoAccountId(ctx));
+      if (!account) throw new Error("Demo-Schauaccount nicht gefunden");
+      const balance = await getKwkDemoBalance(account.id);
+      return {
+        id: account.id,
+        demo: true,
+        name: account.name,
+        email: account.email,
+        demoNumber: account.demo_number,
+        createdAt: account.created_at,
+        creditAvailable: balance.available,
+        creditPending: balance.pending,
+        creditRedeemed: balance.redeemed,
+      };
+    }),
+
+  demoGetLedger: kwkDemoProcedure
+    .input(z.object({
+      limit: z.number().min(1).max(100).default(50),
+      offset: z.number().min(0).default(0),
+    }).optional())
+    .query(async ({ ctx, input }) => {
+      const demoAccountId = requireKwkDemoAccountId(ctx);
+      const limit = input?.limit ?? 50;
+      const offset = input?.offset ?? 0;
+      const [entries, balance] = await Promise.all([
+        listKwkDemoLedger(demoAccountId, limit, offset),
+        getKwkDemoBalance(demoAccountId),
+      ]);
+      return { entries, balance, demo: true };
+    }),
+
+  demoGetReferrals: kwkDemoProcedure
+    .input(z.object({
+      limit: z.number().min(1).max(100).default(50),
+      offset: z.number().min(0).default(0),
+    }).optional())
+    .query(async ({ ctx, input }) => {
+      const demoAccountId = requireKwkDemoAccountId(ctx);
+      const limit = input?.limit ?? 50;
+      const offset = input?.offset ?? 0;
+      return { ...(await listKwkDemoReferrals(demoAccountId, limit, offset)), demo: true };
+    }),
 
   // ── PUBLIC: Registrierung ──────────────────────────────────────────────
   register: kwkPublicProcedure

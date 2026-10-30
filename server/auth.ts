@@ -21,8 +21,11 @@ export function createToken(userId: number, role: string): string {
 
 export function verifyToken(token: string): { userId: number; role: string } | null {
   try {
-    const payload = jwt.verify(token, ENV.jwtSecret) as { userId: number; role: string };
-    return { userId: payload.userId, role: payload.role };
+    const payload = jwt.verify(token, ENV.jwtSecret) as { userId?: unknown; role?: unknown };
+    if (!Number.isInteger(payload.userId) || typeof payload.role !== "string" || payload.role.trim().length === 0) {
+      return null;
+    }
+    return { userId: payload.userId as number, role: payload.role };
   } catch {
     return null;
   }
