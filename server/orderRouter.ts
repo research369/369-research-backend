@@ -94,6 +94,12 @@ import {
 } from "./customerDataChangeService.js";
 import { normalizeCommunicationLanguage } from "./communicationLanguageService.js";
 import { buildPackingWhatsAppMessage } from "./packingWhatsAppMessage.js";
+import {
+  clearOrderCommunicationPhoneOverride,
+  getEffectiveCommunicationPhone,
+  getEffectiveCommunicationPhonesForOrders,
+  setOrderCommunicationPhoneOverride,
+} from "./orderCommunicationPhoneService.js";
 
 /**
  * Releases a pending KWK referral only after an order is known to be paid.
@@ -1906,6 +1912,9 @@ export const orderRouter = router({
         );
       }
       const personalPromoAssignments = await getPersonalPromoAssignmentsForOrderIds(orderIds);
+      const communicationPhones = await getEffectiveCommunicationPhonesForOrders(
+        filteredOrders.map((order) => ({ orderId: order.orderId, phone: order.phone })),
+      );
 
       // Combine. Die Datenbankabfrage schließt große Labeldaten vollständig aus.
       // Für vorhandene DHL-Labels wird nur eine kurze, geschützte Abrufroute geliefert.
@@ -1926,6 +1935,9 @@ export const orderRouter = router({
         creditUsed: parseFloat(o.creditUsed ?? "0"),
         kwkCreditUsed: parseFloat(o.kwkCreditUsed ?? "0"),
         kwkCreditRequested: parseFloat(o.kwkCreditRequested ?? "0"),
+        effectiveCommunicationPhone: communicationPhones.get(o.orderId)?.effectivePhone || o.phone,
+        communicationPhoneSource: communicationPhones.get(o.orderId)?.source || "order_snapshot",
+        communicationPhoneLatestEventId: communicationPhones.get(o.orderId)?.latestEventId ?? null,
         personalPromoCodes: personalPromoAssignments.get(o.orderId) ?? [],
         items: items
           .filter(i => i.orderId === o.orderId)
@@ -1953,6 +1965,7 @@ export const orderRouter = router({
 
       const items = await db.select().from(orderItems).where(eq(orderItems.orderId, order.orderId));
       const personalPromoAssignments = await getPersonalPromoAssignmentsForOrderIds([order.orderId]);
+      const communicationPhone = await getEffectiveCommunicationPhone(order.orderId);
 
       return {
         ...order,
@@ -1966,6 +1979,9 @@ export const orderRouter = router({
         creditUsed: parseFloat(order.creditUsed ?? "0"),
         kwkCreditUsed: parseFloat(order.kwkCreditUsed ?? "0"),
         kwkCreditRequested: parseFloat(order.kwkCreditRequested ?? "0"),
+        effectiveCommunicationPhone: communicationPhone.effectivePhone,
+        communicationPhoneSource: communicationPhone.source,
+        communicationPhoneLatestEventId: communicationPhone.latestEventId,
         personalPromoCodes: personalPromoAssignments.get(order.orderId) ?? [],
         items: items.map(i => ({ ...i, price: parseFloat(i.price) })),
       };
@@ -2486,7 +2502,8 @@ export const orderRouter = router({
       }
 
       // WhatsApp-Nachricht generieren (Vorschau für Frontend)
-      const phone = order.phone || "";
+      const communicationPhone = await getEffectiveCommunicationPhone(order.orderId);
+      const phone = communicationPhone.effectivePhone || "";
       const waMessage = buildPackingWhatsAppMessage({
         customerName,
         orderId: order.orderId,
@@ -2498,11 +2515,44 @@ export const orderRouter = router({
         success: true,
         results,
         whatsappPhone: phone,
+        communicationPhoneSource: communicationPhone.source,
         whatsappMessage: waMessage,
         customerName,
         orderId: order.orderId,
       };
     }),
+
+  // ADMIN: A WhatsApp contact correction belongs to exactly one order. The
+  // historical customer/order snapshots, invoices, delivery data and DHL data
+  // are deliberately never updated here.
+  getCommunicationPhone: adminProcedure
+    .input(z.object({ orderId: z.string().trim().min(1).max(32) }))
+    .query(async ({ input }) => getEffectiveCommunicationPhone(input.orderId)),
+
+  setCommunicationPhoneOverride: adminProcedure
+    .input(z.object({
+      orderId: z.string().trim().min(1).max(32),
+      phone: z.string().trim().min(1).max(80),
+      reason: z.string().trim().min(5).max(500),
+      requestId: z.string().uuid(),
+      expectedLatestEventId: z.number().int().positive().nullable(),
+    }))
+    .mutation(async ({ input, ctx }) => setOrderCommunicationPhoneOverride({
+      ...input,
+      actor: ctx.user?.name || ctx.user?.username || `Admin ${ctx.user?.id || ""}`.trim(),
+    })),
+
+  clearCommunicationPhoneOverride: adminProcedure
+    .input(z.object({
+      orderId: z.string().trim().min(1).max(32),
+      reason: z.string().trim().min(5).max(500),
+      requestId: z.string().uuid(),
+      expectedLatestEventId: z.number().int().positive().nullable(),
+    }))
+    .mutation(async ({ input, ctx }) => clearOrderCommunicationPhoneOverride({
+      ...input,
+      actor: ctx.user?.name || ctx.user?.username || `Admin ${ctx.user?.id || ""}`.trim(),
+    })),
 
   // Reassign order to a different customer (admin only)
   reassignCustomer: adminProcedure

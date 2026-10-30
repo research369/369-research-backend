@@ -46,6 +46,7 @@ import { ensureCustomerDataChangeSchema } from "./customerDataChangeService.js";
 import { ensureCommunicationLanguageSchema } from "./communicationLanguageService.js";
 import { ensureWawiPerformanceIndexes } from "./wawiPerformanceSchema.js";
 import { ensureSwissCustomsSchema } from "./swissCustomsSchema.js";
+import { ensureOrderCommunicationPhoneSchema } from "./orderCommunicationPhoneService.js";
 
 import {jarvyOrderRouter} from "./jarvyOrderRouter.js";
 import { jarvyReadRouter } from "./jarvyReadRouter.js";
@@ -382,6 +383,15 @@ async function start() {
     await ensureCustomerPromoAssignmentSchema();
   } catch (err) {
     console.warn("[Server] Customer promo-assignment schema migration failed:", err);
+  }
+
+  // Eine korrigierte WhatsApp-Nummer bleibt ausschließlich am jeweiligen Auftrag
+  // und ändert weder Kundenstamm noch Liefer-/Rechnungssnapshot.
+  try {
+    await ensureOrderCommunicationPhoneSchema();
+    console.log("[Server] Order communication phone override schema ready");
+  } catch (err) {
+    console.warn("[Server] Order communication phone override schema migration failed:", err);
   }
 
   // Persönliche Bestellcodes erhalten ausschließlich intern eine Erinnerung,

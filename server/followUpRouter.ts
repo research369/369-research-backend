@@ -27,6 +27,7 @@ import { calculateFollowUpShipmentWindow } from "./followUpEligibility.js";
 import { generateFollowUpProductCopies } from "./followUpProductCopy.js";
 import { isCommercialOrder } from "./commercialOrderMetrics.js";
 import { syncPersonalPromoExpiryReminders } from "./personalPromoExpiryReminderService.js";
+import { getEffectiveCommunicationPhone, getEffectiveCommunicationPhonesForOrders } from "./orderCommunicationPhoneService.js";
 
 const RESEND_API_URL = "https://api.resend.com/emails";
 const SHOP_BASE_URL = "https://www.369research.eu";
@@ -611,6 +612,9 @@ export const followUpRouter = router({
         ? await db.select().from(orders).where(inArray(orders.orderId, orderIds))
         : [];
       const orderMap = new Map(orderList.map((o: any) => [o.orderId, o]));
+      const communicationPhones = await getEffectiveCommunicationPhonesForOrders(
+        orderList.map((order: any) => ({ orderId: order.orderId, phone: order.phone })),
+      );
 
       const crossSellFollowUps = filtered.map((f: any) => {
         const order = orderMap.get(f.orderId) || {};
@@ -639,7 +643,8 @@ export const followUpRouter = router({
           // Kundendaten (aus Bestellung)
           customerName: `${order.firstName || ""} ${order.lastName || ""}`.trim(),
           customerEmail: order.email || "",
-          customerPhone: order.phone || "",
+          customerPhone: communicationPhones.get(order.orderId)?.effectivePhone || order.phone || "",
+          communicationPhoneSource: communicationPhones.get(order.orderId)?.source || "order_snapshot",
           customerId: order.customerId,
           discountCodeUsed: order.discountCode,
           partnerCode: order.partnerCode,
@@ -654,6 +659,9 @@ export const followUpRouter = router({
         .leftJoin(orders, eq(personalPromoExpiryReminders.originOrderId, orders.orderId))
         .leftJoin(promoCodes, eq(personalPromoExpiryReminders.promoCodeId, promoCodes.id))
         .orderBy(desc(personalPromoExpiryReminders.dueAt));
+      const reminderCommunicationPhones = await getEffectiveCommunicationPhonesForOrders(
+        reminderRows.flatMap(({ order }: any) => order ? [{ orderId: order.orderId, phone: order.phone }] : []),
+      );
 
       const personalPromoReminders = reminderRows
         .filter(({ reminder, promoCode }) => {
@@ -685,7 +693,8 @@ export const followUpRouter = router({
           total: order?.total ? parseFloat(order.total) : 0,
           customerName: `${order?.firstName || ""} ${order?.lastName || ""}`.trim(),
           customerEmail: order?.email || "",
-          customerPhone: order?.phone || "",
+          customerPhone: order ? reminderCommunicationPhones.get(order.orderId)?.effectivePhone || order.phone || "" : "",
+          communicationPhoneSource: order ? reminderCommunicationPhones.get(order.orderId)?.source || "order_snapshot" : "order_snapshot",
           customerId: reminder.customerId,
           discountCodeUsed: order?.discountCode || null,
           partnerCode: order?.partnerCode || null,
@@ -713,12 +722,16 @@ export const followUpRouter = router({
         .where(eq(personalPromoExpiryReminders.id, input.id))
         .limit(1);
       if (!row) throw new Error("Aktionscode-Erinnerung nicht gefunden");
+      const communicationPhone = row.order
+        ? await getEffectiveCommunicationPhone(row.order.orderId)
+        : null;
 
       return {
         ...row.reminder,
         customerName: `${row.order?.firstName || ""} ${row.order?.lastName || ""}`.trim(),
         customerEmail: row.order?.email || "",
-        customerPhone: row.order?.phone || "",
+        customerPhone: communicationPhone?.effectivePhone || row.order?.phone || "",
+        communicationPhoneSource: communicationPhone?.source || "order_snapshot",
         orderDate: row.order?.orderDate || null,
         orderTotal: row.order?.total || "0",
       };
@@ -814,6 +827,7 @@ export const followUpRouter = router({
         .limit(1);
 
       if (!originOrder) throw new Error("Ursprungsbestellung nicht gefunden");
+      const originCommunicationPhone = await getEffectiveCommunicationPhone(originOrder.orderId);
 
       // Artikel der Ursprungsbestellung
       const originItems = await db
@@ -873,6 +887,8 @@ export const followUpRouter = router({
         },
         originOrder: {
           ...originOrder,
+          effectiveCommunicationPhone: originCommunicationPhone.effectivePhone,
+          communicationPhoneSource: originCommunicationPhone.source,
           items: originItems,
         },
         customerHistory: allCustomerOrders.map((o: any) => ({
