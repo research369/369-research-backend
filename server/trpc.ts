@@ -1,4 +1,5 @@
 import {trackCustomerCreation} from './customerCreationMaintenance.js';
+import { recordAdminMutation } from "./adminChangeLogService.js";
 import { initTRPC, TRPCError } from "@trpc/server";
 import superjson from "superjson";
 import type { Request, Response } from "express";
@@ -44,8 +45,22 @@ const isAdmin = middleware(({ ctx, next }) => {
   return next({ ctx: { ...ctx, user: ctx.user } });
 });
 
-export const protectedProcedure = tracked.use(isAuthed);
-export const adminProcedure = tracked.use(isAdmin);
+const auditAdminMutation = middleware(async ({ ctx, path, type, input, next }) => {
+  const result = await next();
+  if (type === "mutation" && result.ok && ctx.user?.role === "admin") {
+    // Storage problems must never turn a successful business action into a failed one.
+    // The journal stores procedure paths and safe field names, never submitted values.
+    void recordAdminMutation({
+      path,
+      actor: ctx.user.username || ctx.user.email || "admin",
+      input,
+    });
+  }
+  return result;
+});
+
+export const protectedProcedure = tracked.use(isAuthed).use(auditAdminMutation);
+export const adminProcedure = tracked.use(isAdmin).use(auditAdminMutation);
 
 // Product Manager: role = "admin" OR role = "product_manager"
 // Kein Zugriff auf orders, customers, invoices, payments, checkout, users, migrations
@@ -59,7 +74,7 @@ const isProductManager = middleware(({ ctx, next }) => {
   return next({ ctx: { ...ctx, user: ctx.user } });
 });
 
-export const productManagerProcedure = t.procedure.use(isProductManager);
+export const productManagerProcedure = t.procedure.use(isProductManager).use(auditAdminMutation);
 
 // Goodies: product managers maintain the catalog while packing users assign
 // items to orders. Neither role receives unrelated financial or user access.
@@ -73,7 +88,7 @@ const isGoodieOperator = middleware(({ ctx, next }) => {
   return next({ ctx: { ...ctx, user: ctx.user } });
 });
 
-export const goodieProcedure = t.procedure.use(isGoodieOperator);
+export const goodieProcedure = t.procedure.use(isGoodieOperator).use(auditAdminMutation);
 
 // Packing: role = "admin" OR role = "packing"
 // Zugriff auf: Bestellungen, Labels, Kunden, Artikel (lesen+Bestand), Rechnungen, Eingang
@@ -88,4 +103,4 @@ const isPacking = middleware(({ ctx, next }) => {
   return next({ ctx: { ...ctx, user: ctx.user } });
 });
 
-export const packingProcedure = t.procedure.use(isPacking);
+export const packingProcedure = t.procedure.use(isPacking).use(auditAdminMutation);

@@ -48,6 +48,7 @@ import { ensureWawiPerformanceIndexes } from "./wawiPerformanceSchema.js";
 import { ensureSwissCustomsSchema } from "./swissCustomsSchema.js";
 import { ensureOrderCommunicationPhoneSchema } from "./orderCommunicationPhoneService.js";
 import { ensureKwkDemoSchema } from "./kwkDemoService.js";
+import { ensureAdminChangeLogSchema } from "./adminChangeLogService.js";
 
 import {jarvyOrderRouter} from "./jarvyOrderRouter.js";
 import { jarvyReadRouter } from "./jarvyReadRouter.js";
@@ -321,6 +322,14 @@ async function start() {
     await ensureCommunicationTemplateSchema();
   } catch (err) {
     console.warn("[Server] Communication template schema migration failed:", err);
+  }
+
+  // Der Administratorverlauf ist rein additiv und protokolliert nie Inhalte
+  // oder Kontaktdaten; sein Ausfall darf keinen operativen Prozess blockieren.
+  try {
+    await ensureAdminChangeLogSchema();
+  } catch (err) {
+    console.warn("[Server] Admin change-log schema migration failed:", err);
   }
 
   // DIY-Nasenspray-Set: persistente Bestellkennzeichnung und zentrale Set-Konfiguration.
