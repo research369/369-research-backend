@@ -3,7 +3,8 @@
  */
 import { z } from "zod";
 import { eq, desc, asc, like, and, sql, gte, lte, inArray } from "drizzle-orm";
-import { router, adminProcedure, productManagerProcedure, packingProcedure, publicProcedure } from "./trpc.js";
+import { TRPCError } from "@trpc/server";
+import { router, adminProcedure, productManagerProcedure, stockProcedure, publicProcedure } from "./trpc.js";
 import { getDb, getPool } from "./db.js";
 import {applyStockMovement} from "./stockMovementService.js";
 import { articles, stockHistory, orderItems, orders, articleTranslations, articleFaq } from "../drizzle/schema.js";
@@ -568,12 +569,13 @@ export const articleRouter = router({
     }),
 
   // Update article(Wareneingang / Korrektur)
-  adjustStock: packingProcedure
+  adjustStock: stockProcedure
     .input(z.object({
       id: z.number(),
       change: z.number().int(),
       type: z.enum(["wareneingang", "verkauf", "korrektur", "retoure"]),
       reason: z.string().optional(),
+      expectedStock: z.number().int().min(0).max(2147483647).optional(),
     }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
@@ -581,11 +583,14 @@ export const articleRouter = router({
 
       const [article] = await db.select().from(articles).where(eq(articles.id, input.id)).limit(1);
       if (!article) throw new Error("Article not found");
+      if (input.expectedStock !== undefined && article.stock !== input.expectedStock) {
+        throw new TRPCError({ code: "CONFLICT", message: "Bestand wurde inzwischen geändert. Bitte neu laden." });
+      }
 
       const newStock = article.stock + input.change;
       if (newStock < 0) throw new Error("Bestand kann nicht negativ werden");
 
-      await db.transaction(async tx=>{await applyStockMovement(tx,{articleId:article.id,sku:article.sku,expectedStock:article.stock,change:input.change,type:input.type,reason:input.reason||"WaWi-Bestandsbewegung",actor:ctx.user?.name||"Admin"});});
+      await db.transaction(async tx=>{await applyStockMovement(tx,{articleId:article.id,sku:article.sku,expectedStock:article.stock,change:input.change,type:input.type,reason:input.reason||"WaWi-Bestandsbewegung",actor:ctx.user?.name||ctx.user?.username||"Admin"});});
 
       // E-Mail-Benachrichtigung an Pakko wenn packing-User Bestand manuell reduziert (kein Verkauf)
       if (ctx.user?.role === "packing" && input.change < 0 && input.type !== "verkauf") {

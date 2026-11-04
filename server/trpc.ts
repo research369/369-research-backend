@@ -104,3 +104,16 @@ const isPacking = middleware(({ ctx, next }) => {
 });
 
 export const packingProcedure = t.procedure.use(isPacking).use(auditAdminMutation);
+
+// Inventory-only access. Never use this for orders, customers or payments.
+const isStockOperator = middleware(({ ctx, next }) => {
+  if (!ctx.user) {
+    throw new TRPCError({ code: "UNAUTHORIZED", message: "Bitte anmelden" });
+  }
+  if (!["admin", "packing", "product_manager"].includes(ctx.user.role)) {
+    throw new TRPCError({ code: "FORBIDDEN", message: "Keine Berechtigung für Bestandskorrekturen" });
+  }
+  return next({ ctx: { ...ctx, user: ctx.user } });
+});
+
+export const stockProcedure = t.procedure.use(isStockOperator).use(auditAdminMutation);
