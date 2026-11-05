@@ -411,57 +411,21 @@ export const customerRouter = router({
         ));
       }
 
-      // ── Ergänze nur fehlende Kontaktfelder in verknüpften Bestellungen ──
-      // Eine Bestellung ist der historische Versand- und Rechnungs-Snapshot.
-      // Spätere Stammdatenänderungen dürfen sie niemals überschreiben.
-      const orderSyncFields: Record<string, any> = {};
-      if (data.firstName !== undefined) orderSyncFields.firstName = data.firstName || null;
-      if (data.lastName !== undefined) orderSyncFields.lastName = data.lastName || null;
-      if (data.phone !== undefined) orderSyncFields.phone = data.phone || null;
-      if (data.email !== undefined) orderSyncFields.email = data.email || null;
-      if (data.company !== undefined) orderSyncFields.company = data.company || null;
-      if (data.street !== undefined) orderSyncFields.street = data.street || null;
-      if (data.houseNumber !== undefined) orderSyncFields.houseNumber = data.houseNumber || null;
-      if (data.zip !== undefined) orderSyncFields.zip = data.zip || null;
-      if (data.city !== undefined) orderSyncFields.city = data.city || null;
-      if (data.country !== undefined) orderSyncFields.country = data.country || null;
-
-      if (Object.keys(orderSyncFields).length > 0) {
-        // Find all orders linked to this customer
-        const linkedOrders = await db.select({ orderId: orders.orderId })
-          .from(orders)
-          .where(eq(orders.customerId, id));
-
-        if (linkedOrders.length > 0) {
-          // For each linked order: only overwrite fields that are currently empty/null in the order
-          for (const { orderId } of linkedOrders) {
-            const [order] = await db.select().from(orders).where(eq(orders.orderId, orderId)).limit(1);
-            if (!order) continue;
-
-            const orderUpdate: Record<string, any> = {};
-            const onlyIfMissing = (field: string, value: unknown) => {
-              if (value === undefined || value === null || String(value).trim() === "") return;
-              const existing = (order as any)[field];
-              if (existing === null || existing === undefined || String(existing).trim() === "") orderUpdate[field] = value;
-            };
-            onlyIfMissing("firstName", data.firstName);
-            onlyIfMissing("lastName", data.lastName);
-            onlyIfMissing("phone", data.phone);
-            onlyIfMissing("email", data.email);
-            onlyIfMissing("company", data.company);
-            onlyIfMissing("street", data.street);
-            onlyIfMissing("houseNumber", data.houseNumber);
-            onlyIfMissing("zip", data.zip);
-            onlyIfMissing("city", data.city);
-            onlyIfMissing("country", data.country);
-            onlyIfMissing("dhlPostNumber", data.dhlPostNumber);
-
-            if (Object.keys(orderUpdate).length > 0) {
-              await db.update(orders).set(orderUpdate).where(eq(orders.orderId, orderId));
-              console.log(`[Customers] Synced ${Object.keys(orderUpdate).join(', ')} from customer #${id} to order ${orderId}`);
-            }
-          }
-        }
+      // Auftragsadressen sind vollständige historische Snapshots. Auch ein leeres
+      // Firmen-/Adressfeld ist Teil dieser Adresse und darf NICHT nachträglich aus
+      // einem anderen Kundenprofil nachgefüllt werden. Nur fehlende Kontaktkanäle
+      // werden weiterhin ergänzt; die WHERE-Bedingung schützt Paralleländerungen.
+      if (data.phone?.trim()) {
+        await db.update(orders).set({ phone: data.phone }).where(and(
+          eq(orders.customerId, id),
+          sql`NULLIF(TRIM(${orders.phone}), '') IS NULL`,
+        ));
+      }
+      if (data.email?.trim()) {
+        await db.update(orders).set({ email: data.email }).where(and(
+          eq(orders.customerId, id),
+          sql`NULLIF(TRIM(${orders.email}), '') IS NULL`,
+        ));
       }
 
       if (addressWarningNeedsConfirmation && addressValidation) {

@@ -5,6 +5,7 @@ import {
   getChangedCustomerDataFields,
   normalizeCustomerMatchPhone,
   resolveCheckoutCustomerDataChange,
+  resolveAddressBoundOptionalFields,
 } from "./customerDataChangeService.js";
 
 const existingCustomer = {
@@ -80,17 +81,46 @@ test("the German local and international form of the same phone normalize consis
   assert.equal(CUSTOMER_DATA_CHANGE_RECONFIRMATION_CODE, "CUSTOMER_DATA_CHANGE_RECONFIRMATION_REQUIRED");
 });
 
-test("an omitted optional company or DHL Post Number does not erase established customer data", () => {
+test("genuinely omitted optional fields retain established data only on an unchanged address", () => {
+  const { company: _company, dhlPostNumber: _post, ...unchangedAddress } = existingCustomer;
   const result = resolveCheckoutCustomerDataChange([
     { ...existingCustomer, company: "Muster GmbH", dhlPostNumber: "12345678" },
-  ], {
-    ...existingCustomer,
-    company: "",
-    dhlPostNumber: "",
-  });
+  ], unchangedAddress);
   assert.equal(result.kind, "matched");
   if (result.kind !== "matched") return;
   assert.equal(result.requiresConfirmation, false);
   assert.equal(result.submittedSnapshot.company, "Muster GmbH");
   assert.equal(result.submittedSnapshot.dhlPostNumber, "12345678");
+});
+
+test("explicit empty company and post number are never replaced by old address fields", () => {
+  const result = resolveCheckoutCustomerDataChange([
+    { ...existingCustomer, company: "Spanish address supplement", dhlPostNumber: "12345678" },
+  ], existingCustomer);
+  assert.equal(result.kind, "matched");
+  if (result.kind !== "matched") return;
+  assert.equal(result.requiresConfirmation, true);
+  assert.deepEqual(result.changedFields, ["company", "dhlPostNumber"]);
+  assert.equal(result.submittedSnapshot.company, "");
+  assert.equal(result.submittedSnapshot.dhlPostNumber, "");
+});
+
+test("switching Spanish to German address cannot inherit omitted old address supplements", () => {
+  const { company: _company, dhlPostNumber: _post, ...germanAddress } = existingCustomer;
+  const spanish = { ...existingCustomer, company: "Spanish address supplement", dhlPostNumber: "12345678", street: "Calle Test", houseNumber: "2", zip: "28001", city: "Madrid", country: "ES" };
+  assert.deepEqual(resolveAddressBoundOptionalFields(spanish, germanAddress), { company: "", dhlPostNumber: "" });
+  const result = resolveCheckoutCustomerDataChange([spanish], germanAddress);
+  assert.equal(result.kind, "matched");
+  if (result.kind !== "matched") return;
+  assert.equal(result.submittedSnapshot.street, germanAddress.street);
+  assert.equal(result.submittedSnapshot.country, "Deutschland");
+  assert.equal(result.submittedSnapshot.company, "");
+  assert.equal(result.previousSnapshot.company, "Spanish address supplement");
+});
+
+test("explicit company remains exactly the newly submitted company even on address change", () => {
+  assert.deepEqual(resolveAddressBoundOptionalFields(
+    { ...existingCustomer, company: "Old company" },
+    { ...existingCustomer, street: "Neue Straße", company: "New company", dhlPostNumber: "87654321" },
+  ), { company: "New company", dhlPostNumber: "87654321" });
 });

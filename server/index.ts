@@ -46,6 +46,7 @@ import { ensureCustomerDataChangeSchema } from "./customerDataChangeService.js";
 import { ensureCommunicationLanguageSchema } from "./communicationLanguageService.js";
 import { ensureWawiPerformanceIndexes } from "./wawiPerformanceSchema.js";
 import { ensureSwissCustomsSchema } from "./swissCustomsSchema.js";
+import { ensureDhlRelabelSchema, isDhlRelabelSchemaReady } from "./dhlRelabelSchema.js";
 import { ensureOrderCommunicationPhoneSchema } from "./orderCommunicationPhoneService.js";
 import { ensureKwkDemoSchema } from "./kwkDemoService.js";
 import { ensureAdminChangeLogSchema } from "./adminChangeLogService.js";
@@ -132,6 +133,7 @@ app.get("/health/ready", async (_req, res) => {
   return res.json({
     status: "ok",
     database: "ready",
+    dhlLabelLedgerReady: isDhlRelabelSchemaReady(),
     timestamp: new Date().toISOString(),
   });
 });
@@ -385,6 +387,13 @@ async function start() {
     console.log("[Server] Swiss customs declaration schema ready");
   } catch (err) {
     console.warn("[Server] Swiss customs declaration schema migration failed:", err);
+  }
+
+  // Durable DHL generations/operations: unavailable ledger fails label mutations closed.
+  try {
+    await ensureDhlRelabelSchema();
+  } catch (err) {
+    console.warn("[Server] DHL label-generation schema migration failed:", err);
   }
 
   // Persönliche Aktionscodes sind separat und nur bei einer bewussten

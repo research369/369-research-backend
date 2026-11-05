@@ -88,12 +88,14 @@ import {
   getChangedCustomerDataFields,
   persistConfirmedCustomerDataChange,
   resolveCheckoutCustomerDataChange,
+  resolveAddressBoundOptionalFields,
   toCustomerDataSnapshot,
   toCustomerUpdateFromSnapshot,
   type CheckoutCustomerDataChangeResolution,
 } from "./customerDataChangeService.js";
 import { normalizeCommunicationLanguage } from "./communicationLanguageService.js";
 import { buildPackingWhatsAppMessage } from "./packingWhatsAppMessage.js";
+import { getDhlLabelLifecycleForOrders } from "./dhlLabelLifecycleSummary.js";
 import {
   clearOrderCommunicationPhoneOverride,
   getEffectiveCommunicationPhone,
@@ -1702,9 +1704,10 @@ export const orderRouter = router({
         } else if (isAuthenticatedWawiManualSale && !ctx.jarvyOrder) {
           // The established authenticated WaWi workflow remains unchanged. The
           // public shop path above is deliberately the only changed behavior.
+          const addressBoundOptionalFields = resolveAddressBoundOptionalFields(existingCustomer, input.customer);
           const manuallyChanged = getChangedCustomerDataFields(
             toCustomerDataSnapshot(existingCustomer),
-            toCustomerDataSnapshot({ ...input.customer, dhlPostNumber: input.customer.dhlPostNumber || null }),
+            toCustomerDataSnapshot({ ...input.customer, ...addressBoundOptionalFields }),
           ).length > 0;
           await db.update(customers).set({
             name: fullName,
@@ -1712,13 +1715,14 @@ export const orderRouter = router({
             lastName: input.customer.lastName,
             phone: customerPhone || existingCustomer.phone,
             email: customerEmail || existingCustomer.email,
-            company: input.customer.deliveryType === "packstation" ? existingCustomer.company : (input.customer.company || existingCustomer.company),
+            company: input.customer.deliveryType === "packstation" || input.customer.deliveryType === "postfiliale"
+              ? null : (addressBoundOptionalFields.company || null),
             street: input.customer.street,
             houseNumber: input.customer.houseNumber,
             zip: (input.customer.zip ?? "").trim(),
             city: input.customer.city,
             country: input.customer.country,
-            dhlPostNumber: input.customer.dhlPostNumber || existingCustomer.dhlPostNumber,
+            dhlPostNumber: addressBoundOptionalFields.dhlPostNumber || null,
             communicationLanguage,
             updatedAt: new Date(),
           }).where(eq(customers.id, existingCustomer.id));
@@ -1915,11 +1919,15 @@ export const orderRouter = router({
       const communicationPhones = await getEffectiveCommunicationPhonesForOrders(
         filteredOrders.map((order) => ({ orderId: order.orderId, phone: order.phone })),
       );
+      const dhlLabelLifecycle = await getDhlLabelLifecycleForOrders(filteredOrders
+        .filter((order) => order.trackingCarrier === "DHL" || order.trackingCarrier === "DHL_PENDING")
+        .map((order) => order.orderId));
 
       // Combine. Die Datenbankabfrage schließt große Labeldaten vollständig aus.
       // Für vorhandene DHL-Labels wird nur eine kurze, geschützte Abrufroute geliefert.
       const result = filteredOrders.map(o => ({
         ...o,
+        dhlLabelLifecycle: dhlLabelLifecycle.get(o.orderId) ?? null,
         // Labels werden ausschließlich über eine kurze, geschützte Abrufroute
         // geliefert. Das gilt für DHL-PDFs und extern hochgeladene Labels gleich.
         shippingLabelUrl: o.hasShippingLabel
@@ -1966,9 +1974,13 @@ export const orderRouter = router({
       const items = await db.select().from(orderItems).where(eq(orderItems.orderId, order.orderId));
       const personalPromoAssignments = await getPersonalPromoAssignmentsForOrderIds([order.orderId]);
       const communicationPhone = await getEffectiveCommunicationPhone(order.orderId);
+      const dhlLabelLifecycle = await getDhlLabelLifecycleForOrders(
+        order.trackingCarrier === "DHL" || order.trackingCarrier === "DHL_PENDING" ? [order.orderId] : [],
+      );
 
       return {
         ...order,
+        dhlLabelLifecycle: dhlLabelLifecycle.get(order.orderId) ?? null,
         subtotal: parseFloat(order.subtotal),
         discount: parseFloat(order.discount),
         discountBreakdown: order.discountBreakdown || [],
