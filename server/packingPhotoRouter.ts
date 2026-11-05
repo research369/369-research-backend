@@ -27,7 +27,7 @@ async function requirePackingAuth(req: any, res: any, next: () => void): Promise
   res.status(401).json({ success: false, error: "Nicht angemeldet" });
 }
 
-export const packingPhotoRouter = Router();
+export const packingPhotoRouter: Router = Router();
 
 // ─── POST /api/orders/:orderId/packing-photo ─────────────────────────────────
 packingPhotoRouter.post(

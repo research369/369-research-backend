@@ -14,7 +14,7 @@ import { Router, type Request, type Response } from "express";
 import { ENV } from "./env.js";
 import { getPool } from "./db.js";
 
-export const checkoutErrorRouter = Router();
+export const checkoutErrorRouter: Router = Router();
 
 checkoutErrorRouter.post("/api/checkout-error", async (req: Request, res: Response) => {
   const data = req.body;

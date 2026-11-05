@@ -35,7 +35,7 @@ import { orders } from "../drizzle/schema.js";
 import { eq, and, isNull } from "drizzle-orm";
 import { getUserFromRequest } from "./auth.js";
 
-export const dhlExpressRouter = Router();
+export const dhlExpressRouter: Router = Router();
 
 // ─── Middleware: JWT-Auth für Label-Erstellung und -Abruf ────────────────────
 

@@ -9,7 +9,7 @@ import {
   hashIp,
 } from "./qrCampaignService.js";
 
-export const qrRedirectRouter = Router();
+export const qrRedirectRouter: Router = Router();
 
 // Marketing namespace only. `/i/<token>` remains reserved for the 14,650
 // prepared individual product/serial URLs and is intentionally not mounted here.

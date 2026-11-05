@@ -1,4 +1,9 @@
 import { initTRPC, TRPCError } from "@trpc/server";
+import type {
+  TRPCProcedureBuilder,
+  TRPCRootObject,
+  TRPCUnsetMarker,
+} from "@trpc/server";
 import superjson from "superjson";
 import type { Request, Response } from "express";
 
@@ -14,13 +19,32 @@ export interface Context {
   } | null;
 }
 
+/** The existing authentication middlewares guarantee a non-null user, not a literal role. */
+export interface AuthenticatedContext extends Context {
+  user: NonNullable<Context["user"]>;
+}
+
+// Public package types keep emitted declarations independent of pnpm's nested
+// Express/qs paths. Unset markers retain input/output inference for every route.
+type Root = TRPCRootObject<Context, object, { transformer: typeof superjson }>;
+export type AuthenticatedProcedure = TRPCProcedureBuilder<
+  Context,
+  object,
+  AuthenticatedContext,
+  TRPCUnsetMarker,
+  TRPCUnsetMarker,
+  TRPCUnsetMarker,
+  TRPCUnsetMarker,
+  false
+>;
+
 const t = initTRPC.context<Context>().create({
   transformer: superjson,
 });
 
-export const router = t.router;
-export const publicProcedure = t.procedure;
-export const middleware = t.middleware;
+export const router: Root["router"] = t.router;
+export const publicProcedure: Root["procedure"] = t.procedure;
+export const middleware: Root["middleware"] = t.middleware;
 
 const isAuthed = middleware(({ ctx, next }) => {
   if (!ctx.user) {
@@ -39,8 +63,8 @@ const isAdmin = middleware(({ ctx, next }) => {
   return next({ ctx: { ...ctx, user: ctx.user } });
 });
 
-export const protectedProcedure = t.procedure.use(isAuthed);
-export const adminProcedure = t.procedure.use(isAdmin);
+export const protectedProcedure: AuthenticatedProcedure = t.procedure.use(isAuthed);
+export const adminProcedure: AuthenticatedProcedure = t.procedure.use(isAdmin);
 
 // Product Manager: role = "admin" OR role = "product_manager"
 // Kein Zugriff auf orders, customers, invoices, payments, checkout, users, migrations
@@ -54,7 +78,7 @@ const isProductManager = middleware(({ ctx, next }) => {
   return next({ ctx: { ...ctx, user: ctx.user } });
 });
 
-export const productManagerProcedure = t.procedure.use(isProductManager);
+export const productManagerProcedure: AuthenticatedProcedure = t.procedure.use(isProductManager);
 
 // Packing: role = "admin" OR role = "packing"
 // Zugriff auf: Bestellungen, Labels, Kunden, Artikel (lesen+Bestand), Rechnungen, Eingang
@@ -69,4 +93,4 @@ const isPacking = middleware(({ ctx, next }) => {
   return next({ ctx: { ...ctx, user: ctx.user } });
 });
 
-export const packingProcedure = t.procedure.use(isPacking);
+export const packingProcedure: AuthenticatedProcedure = t.procedure.use(isPacking);

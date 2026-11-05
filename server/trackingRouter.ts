@@ -41,7 +41,7 @@ import { orders } from "../drizzle/schema.js";
 import { gte, isNotNull, ne } from "drizzle-orm";
 import { getUserFromRequest } from "./auth.js";
 
-export const trackingRouter = Router();
+export const trackingRouter: Router = Router();
 
 // ─── Typen ────────────────────────────────────────────────────────────────────
 
