@@ -375,6 +375,7 @@ export function calculateCheckoutV2Quote(input: {
   assertAggregateAvailability({ lines, giftLines, catalog: input.catalog });
   const shipping = calculateAuthoritativeShipping({
     country,
+    items: [], // 369 only: no cold shipping; shared main/P4P helper remains unchanged.
     promoDescription: benefits.promotion?.kind === "promo" ? benefits.promotion.promo.description : undefined,
   });
   const subtotal = roundMoney(lines.reduce((sum, line) => sum + line.lineTotal, 0));

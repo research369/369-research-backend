@@ -5,11 +5,11 @@
  * - 7 Tage nach shipped_at wird automatisch ein Follow-up erstellt
  * - Nur 1 Follow-up pro Bestellung (unique constraint auf order_id)
  * - Individueller 48h-Rabattcode pro Follow-up (AGAIN-[ORDERNR]-[4CHARS])
- * - Code wird erst beim Klick auf "Nachricht generieren" erzeugt
+ * - Code wird erst beim tatsächlichen Kundenkontakt erzeugt
  * - Gültiger Code wird wiederverwendet, abgelaufener Code gibt Warnung zurück
  */
 import { z } from "zod";
-import { eq, and, lte, isNull, desc, or, inArray, ne } from "drizzle-orm";
+import { eq, and, lte, gte, isNull, desc, or, inArray, ne } from "drizzle-orm";
 import { router, adminProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
 import { ENV } from "./env.js";
@@ -21,10 +21,22 @@ import {
   articles,
   customers,
   promoCodes,
+  personalPromoExpiryReminders,
 } from "../drizzle/schema.js";
+import { calculateFollowUpShipmentWindow } from "./followUpEligibility.js";
+import { generateFollowUpProductCopies } from "./followUpProductCopy.js";
+import { isCommercialOrder } from "./commercialOrderMetrics.js";
+import { syncPersonalPromoExpiryReminders } from "./personalPromoExpiryReminderService.js";
+import { getEffectiveCommunicationPhone, getEffectiveCommunicationPhonesForOrders } from "./orderCommunicationPhoneService.js";
 
 const RESEND_API_URL = "https://api.resend.com/emails";
 const SHOP_BASE_URL = "https://www.369research.eu";
+
+function escapeHtml(value: unknown): string {
+  return String(value ?? "").replace(/[&<>'"]/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
+  }[character] || character));
+}
 
 /**
  * Zentrale Konfiguration – alle Parameter hier ändern, nirgendwo sonst hardcoden
@@ -36,6 +48,40 @@ const FOLLOWUP_CONFIG = {
   defaultReminderStage: 1,      // Erste Stufe (für spätere Erweiterung: 1, 2, 3)
   codePrefix: "AGAIN",          // Prefix für generierten Code
 };
+
+const MAX_FOLLOWUP_VALIDITY_HOURS = 8_760; // one calendar year
+
+export type FollowUpOfferTerms = {
+  discountPercent: number;
+  codeValidityHours: number;
+};
+
+/**
+ * Normalizes operator-selected terms before they become an offer. These values
+ * are copied to the code at customer contact and cannot change that code later.
+ */
+export function normalizeFollowUpOfferTerms(input: Partial<FollowUpOfferTerms>): FollowUpOfferTerms {
+  const discountPercent = Number(input.discountPercent ?? FOLLOWUP_CONFIG.discountPercent);
+  const codeValidityHours = Number(input.codeValidityHours ?? FOLLOWUP_CONFIG.codeValidityHours);
+  if (!Number.isFinite(discountPercent) || discountPercent < 0 || discountPercent > 100) {
+    throw new Error("Der Follow-up-Rabatt muss zwischen 0 und 100 % liegen.");
+  }
+  if (!Number.isInteger(codeValidityHours) || codeValidityHours < 1 || codeValidityHours > MAX_FOLLOWUP_VALIDITY_HOURS) {
+    throw new Error("Die Follow-up-Gültigkeit muss zwischen 1 Stunde und 365 Tagen liegen.");
+  }
+  return { discountPercent, codeValidityHours };
+}
+
+export function calculateFollowUpCodeExpiry(createdAt: Date, terms: FollowUpOfferTerms): Date {
+  return new Date(createdAt.getTime() + terms.codeValidityHours * 60 * 60 * 1000);
+}
+
+function termsForFollowUp(followUp: { discountPercent?: unknown; codeValidityHours?: unknown }): FollowUpOfferTerms {
+  return normalizeFollowUpOfferTerms({
+    discountPercent: Number(followUp.discountPercent ?? FOLLOWUP_CONFIG.discountPercent),
+    codeValidityHours: Number(followUp.codeValidityHours ?? FOLLOWUP_CONFIG.codeValidityHours),
+  });
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -71,13 +117,16 @@ function generateCodeForOrder(orderId: string): string {
  * Erstellt einen individuellen Promo-Code in der DB und verknüpft ihn mit dem Follow-up.
  * Gibt den erstellten Code zurück.
  */
-async function createIndividualCode(db: any, followupId: number, orderId: string): Promise<{
+async function createIndividualCode(db: any, followUp: any): Promise<{
   code: string;
   promoCodeId: number;
   expiresAt: Date;
 }> {
-  const expiresAt = new Date(Date.now() + FOLLOWUP_CONFIG.codeValidityHours * 60 * 60 * 1000);
   const now = new Date();
+  const terms = termsForFollowUp(followUp);
+  const expiresAt = calculateFollowUpCodeExpiry(now, terms);
+  const followupId = followUp.id as number;
+  const orderId = followUp.orderId as string;
 
   // Eindeutigen Code generieren (Kollisions-Check)
   let code = generateCodeForOrder(orderId);
@@ -97,20 +146,28 @@ async function createIndividualCode(db: any, followupId: number, orderId: string
   const [inserted] = await db.insert(promoCodes).values({
     code,
     discountType: "percent",
-    percentage: String(FOLLOWUP_CONFIG.discountPercent),
+    percentage: String(terms.discountPercent),
     fixedAmount: "0",
     minOrder: "0",
     maxUses: 1,       // Einmalig nutzbar
     currentUses: 0,
     validFrom: now,
     validUntil: expiresAt,
+    validUntilExact: 1,
     isActive: 1,
-    description: `Follow-up Code für Bestellung ${orderId} – ${FOLLOWUP_CONFIG.discountPercent}% Rabatt, gültig ${FOLLOWUP_CONFIG.codeValidityHours}h`,
+    description: `Follow-up Code für Bestellung ${orderId} – ${terms.discountPercent}% auf den gesamten Warenkorb (Versand ausgenommen), gültig ${terms.codeValidityHours}h ab Kundenkontakt`,
   }).returning({ id: promoCodes.id });
 
   const promoCodeId = inserted.id;
 
   // Code im Follow-up speichern
+  // An older code must never remain redeemable merely because the date-only
+  // legacy validation would otherwise still include the remainder of that day.
+  if (followUp.promoCodeId) {
+    await db.update(promoCodes).set({ isActive: 0, updatedAt: now })
+      .where(eq(promoCodes.id, followUp.promoCodeId));
+  }
+
   await db
     .update(salesFollowups)
     .set({
@@ -122,7 +179,7 @@ async function createIndividualCode(db: any, followupId: number, orderId: string
     })
     .where(eq(salesFollowups.id, followupId));
 
-  console.log(`[FollowUp] Individueller Code ${code} erstellt für Follow-up ${followupId} (Order ${orderId}), gültig bis ${expiresAt.toISOString()}`);
+  console.log(`[FollowUp] Individueller Code ${code} erstellt für Follow-up ${followupId} (Order ${orderId}), ${terms.discountPercent}% bis ${expiresAt.toISOString()}`);
   return { code, promoCodeId, expiresAt };
 }
 
@@ -165,11 +222,12 @@ async function getCustomerOrderHistory(db: any, order: any): Promise<any[]> {
 }
 
 /** Generiert WhatsApp-Nachricht – entweder mit echtem Code oder Platzhalter */
-function generateWhatsAppMessage(
+export function generateWhatsAppMessage(
   order: any,
   selectedArticles: any[],
   promoCode: string,
-  codeExpiresAt: Date | null
+  codeExpiresAt: Date | null,
+  terms: FollowUpOfferTerms,
 ): string {
   const firstName = order.firstName || order.first_name || "";
   const orderDate = order.orderDate
@@ -187,20 +245,19 @@ function generateWhatsAppMessage(
     .map((a) => {
       const slug = a.shopProductId || "";
       const link = slug ? `${SHOP_BASE_URL}/product/${slug}` : SHOP_BASE_URL;
-      const price = a.sellingPrice ? `${parseFloat(a.sellingPrice).toFixed(2).replace(".", ",")} €` : "";
-      return `• ${a.name}${price ? ` (${price})` : ""}\n  ${link}`;
+      return `*${a.name}*\n${a.generatedCopy}\n${link}`;
     })
-    .join("\n");
+    .join("\n\n");
 
   return `Hallo ${firstName},
 
 wir hoffen, du bist zufrieden mit deiner Bestellung vom ${orderDate}! 🙏
 
-Als Dankeschön für dein Vertrauen möchten wir dir heute einige Produkte vorstellen, die hervorragend zu deiner bisherigen Forschung passen könnten:
+Als Dankeschön für dein Vertrauen möchten wir dir eine gezielte Ergänzung zeigen:
 
 ${productLines}
 
-Mit dem Code *${promoCode}* erhältst du *${FOLLOWUP_CONFIG.discountPercent}% Rabatt* auf deine nächste Bestellung – einfach im Checkout eingeben.
+Dein persönlicher Rabatt: *${promoCode} – ${terms.discountPercent}% auf den gesamten Warenkorb (Versand ausgenommen)*
 
 ⏳ _Dieser Code ist nur für dich und nur bis ${expiryStr} Uhr gültig._
 
@@ -213,11 +270,12 @@ Dein 369 Research Team`;
 }
 
 /** Generiert E-Mail-Betreff und -Body – entweder mit echtem Code oder Platzhalter */
-function generateEmailContent(
+export function generateEmailContent(
   order: any,
   selectedArticles: any[],
   promoCode: string,
-  codeExpiresAt: Date | null
+  codeExpiresAt: Date | null,
+  terms: FollowUpOfferTerms,
 ): { subject: string; body: string } {
   const firstName = order.firstName || order.first_name || "";
   const orderDate = order.orderDate
@@ -240,15 +298,15 @@ function generateEmailContent(
         : "";
       return `<tr>
         <td style="padding:8px 12px;border-bottom:1px solid #f0f0f0;">
-          <a href="${link}" style="color:#0040C1;text-decoration:none;font-weight:600;">${a.name}</a>
-          ${a.category ? `<br><span style="color:#64748b;font-size:12px;">${a.category}</span>` : ""}
+          <a href="${link}" style="color:#0040C1;text-decoration:none;font-weight:600;">${escapeHtml(a.name)}</a>
+          <br><span style="color:#475569;font-size:13px;line-height:1.5;">${escapeHtml(a.generatedCopy)}</span>
         </td>
         <td style="padding:8px 12px;border-bottom:1px solid #f0f0f0;text-align:right;white-space:nowrap;">${price}</td>
       </tr>`;
     })
     .join("");
 
-  const subject = `Dein exklusives Angebot von 369 Research – ${FOLLOWUP_CONFIG.discountPercent}% Rabatt für dich`;
+  const subject = `Dein exklusives Angebot von 369 Research – ${terms.discountPercent}% Rabatt für dich`;
 
   const body = `<!DOCTYPE html>
 <html lang="de">
@@ -265,11 +323,10 @@ function generateEmailContent(
       <p style="color:#1A1A2E;font-size:16px;margin:0 0 8px;">Hallo ${firstName},</p>
       <p style="color:#475569;font-size:15px;line-height:1.6;margin:0 0 24px;">
         wir hoffen, du bist zufrieden mit deiner Bestellung vom <strong>${orderDate}</strong>!
-        Als Dankeschön für dein Vertrauen möchten wir dir heute einige Produkte vorstellen,
-        die hervorragend zu deiner bisherigen Forschung passen könnten.
+        Als Dankeschön für dein Vertrauen möchten wir dir eine gezielte Ergänzung zeigen.
       </p>
       <!-- Products -->
-      <h2 style="color:#1A1A2E;font-size:16px;font-weight:700;margin:0 0 16px;">Empfehlungen für dich</h2>
+      <h2 style="color:#1A1A2E;font-size:16px;font-weight:700;margin:0 0 16px;">Gezielt für dich ausgewählt</h2>
       <table style="width:100%;border-collapse:collapse;margin-bottom:24px;">
         <thead>
           <tr style="background:#f7f9fc;">
@@ -283,7 +340,7 @@ function generateEmailContent(
       <div style="background:#f0f7ff;border:2px dashed #0040C1;border-radius:8px;padding:20px;text-align:center;margin-bottom:16px;">
         <p style="color:#475569;font-size:14px;margin:0 0 8px;">Dein persönlicher Rabattcode</p>
         <p style="color:#0040C1;font-size:28px;font-weight:800;letter-spacing:0.1em;margin:0 0 8px;">${promoCode}</p>
-        <p style="color:#475569;font-size:14px;margin:0;"><strong>${FOLLOWUP_CONFIG.discountPercent}% Rabatt</strong> auf deine nächste Bestellung</p>
+        <p style="color:#475569;font-size:14px;margin:0;"><strong>${terms.discountPercent}% Rabatt</strong> auf den gesamten Warenkorb<br><span style="font-size:12px;">Versandkosten sind ausgenommen.</span></p>
       </div>
       <p style="color:#ef4444;font-size:13px;text-align:center;margin:0 0 24px;">
         ⏳ Dieser Code ist nur für dich und nur bis <strong>${expiryStr} Uhr</strong> gültig.
@@ -454,8 +511,10 @@ function computeCrossSellRecommendations(
 
 export const followUpRouter = router({
   /**
-   * Erstellt fehlende Follow-ups für alle versendeten Bestellungen
-   * die shipped_at + FOLLOWUP_CONFIG.reminderDaysAfterShipping Tage überschritten haben.
+   * Erstellt fehlende Follow-ups für versendete Bestellungen, die nach der
+   * Karenzzeit fällig sind und deren Versand maximal zehn Tage zurückliegt.
+   * Dadurch kann ein historischer Rückstau nicht wieder in die aktive Queue
+   * gelangen, wenn "Neue prüfen" nach einer Pause betätigt wird.
    * Wird beim Dashboard-Load aufgerufen (idempotent).
    * KEIN automatischer Code-Aufruf – Code wird erst bei "Nachricht generieren" erstellt.
    */
@@ -463,18 +522,25 @@ export const followUpRouter = router({
     const db = await getDb();
     if (!db) throw new Error("Database not available");
 
-    const cutoff = new Date(
-      Date.now() - FOLLOWUP_CONFIG.reminderDaysAfterShipping * 24 * 60 * 60 * 1000
+    // Backfill only codes issued from orders. This is an internal queue action;
+    // it never sends WhatsApp or e-mail to a customer.
+    await syncPersonalPromoExpiryReminders();
+
+    const now = new Date();
+    const { dueBy, eligibleFrom } = calculateFollowUpShipmentWindow(
+      now,
+      FOLLOWUP_CONFIG.reminderDaysAfterShipping,
     );
 
-    // Alle versendeten Bestellungen mit shipped_at <= cutoff
+    // Nur versendete Bestellungen im begrenzten, fälligen Zeitfenster.
     const shippedOrders = await db
-      .select({ orderId: orders.orderId, shippedAt: orders.shippedAt })
+      .select({ orderId: orders.orderId, shippedAt: orders.shippedAt, total: orders.total, status: orders.status })
       .from(orders)
       .where(
         and(
           eq(orders.status, "versendet"),
-          lte(orders.shippedAt, cutoff)
+          gte(orders.shippedAt, eligibleFrom),
+          lte(orders.shippedAt, dueBy),
         )
       );
 
@@ -488,6 +554,7 @@ export const followUpRouter = router({
 
     let created = 0;
     for (const o of shippedOrders) {
+      if (!isCommercialOrder(o)) continue;
       if (existingOrderIds.has(o.orderId)) continue;
 
       if (!o.shippedAt) continue;
@@ -531,35 +598,32 @@ export const followUpRouter = router({
       if (!db) throw new Error("Database not available");
 
       const now = new Date();
+      await syncPersonalPromoExpiryReminders(now);
 
       const allFollowUps = await db
         .select()
         .from(salesFollowups)
         .orderBy(desc(salesFollowups.dueAt));
 
-      // Filtern
-      const filtered = allFollowUps.filter((f: any) => {
-        if (input.status === "all") return true;
-        return f.status === input.status;
-      });
+      const filtered = allFollowUps.filter((f: any) => input.status === "all" || f.status === input.status);
 
-      if (filtered.length === 0) return [];
-
-      // Bestelldaten laden
       const orderIds = filtered.map((f: any) => f.orderId);
-      const orderList = await db
-        .select()
-        .from(orders)
-        .where(inArray(orders.orderId, orderIds));
+      const orderList = orderIds.length > 0
+        ? await db.select().from(orders).where(inArray(orders.orderId, orderIds))
+        : [];
       const orderMap = new Map(orderList.map((o: any) => [o.orderId, o]));
+      const communicationPhones = await getEffectiveCommunicationPhonesForOrders(
+        orderList.map((order: any) => ({ orderId: order.orderId, phone: order.phone })),
+      );
 
-      return filtered.map((f: any) => {
+      const crossSellFollowUps = filtered.map((f: any) => {
         const order = orderMap.get(f.orderId) || {};
         const isOverdue = f.status === "pending" && new Date(f.dueAt) < now;
         const codeExpired = f.discountCode && f.codeExpiresAt
           ? new Date(f.codeExpiresAt) < now
           : false;
         return {
+          reminderType: "cross_sell" as const,
           id: f.id,
           orderId: f.orderId,
           status: f.status,
@@ -579,7 +643,8 @@ export const followUpRouter = router({
           // Kundendaten (aus Bestellung)
           customerName: `${order.firstName || ""} ${order.lastName || ""}`.trim(),
           customerEmail: order.email || "",
-          customerPhone: order.phone || "",
+          customerPhone: communicationPhones.get(order.orderId)?.effectivePhone || order.phone || "",
+          communicationPhoneSource: communicationPhones.get(order.orderId)?.source || "order_snapshot",
           customerId: order.customerId,
           discountCodeUsed: order.discountCode,
           partnerCode: order.partnerCode,
@@ -587,6 +652,116 @@ export const followUpRouter = router({
           shippedAt: order.shippedAt,
         };
       });
+
+      const reminderRows = await db
+        .select({ reminder: personalPromoExpiryReminders, order: orders, promoCode: promoCodes })
+        .from(personalPromoExpiryReminders)
+        .leftJoin(orders, eq(personalPromoExpiryReminders.originOrderId, orders.orderId))
+        .leftJoin(promoCodes, eq(personalPromoExpiryReminders.promoCodeId, promoCodes.id))
+        .orderBy(desc(personalPromoExpiryReminders.dueAt));
+      const reminderCommunicationPhones = await getEffectiveCommunicationPhonesForOrders(
+        reminderRows.flatMap(({ order }: any) => order ? [{ orderId: order.orderId, phone: order.phone }] : []),
+      );
+
+      const personalPromoReminders = reminderRows
+        .filter(({ reminder, promoCode }) => {
+          if (input.status !== "all" && reminder.status !== input.status) return false;
+          // A redeemed, deactivated or deleted code needs no open expiry task.
+          const maxUses = Number(promoCode?.maxUses || 0);
+          const currentUses = Number(promoCode?.currentUses || 0);
+          if (reminder.status === "pending" && (!promoCode || promoCode.isActive !== 1 || (maxUses > 0 && currentUses >= maxUses))) return false;
+          // Pending reminders enter the WaWi only at their ten-day window.
+          return reminder.status !== "pending" || new Date(reminder.dueAt) <= now;
+        })
+        .map(({ reminder, order }) => ({
+          reminderType: "personal_promo_expiry" as const,
+          id: reminder.id,
+          orderId: reminder.originOrderId,
+          status: reminder.status,
+          dueAt: reminder.dueAt,
+          completedAt: reminder.completedAt,
+          skippedAt: reminder.skippedAt,
+          isOverdue: reminder.status === "pending" && new Date(reminder.dueAt) < now,
+          reminderStage: 1,
+          discountCode: null,
+          discountPercent: 0,
+          codeValidityHours: 0,
+          codeExpiresAt: null,
+          codeExpired: new Date(reminder.expiresAt) < now,
+          messageGeneratedAt: null,
+          orderDate: order?.orderDate || null,
+          total: order?.total ? parseFloat(order.total) : 0,
+          customerName: `${order?.firstName || ""} ${order?.lastName || ""}`.trim(),
+          customerEmail: order?.email || "",
+          customerPhone: order ? reminderCommunicationPhones.get(order.orderId)?.effectivePhone || order.phone || "" : "",
+          communicationPhoneSource: order ? reminderCommunicationPhones.get(order.orderId)?.source || "order_snapshot" : "order_snapshot",
+          customerId: reminder.customerId,
+          discountCodeUsed: order?.discountCode || null,
+          partnerCode: order?.partnerCode || null,
+          trackingNumber: order?.trackingNumber || null,
+          shippedAt: order?.shippedAt || null,
+          promoCode: reminder.code,
+          promoCodeExpiresAt: reminder.expiresAt,
+        }));
+
+      return [...crossSellFollowUps, ...personalPromoReminders]
+        .sort((left, right) => new Date(right.dueAt).getTime() - new Date(left.dueAt).getTime());
+    }),
+
+  /** Loads an internal reminder for a code issued from an order. */
+  getPersonalPromoExpiryReminderDetail: adminProcedure
+    .input(z.object({ id: z.number() }))
+    .query(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      const [row] = await db
+        .select({ reminder: personalPromoExpiryReminders, order: orders })
+        .from(personalPromoExpiryReminders)
+        .leftJoin(orders, eq(personalPromoExpiryReminders.originOrderId, orders.orderId))
+        .where(eq(personalPromoExpiryReminders.id, input.id))
+        .limit(1);
+      if (!row) throw new Error("Aktionscode-Erinnerung nicht gefunden");
+      const communicationPhone = row.order
+        ? await getEffectiveCommunicationPhone(row.order.orderId)
+        : null;
+
+      return {
+        ...row.reminder,
+        customerName: `${row.order?.firstName || ""} ${row.order?.lastName || ""}`.trim(),
+        customerEmail: row.order?.email || "",
+        customerPhone: communicationPhone?.effectivePhone || row.order?.phone || "",
+        communicationPhoneSource: communicationPhone?.source || "order_snapshot",
+        orderDate: row.order?.orderDate || null,
+        orderTotal: row.order?.total || "0",
+      };
+    }),
+
+  markPersonalPromoExpiryReminderDone: adminProcedure
+    .input(z.object({ id: z.number(), completedBy: z.string().optional() }))
+    .mutation(async ({ input, ctx }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+      await db.update(personalPromoExpiryReminders).set({
+        status: "done",
+        completedAt: new Date(),
+        completedBy: input.completedBy || ctx.user?.username || "admin",
+        updatedAt: new Date(),
+      }).where(eq(personalPromoExpiryReminders.id, input.id));
+      return { ok: true };
+    }),
+
+  markPersonalPromoExpiryReminderSkipped: adminProcedure
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+      await db.update(personalPromoExpiryReminders).set({
+        status: "skipped",
+        skippedAt: new Date(),
+        updatedAt: new Date(),
+      }).where(eq(personalPromoExpiryReminders.id, input.id));
+      return { ok: true };
     }),
 
   /**
@@ -652,6 +827,7 @@ export const followUpRouter = router({
         .limit(1);
 
       if (!originOrder) throw new Error("Ursprungsbestellung nicht gefunden");
+      const originCommunicationPhone = await getEffectiveCommunicationPhone(originOrder.orderId);
 
       // Artikel der Ursprungsbestellung
       const originItems = await db
@@ -659,11 +835,13 @@ export const followUpRouter = router({
         .from(orderItems)
         .where(eq(orderItems.orderId, followUp.orderId));
 
-      // Vollständige Bestellhistorie des Kunden
+      // Vollständige Bestellhistorie des Kunden. Kostenlose Ersatz- und
+      // Kulanzaufträge bleiben sichtbar, steuern aber keine Kaufempfehlung.
       const allCustomerOrders = await getCustomerOrderHistory(db, originOrder);
+      const commercialOrders = allCustomerOrders.filter((o: any) => isCommercialOrder(o));
 
-      // Für jede Bestellung die Items laden
-      const allOrderIds = allCustomerOrders.map((o: any) => o.orderId);
+      // Nur Artikel aus tatsächlichen Käufen können Empfehlungen beeinflussen.
+      const allOrderIds = commercialOrders.map((o: any) => o.orderId);
       const allItems = allOrderIds.length > 0
         ? await db.select().from(orderItems).where(inArray(orderItems.orderId, allOrderIds))
         : [];
@@ -676,8 +854,7 @@ export const followUpRouter = router({
       }
 
       // Statistiken
-      const nonCancelledOrders = allCustomerOrders.filter((o: any) => o.status !== "storniert");
-      const totalSpent = nonCancelledOrders.reduce(
+      const totalSpent = commercialOrders.reduce(
         (sum: number, o: any) => sum + parseFloat(o.total || "0"),
         0
       );
@@ -710,6 +887,8 @@ export const followUpRouter = router({
         },
         originOrder: {
           ...originOrder,
+          effectiveCommunicationPhone: originCommunicationPhone.effectivePhone,
+          communicationPhoneSource: originCommunicationPhone.source,
           items: originItems,
         },
         customerHistory: allCustomerOrders.map((o: any) => ({
@@ -717,7 +896,7 @@ export const followUpRouter = router({
           items: itemsByOrder.get(o.orderId) || [],
         })),
         stats: {
-          totalOrders: allCustomerOrders.length,
+          totalOrders: commercialOrders.length,
           totalSpent,
           boughtArticleIds: Array.from(boughtArticleIds),
         },
@@ -726,16 +905,60 @@ export const followUpRouter = router({
     }),
 
   /**
+   * Changes offer terms before any code is issued. Once a customer-facing code
+   * exists, its terms are immutable so the sent message, promo code and audit
+   * trail can never diverge.
+   */
+  updateOfferTerms: adminProcedure
+    .input(z.object({
+      followupId: z.number(),
+      discountPercent: z.number().min(0).max(100),
+      codeValidityHours: z.number().int().min(1).max(MAX_FOLLOWUP_VALIDITY_HOURS),
+    }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      const [followUp] = await db.select().from(salesFollowups)
+        .where(eq(salesFollowups.id, input.followupId)).limit(1);
+      if (!followUp) throw new Error("Follow-up nicht gefunden");
+      if (followUp.discountCode || followUp.promoCodeId || followUp.codeCreatedAt) {
+        throw new Error("ANGEBOT_BEREITS_AUSGEGEBEN: Rabatt und Gültigkeit sind nach der Code-Erstellung unveränderlich.");
+      }
+
+      const terms = normalizeFollowUpOfferTerms(input);
+      await db.update(salesFollowups).set({
+        discountPercent: String(terms.discountPercent),
+        codeValidityHours: terms.codeValidityHours,
+        // Any existing preview contains the previous terms and must be regenerated.
+        whatsappMessage: null,
+        emailSubject: null,
+        emailBody: null,
+        messageGeneratedAt: null,
+        updatedAt: new Date(),
+      }).where(eq(salesFollowups.id, input.followupId));
+
+      return { ok: true, ...terms };
+    }),
+
+  /**
    * Produkte für ein Follow-up auswählen (ersetzt bestehende Auswahl)
    */
   selectProducts: adminProcedure
     .input(z.object({
       followupId: z.number(),
-      articleIds: z.array(z.number()),
+      articleIds: z.array(z.number()).min(1).max(2),
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
+
+      const [followUp] = await db.select().from(salesFollowups)
+        .where(eq(salesFollowups.id, input.followupId)).limit(1);
+      if (!followUp) throw new Error("Follow-up nicht gefunden");
+      if (followUp.discountCode || followUp.promoCodeId || followUp.codeCreatedAt) {
+        throw new Error("AUSWAHL_FIXIERT: Produkte können nach der Code-Erstellung nicht mehr geändert werden.");
+      }
 
       // Alte Auswahl löschen
       await db
@@ -751,6 +974,15 @@ export const followUpRouter = router({
           }))
         );
       }
+
+      // Any old preview belongs to the previous selection and must never be sent.
+      await db.update(salesFollowups).set({
+        whatsappMessage: null,
+        emailSubject: null,
+        emailBody: null,
+        messageGeneratedAt: null,
+        updatedAt: new Date(),
+      }).where(eq(salesFollowups.id, input.followupId));
 
       return { ok: true };
     }),
@@ -789,11 +1021,16 @@ export const followUpRouter = router({
       // Ausgewählte Produkte laden
       const selectedProducts = await db
         .select({
+          followupProductId: salesFollowupProducts.id,
           id: articles.id,
           name: articles.name,
           sellingPrice: articles.sellingPrice,
           shopProductId: articles.shopProductId,
           category: articles.category,
+          shortDescription: articles.shortDescription,
+          description: articles.description,
+          beautyData: articles.beautyData,
+          generatedCopy: salesFollowupProducts.generatedCopy,
         })
         .from(salesFollowupProducts)
         .leftJoin(articles, eq(salesFollowupProducts.articleId, articles.id))
@@ -802,10 +1039,45 @@ export const followUpRouter = router({
       if (selectedProducts.length === 0) {
         throw new Error("Keine Produkte ausgewählt. Bitte zuerst Produkte auswählen.");
       }
+      if (selectedProducts.length > 2) {
+        throw new Error("Bitte maximal zwei Produkte für eine Follow-up-Nachricht auswählen.");
+      }
 
-      // Nachrichten mit Platzhalter generieren – KEIN Code-Erstellen hier
-      const whatsappMessage = generateWhatsAppMessage(order, selectedProducts, "[DISCOUNT_CODE]", null);
-      const { subject, body } = generateEmailContent(order, selectedProducts, "[DISCOUNT_CODE]", null);
+      if (selectedProducts.some((product) => !product.id || !product.name)) {
+        throw new Error("Ein ausgewähltes Produkt ist nicht mehr verfügbar.");
+      }
+
+      let productCopySource: "ai" | "fallback" | "existing" = "existing";
+      const missingCopyProducts = selectedProducts.filter((product) => !product.generatedCopy);
+      if (missingCopyProducts.length > 0) {
+        const generated = await generateFollowUpProductCopies(missingCopyProducts.map((product) => ({
+          id: Number(product.id),
+          name: product.name || "Produkt",
+          category: product.category,
+          shortDescription: product.shortDescription,
+          description: product.description,
+          beautyData: product.beautyData,
+        })));
+        const copyByArticleId = new Map(generated.copies.map((copy) => [copy.articleId, copy.copy]));
+        productCopySource = generated.source;
+
+        for (const product of missingCopyProducts) {
+          const generatedCopy = copyByArticleId.get(Number(product.id));
+          if (!generatedCopy) throw new Error("Produkttext konnte nicht sicher erstellt werden.");
+          await db.update(salesFollowupProducts).set({
+            generatedCopy,
+            generatedCopySource: generated.source,
+            generatedCopyGeneratedAt: now,
+          }).where(eq(salesFollowupProducts.id, product.followupProductId));
+          product.generatedCopy = generatedCopy;
+        }
+      }
+
+      // Nachrichten mit Platzhalter generieren – KEIN Code-Erstellen hier.
+      // The selected terms are already visible, but become immutable only at customer contact.
+      const terms = termsForFollowUp(followUp);
+      const whatsappMessage = generateWhatsAppMessage(order, selectedProducts, "[DISCOUNT_CODE]", null, terms);
+      const { subject, body } = generateEmailContent(order, selectedProducts, "[DISCOUNT_CODE]", null, terms);
 
       // Platzhalter-Text im Follow-up speichern
       await db
@@ -832,6 +1104,8 @@ export const followUpRouter = router({
         codeExpired: followUp.discountCode && followUp.codeExpiresAt
           ? new Date(followUp.codeExpiresAt) < now
           : false,
+        productCopySource,
+        ...terms,
       };
     }),
 
@@ -881,10 +1155,15 @@ export const followUpRouter = router({
           sellingPrice: articles.sellingPrice,
           shopProductId: articles.shopProductId,
           category: articles.category,
+          generatedCopy: salesFollowupProducts.generatedCopy,
         })
         .from(salesFollowupProducts)
         .leftJoin(articles, eq(salesFollowupProducts.articleId, articles.id))
         .where(eq(salesFollowupProducts.followupId, input.followupId));
+
+      if (selectedProducts.some((product) => !product.generatedCopy)) {
+        throw new Error("Produkttexte fehlen. Bitte die Nachricht vor dem Senden neu generieren.");
+      }
 
       // ── Code-Logik ──────────────────────────────────────────────────────────
       let promoCode: string;
@@ -900,7 +1179,7 @@ export const followUpRouter = router({
           console.log(`[FollowUp] Bestehenden Code ${promoCode} wiederverwendet für Follow-up ${input.followupId}`);
         } else {
           // Code abgelaufen → neuen Code erstellen (Nutzer hat bereits auf Aktion geklickt)
-          const result = await createIndividualCode(db, input.followupId, followUp.orderId);
+          const result = await createIndividualCode(db, followUp);
           promoCode = result.code;
           codeExpiresAt = result.expiresAt;
           isNewCode = true;
@@ -908,7 +1187,7 @@ export const followUpRouter = router({
         }
       } else {
         // Kein Code vorhanden → neuen Code erstellen
-        const result = await createIndividualCode(db, input.followupId, followUp.orderId);
+        const result = await createIndividualCode(db, followUp);
         promoCode = result.code;
         codeExpiresAt = result.expiresAt;
         isNewCode = true;
@@ -916,8 +1195,9 @@ export const followUpRouter = router({
       }
 
       // Platzhalter in gespeicherten Nachrichten ersetzen
-      const finalWhatsApp = generateWhatsAppMessage(order, selectedProducts, promoCode, codeExpiresAt);
-      const { subject: finalSubject, body: finalBody } = generateEmailContent(order, selectedProducts, promoCode, codeExpiresAt);
+      const terms = termsForFollowUp(followUp);
+      const finalWhatsApp = generateWhatsAppMessage(order, selectedProducts, promoCode, codeExpiresAt, terms);
+      const { subject: finalSubject, body: finalBody } = generateEmailContent(order, selectedProducts, promoCode, codeExpiresAt, terms);
 
       // Finale Nachrichten in DB speichern
       await db
@@ -937,6 +1217,7 @@ export const followUpRouter = router({
         promoCode,
         codeExpiresAt,
         isNewCode,
+        ...terms,
       };
     }),
 
@@ -958,7 +1239,7 @@ export const followUpRouter = router({
         .limit(1);
       if (!followUp) throw new Error("Follow-up nicht gefunden");
 
-      const result = await createIndividualCode(db, input.followupId, followUp.orderId);
+      const result = await createIndividualCode(db, followUp);
       console.log(`[FollowUp] forceNewCode: Neuer Code ${result.code} für Follow-up ${input.followupId}`);
       return { code: result.code, expiresAt: result.expiresAt };
     }),
@@ -1041,7 +1322,7 @@ export const followUpRouter = router({
           .where(eq(orders.orderId, followUp.orderId))
           .limit(1);
         if (order2) {
-          await createIndividualCode(db, input.followupId, followUp.orderId);
+          await createIndividualCode(db, followUp);
           // Follow-up neu laden mit neuem Code
           const [updatedFollowUp] = await db
             .select()

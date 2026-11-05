@@ -11,9 +11,31 @@ import { eq } from "drizzle-orm";
 import { router, publicProcedure, adminProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
 import { shopSettings } from "../drizzle/schema.js";
+import {
+  bankTransferPaymentInstructionsSchema,
+  getBankTransferPaymentInstructionsConfig,
+  toPublicBankTransferPresentation,
+  upsertBankTransferPaymentInstructionsConfig,
+} from "./paymentInstructionsConfig.js";
+import {
+  assertGlobalAutomaticDiscountConfigCanBeSaved,
+  defaultGlobalAutomaticDiscountConfig,
+  getActiveGlobalAutomaticDiscount,
+  getGlobalAutomaticDiscountConfig,
+  globalAutomaticDiscountConfigInputSchema,
+  upsertGlobalAutomaticDiscountConfig,
+} from "./globalAutomaticDiscountConfig.js";
 
 const WHATSAPP_CHANNEL_CONFIG_KEY = "whatsapp_channel_config";
 const PACKING_AUTOMATION_CONFIG_KEY = "packing_automation_config";
+
+const shipmentLabelOverrideConfigSchema = z.object({
+  enabled: z.boolean(),
+  allowedRoles: z.array(z.enum(["admin"])).min(1),
+  allowedWarningCodes: z.array(z.enum(["zip_city_mismatch", "provider_unavailable"])).min(1),
+  requireServerConfirmedPackingPhoto: z.boolean(),
+  requireCompletePackingChecklist: z.boolean(),
+});
 
 const whatsappChannelConfigSchema = z.object({
   enabled: z.boolean(),
@@ -41,6 +63,7 @@ const packingAutomationConfigSchema = z.object({
   requestBrowserPrint: z.boolean(),
   sendShippingEmail: z.boolean(),
   openWhatsAppAfterLabel: z.boolean(),
+  manualLabelOverride: shipmentLabelOverrideConfigSchema,
 });
 type PackingAutomationConfig = z.infer<typeof packingAutomationConfigSchema>;
 
@@ -63,6 +86,23 @@ function parsePackingAutomationConfig(value: string | undefined): PackingAutomat
 }
 
 export const shopSettingsRouter = router({
+  // Kontodaten werden niemals über diesen öffentlichen Checkout-Vertrag geliefert.
+  // Nach erfolgreicher Bestellung werden sie ausschließlich in der Antwort von order.create freigegeben.
+  getBankTransferPresentation: publicProcedure
+    .query(async () => ({
+      presentation: toPublicBankTransferPresentation(await getBankTransferPaymentInstructionsConfig()),
+    })),
+
+  getBankTransferPaymentInstructions: adminProcedure
+    .query(async () => ({ config: await getBankTransferPaymentInstructionsConfig() })),
+
+  setBankTransferPaymentInstructions: adminProcedure
+    .input(bankTransferPaymentInstructionsSchema)
+    .mutation(async ({ input }) => ({
+      success: true,
+      config: await upsertBankTransferPaymentInstructionsConfig(input),
+    })),
+
   // ─── PUBLIC: WhatsApp channel conversion configuration ────────
   getWhatsAppChannelConfig: publicProcedure
     .query(async () => {
@@ -168,6 +208,33 @@ export const shopSettingsRouter = router({
       return { success: true, shopOpen: input.open };
     }),
 
+  // ─── PUBLIC: Globale Dauerrabatt-Aktion ───────────────────────
+  // Liefert ausschließlich den aktuell gültigen Wert für die Preis- und Checkoutanzeige.
+  getGlobalAutomaticDiscount: publicProcedure
+    .query(async () => ({
+      discount: getActiveGlobalAutomaticDiscount(await getGlobalAutomaticDiscountConfig()),
+    })),
+
+  // ─── ADMIN: Globale Dauerrabatt-Aktion ─────────────────────────
+  getGlobalAutomaticDiscountAdmin: adminProcedure
+    .query(async () => ({
+      config: await getGlobalAutomaticDiscountConfig(),
+    })),
+
+  setGlobalAutomaticDiscount: adminProcedure
+    .input(globalAutomaticDiscountConfigInputSchema)
+    .mutation(async ({ input }) => {
+      const current = await getGlobalAutomaticDiscountConfig();
+      const config = {
+        ...defaultGlobalAutomaticDiscountConfig,
+        ...current,
+        ...input,
+      };
+      assertGlobalAutomaticDiscountConfigCanBeSaved(config);
+      await upsertGlobalAutomaticDiscountConfig(config);
+      return { config, discount: getActiveGlobalAutomaticDiscount(config) };
+    }),
+
   // ─── ADMIN: Get all settings ──────────────────────────────────
   getAll: adminProcedure
     .query(async () => {
@@ -268,6 +335,9 @@ export const shopSettingsRouter = router({
   set: adminProcedure
     .input(z.object({ key: z.string(), value: z.string() }))
     .mutation(async ({ input }) => {
+      if (input.key === "global_automatic_discount") {
+        throw new Error("Die globale Dauerrabatt-Aktion darf nur über setGlobalAutomaticDiscount geändert werden");
+      }
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 

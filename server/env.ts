@@ -15,6 +15,9 @@ export const ENV = {
   resendApiKey: process.env.RESEND_API_KEY || "",
   // Signatur-Secret für eingehende Resend-Statuswebhooks (nie im Frontend verwenden)
   resendWebhookSecret: process.env.RESEND_WEBHOOK_SECRET || "",
+  // Zentraler Empfänger für operative Fehleralarme. Die bestehende Adresse ist
+  // nur der migrationssichere Fallback, bis die Variable in Railway gesetzt ist.
+  operatorAlertEmail: process.env.OPERATOR_ALERT_EMAIL || "369rebackup@gmail.com",
 
   // Forge LLM API (for KI-Bestellerfassung)
   forgeApiKey: process.env.FORGE_API_KEY || "",
@@ -40,6 +43,8 @@ export const ENV = {
   dhlProductCodeDe:    process.env.DHL_PRODUCT_CODE_DE || "V01PAK",
   // EU International (V53WPAK) – Phase 2
   dhlBillingNumberEu:  process.env.DHL_BILLING_NUMBER_EU || "",
+  // Legacy-Override für Schweiz. Standard ist DHL Paket International (V53WPAK).
+  dhlBillingNumberCh:  process.env.DHL_BILLING_NUMBER_CH || "",
   // DE Kleinpaket (V62KP) – eigene Abrechnungsnummer 63979135286201
   dhlBillingNumberKleinpaket: process.env.DHL_BILLING_NUMBER_KLEINPAKET || "",
   // true = Sandbox (Default), false = Production (nur nach expliziter Freigabe)

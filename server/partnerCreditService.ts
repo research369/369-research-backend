@@ -1,3 +1,4 @@
+import { hasOtherPaidCodeOrder } from "./partnerCodeHistory.js";
 import type { PoolClient } from "pg";
 import { getPool } from "./db.js";
 
@@ -8,6 +9,17 @@ export const PAID_ORDER_STATUSES = new Set([
   "zugestellt",
   "abgeholt",
 ]);
+
+/** Both persisted confirmations are required; packing or collection is not dispatch. */
+export function partnerCommissionBlockReason(order: {
+  status: string;
+  paid_at: unknown;
+  shipped_at: unknown;
+}): "order_not_paid" | "order_not_shipped" | null {
+  if (!order.paid_at || !PAID_ORDER_STATUSES.has(order.status)) return "order_not_paid";
+  if (!order.shipped_at || !["versendet", "zugestellt"].includes(order.status)) return "order_not_shipped";
+  return null;
+}
 
 const roundMoney = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
 
@@ -52,7 +64,7 @@ export function calculateCommissionAmount(input: {
 
 /**
  * Returns an explicitly approved, order-bound credit amount when present; otherwise
- * applies the standard partner rule. The caller remains responsible for payment gating.
+ * applies the standard partner rule. The caller remains responsible for payment and dispatch gating.
  */
 export function resolveCommissionAmount(
   input: {
@@ -94,8 +106,15 @@ type OrderForCredit = {
   order_id: string;
   status: string;
   paid_at: Date | null;
+  shipped_at: Date | null;
+  partner_source_id: number | null;
   partner_code: string | null;
   partner_number: string | null;
+  partner_program_snapshot: string | null;
+  partner_settlement_method_snapshot: "payout" | "shop_credit" | "none" | null;
+  partner_commission_policy_snapshot: "each_paid_code_order" | "first_paid_code_order" | "none" | null;
+  partner_commission_percent_snapshot: string | null;
+  partner_commission_base_snapshot: string | null;
   subtotal: string;
   discount: string;
   credit_used: string;
@@ -112,6 +131,7 @@ type PartnerForCredit = {
   partner_number: string;
   commission_percent: string;
   commission_type: "einmalig" | "dauerhaft";
+  program_key: string | null;
   credit_balance: string;
 };
 
@@ -122,8 +142,11 @@ type OrderCreditOverride = {
 
 async function lockOrder(client: PoolClient, orderId: string): Promise<OrderForCredit> {
   const result = await client.query<OrderForCredit>(
-    `SELECT order_id, status, paid_at, partner_code, partner_number, subtotal, discount,
-            credit_used, partner_commission, first_name, last_name, email
+    `SELECT order_id, status, paid_at, shipped_at, partner_source_id, partner_code, partner_number,
+            partner_program_snapshot, partner_settlement_method_snapshot,
+            partner_commission_policy_snapshot, partner_commission_percent_snapshot,
+            partner_commission_base_snapshot, subtotal, discount, credit_used,
+            partner_commission, first_name, last_name, email
        FROM orders
       WHERE order_id = $1
       FOR UPDATE`,
@@ -134,17 +157,26 @@ async function lockOrder(client: PoolClient, orderId: string): Promise<OrderForC
 }
 
 async function lockPartnerForOrder(client: PoolClient, order: OrderForCredit): Promise<PartnerForCredit | null> {
-  if (!order.partner_code && !order.partner_number) return null;
+  if (!order.partner_source_id && !order.partner_code && !order.partner_number) return null;
 
   const result = await client.query<PartnerForCredit>(
-    `SELECT id, name, code, partner_number, commission_percent, commission_type, credit_balance
+    `SELECT id, name, code, partner_number, commission_percent, commission_type, program_key, credit_balance
        FROM partners
       WHERE is_active = 1
-        AND (upper(code) = upper($1) OR partner_number = $2)
-      ORDER BY CASE WHEN upper(code) = upper($1) THEN 0 ELSE 1 END
+        AND (
+          id = $3
+          OR partner_number = $2
+          OR EXISTS (
+             SELECT 1
+              FROM partner_codes pc
+             WHERE pc.partner_id = partners.id
+               AND pc.code_normalized = upper(regexp_replace($1, '[[:space:]]+', '', 'g'))
+          )
+        )
+      ORDER BY CASE WHEN id = $3 THEN 0 WHEN partner_number = $2 THEN 1 ELSE 2 END
       LIMIT 1
       FOR UPDATE`,
-    [order.partner_code || "", order.partner_number || ""],
+    [order.partner_code || "", order.partner_number || "", order.partner_source_id || -1],
   );
   return result.rows[0] || null;
 }
@@ -166,6 +198,9 @@ export async function redeemPartnerCreditForOrder(orderId: string): Promise<{ re
 
     const partner = await lockPartnerForOrder(client, order);
     if (!partner) throw new Error(`Partner für Guthabeneinlösung bei Bestellung ${orderId} nicht gefunden`);
+    if (order.partner_settlement_method_snapshot === "payout") {
+      throw new Error(`Creator-Provisionen werden als Auszahlung geführt und können nicht als Shopguthaben eingelöst werden (${orderId})`);
+    }
 
     const existing = await client.query<{ id: number }>(
       `SELECT id FROM partner_transactions
@@ -213,7 +248,7 @@ export async function redeemPartnerCreditForOrder(orderId: string): Promise<{ re
 }
 
 /**
- * Credits a partner only after a payment-confirmed order. Repeated status updates are idempotent.
+ * Credits a partner only after persisted payment AND dispatch confirmation. Repeated status updates are idempotent.
  */
 export async function bookPaidPartnerCommission(orderId: string): Promise<{
   booked: boolean;
@@ -224,10 +259,11 @@ export async function bookPaidPartnerCommission(orderId: string): Promise<{
   const { client } = await beginLockedTransaction();
   try {
     const order = await lockOrder(client, orderId);
-    if (!PAID_ORDER_STATUSES.has(order.status) || !order.paid_at) {
+    const blockedReason = partnerCommissionBlockReason(order);
+    if (blockedReason) {
       await client.query("COMMIT");
       client.release();
-      return { booked: false, amount: 0, balance: 0, reason: "order_not_paid" };
+      return { booked: false, amount: 0, balance: 0, reason: blockedReason };
     }
 
     const partner = await lockPartnerForOrder(client, order);
@@ -251,19 +287,16 @@ export async function bookPaidPartnerCommission(orderId: string): Promise<{
     }
 
     const isOwnOrder = order.partner_number === partner.partner_number;
-    if (!isOwnOrder && partner.commission_type === "einmalig") {
-      const previousPaidOrder = await client.query<{ order_id: string }>(
-        `SELECT order_id
-           FROM orders
-          WHERE upper(coalesce(partner_code, '')) = upper($1)
-            AND lower(email) = lower($2)
-            AND order_id <> $3
-            AND status IN ('bezahlt', 'gepackt', 'versendet', 'zugestellt', 'abgeholt')
-            AND paid_at IS NOT NULL
-          LIMIT 1`,
-        [partner.code, order.email, orderId],
-      );
-      if (previousPaidOrder.rows.length > 0) {
+    const commissionPolicy = order.partner_commission_policy_snapshot
+      || (partner.commission_type === "einmalig" ? "first_paid_code_order" : "each_paid_code_order");
+    if (commissionPolicy === "none") {
+      await client.query("COMMIT");
+      client.release();
+      return { booked: false, amount: 0, balance: existingBalance, reason: "program_without_commission" };
+    }
+    if (!isOwnOrder && commissionPolicy === "first_paid_code_order") {
+      const previousPaidOrder = await hasOtherPaidCodeOrder((text,values)=>client.query(text,values),order.partner_code || partner.code,order.email,orderId);
+      if (previousPaidOrder) {
         await client.query("COMMIT");
         client.release();
         return { booked: false, amount: 0, balance: existingBalance, reason: "one_time_already_paid" };
@@ -278,14 +311,23 @@ export async function bookPaidPartnerCommission(orderId: string): Promise<{
       [orderId],
     );
     const creditOverride = overrideResult.rows[0] || null;
+    const snapshotAmount = order.partner_program_snapshot
+      ? parseMoney(order.partner_commission)
+      : undefined;
     const amount = resolveCommissionAmount(
       {
-        subtotal: parseMoney(order.subtotal),
-        totalProductDiscount: parseMoney(order.discount),
+        subtotal: order.partner_commission_base_snapshot
+          ? parseMoney(order.partner_commission_base_snapshot)
+          : parseMoney(order.subtotal),
+        totalProductDiscount: order.partner_commission_base_snapshot
+          ? 0
+          : parseMoney(order.discount),
         creditUsed: parseMoney(order.credit_used),
-        commissionPercent: parseMoney(partner.commission_percent),
+        commissionPercent: order.partner_commission_percent_snapshot
+          ? parseMoney(order.partner_commission_percent_snapshot)
+          : parseMoney(partner.commission_percent),
       },
-      creditOverride ? parseMoney(creditOverride.amount) : undefined,
+      creditOverride ? parseMoney(creditOverride.amount) : snapshotAmount,
     );
     if (amount <= 0) {
       await client.query("COMMIT");
@@ -294,7 +336,9 @@ export async function bookPaidPartnerCommission(orderId: string): Promise<{
     }
 
     const newBalance = roundMoney(existingBalance + amount);
-    const label = isOwnOrder || partner.commission_type === "dauerhaft" ? "Guthaben" : "Auszahlung";
+    const label = order.partner_settlement_method_snapshot === "payout"
+      ? "Auszahlung"
+      : (isOwnOrder || partner.commission_type === "dauerhaft" ? "Guthaben" : "Auszahlung");
     await client.query(
       `UPDATE partners SET credit_balance = $1, updated_at = NOW() WHERE id = $2`,
       [newBalance.toFixed(2), partner.id],
@@ -310,8 +354,8 @@ export async function bookPaidPartnerCommission(orderId: string): Promise<{
         orderId,
         `${order.first_name} ${order.last_name}`.trim(),
         creditOverride
-          ? `Manuell freigegebenes Guthaben für bezahlte Bestellung ${orderId} – ${creditOverride.reason}`
-          : `Provision für bezahlte Bestellung ${orderId} (${order.first_name} ${order.last_name}) – ${label}`,
+          ? `Manuell freigegebenes Guthaben für bezahlte und versendete Bestellung ${orderId} – ${creditOverride.reason}`
+          : `Provision für bezahlte und versendete Bestellung ${orderId} (${order.first_name} ${order.last_name}) – ${label}${order.partner_code ? ` · Code ${order.partner_code}` : ""}`,
       ],
     );
     await client.query(
@@ -322,6 +366,68 @@ export async function bookPaidPartnerCommission(orderId: string): Promise<{
     await client.query("COMMIT");
     client.release();
     return { booked: true, amount, balance: newBalance, reason: "booked" };
+  } catch (error) {
+    await rollbackAndRelease(client);
+    throw error;
+  }
+}
+
+/**
+ * Reverses only the partner-credit movements that belong to a cancelled order.
+ * The original transactions remain auditable and are marked as cancelled; the
+ * cached balance is changed in the same locked transaction. Repeating the
+ * cancellation is intentionally a no-op.
+ */
+export async function reversePartnerFinancialEntriesForCancelledOrder(orderId: string): Promise<{
+  reversed: number;
+  balance: number;
+  reason: string;
+}> {
+  const { client } = await beginLockedTransaction();
+  try {
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`partner-order:${orderId}`]);
+    const order = await lockOrder(client, orderId);
+    const partner = await lockPartnerForOrder(client, order);
+    if (!partner) {
+      await client.query("COMMIT");
+      client.release();
+      return { reversed: 0, balance: 0, reason: "no_partner" };
+    }
+
+    const entries = await client.query<{ id: number; amount: string; type: "provision" | "einloesung" }>(
+      `SELECT id, amount, type
+         FROM partner_transactions
+        WHERE partner_id = $1
+          AND order_id = $2
+          AND status = 'normal'
+          AND type IN ('provision', 'einloesung')
+        FOR UPDATE`,
+      [partner.id, orderId],
+    );
+    if (entries.rows.length === 0) {
+      await client.query("COMMIT");
+      client.release();
+      return { reversed: 0, balance: parseMoney(partner.credit_balance), reason: "already_reversed_or_empty" };
+    }
+
+    const bookedNet = roundMoney(entries.rows.reduce((sum, entry) => sum + parseMoney(entry.amount), 0));
+    const currentBalance = parseMoney(partner.credit_balance);
+    const newBalance = roundMoney(currentBalance - bookedNet);
+    await client.query(
+      `UPDATE partner_transactions
+          SET status = 'storniert',
+              admin_note = COALESCE(admin_note, $1)
+        WHERE id = ANY($2::int[])`,
+      [`Automatische Storno-Gegenbuchung für Bestellung ${orderId}`, entries.rows.map((entry) => entry.id)],
+    );
+    await client.query(
+      "UPDATE partners SET credit_balance = $1, updated_at = NOW() WHERE id = $2",
+      [newBalance.toFixed(2), partner.id],
+    );
+
+    await client.query("COMMIT");
+    client.release();
+    return { reversed: roundMoney(-bookedNet), balance: newBalance, reason: "reversed" };
   } catch (error) {
     await rollbackAndRelease(client);
     throw error;

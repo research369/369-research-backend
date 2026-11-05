@@ -7,6 +7,7 @@ import {
   normalizeKwkPhone,
   parsePromoMetadata,
   resolveAuthoritativeItemPrice,
+  requiresColdChainShipping,
 } from "./kwkCheckoutPricing.js";
 
 test("general promo and KWK stack sequentially while shipping stays untouched", () => {
@@ -22,6 +23,7 @@ test("general promo and KWK stack sequentially while shipping stays untouched", 
     kwkCreditUsed: 0,
     applyReferralDiscount: true,
   }), {
+    globalDiscount: 0,
     promoDiscount: 10,
     kwkDiscount: 9,
     kwkCreditUsed: 0,
@@ -62,11 +64,30 @@ test("KWK credit is a payment instrument and cannot reduce shipping", () => {
     kwkCreditUsed: 100,
     applyReferralDiscount: false,
   }), {
+    globalDiscount: 0,
     promoDiscount: 0,
     kwkDiscount: 0,
     kwkCreditUsed: 50,
     totalDiscount: 50,
     total: 8,
+  });
+});
+
+test("global automatic discount, promo and KWK referral stack in the declared order", () => {
+  assert.deepEqual(calculateAuthoritativeKwkOrder({
+    subtotal: 100,
+    shipping: 8,
+    globalDiscount: 20,
+    promoDiscount: 8,
+    kwkCreditUsed: 0,
+    applyReferralDiscount: true,
+  }), {
+    globalDiscount: 20,
+    promoDiscount: 8,
+    kwkDiscount: 7.2,
+    kwkCreditUsed: 0,
+    totalDiscount: 35.2,
+    total: 72.8,
   });
 });
 
@@ -87,8 +108,35 @@ test("catalog prices and option surcharges are authoritative", () => {
   assert.equal(resolveAuthoritativeItemPrice({ shopProductId: "test", dosage: "10 mg", price: 1, quantity: 1, isPlugPlay: true }, catalog), 70);
 });
 
-test("shipping comes only from the delivery country and promotion configuration", () => {
-  assert.equal(calculateAuthoritativeShipping({ country: "Deutschland" }), 8);
-  assert.equal(calculateAuthoritativeShipping({ country: "Schweiz" }), 18);
-  assert.equal(calculateAuthoritativeShipping({ country: "Deutschland", promoDescription: 'Aktion | {"freeShipping":["de"]}' }), 0);
+test("shipping comes from the delivery country and is never discounted by KWK", () => {
+  assert.equal(calculateAuthoritativeShipping({ country: "Deutschland", items: [] }), 8);
+  assert.equal(calculateAuthoritativeShipping({ country: "Schweiz", items: [{ isPlugPlay: true }] }), 25);
+  assert.equal(calculateAuthoritativeShipping({ country: "Deutschland", items: [{ isPlugPlay: true }], promoDescription: 'Aktion | {"freeShipping":["de"]}' }), 0);
+});
+
+test("cold-chain shipping is added once per order for required or manual WaWi selections", () => {
+  assert.equal(calculateAuthoritativeShipping({
+    country: "Deutschland",
+    items: [{ isPlugPlay: true }, { isPlugPlay: true }],
+  }), 15);
+  assert.equal(calculateAuthoritativeShipping({
+    country: "Deutschland",
+    items: [],
+    coldChainRequested: true,
+  }), 15);
+  assert.equal(calculateAuthoritativeShipping({
+    country: "Deutschland",
+    items: [{ isPlugPlay: true }],
+    coldChainRequested: true,
+  }), 15);
+});
+
+test("finished nasal sprays always require cold-chain shipping, including legacy bundle variants", () => {
+  assert.equal(requiresColdChainShipping({ isNasalSpray: true }), true);
+  assert.equal(requiresColdChainShipping({ name: "Selank (10 mg)", variant: "Bundle: Mind X Bundle (Nasenspray)" }), true);
+  assert.equal(requiresColdChainShipping({ name: "DIY Nasenspray-Set", isNasalDiySet: true }), false);
+  assert.equal(calculateAuthoritativeShipping({
+    country: "Deutschland",
+    items: [{ name: "Selank (10 mg)", variant: "Bundle: Mind X Bundle (Nasenspray)" }],
+  }), 15);
 });

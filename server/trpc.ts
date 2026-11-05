@@ -1,8 +1,18 @@
+import {trackCustomerCreation} from './customerCreationMaintenance.js';
+import { recordAdminMutation } from "./adminChangeLogService.js";
 import { initTRPC, TRPCError } from "@trpc/server";
+import type {
+  TRPCProcedureBuilder,
+  TRPCRootObject,
+  TRPCUnsetMarker,
+} from "@trpc/server";
 import superjson from "superjson";
 import type { Request, Response } from "express";
 
 export interface Context {
+  /** Internal diagnostic principal only. Never accepted in a public request. */
+  operationsPreview?: {partnerId?:number;kwkCreditAccountId?:number};
+  jarvyOrder?: import('./jarvyOrderContract.js').JarvyOrderContext;
   req: Request;
   res: Response;
   user: {
@@ -14,13 +24,33 @@ export interface Context {
   } | null;
 }
 
+/** The existing authentication middlewares guarantee a non-null user, not a literal role. */
+export interface AuthenticatedContext extends Context {
+  user: NonNullable<Context["user"]>;
+}
+
+// Public package types keep emitted declarations independent of pnpm's nested
+// Express/qs paths. Unset markers retain input/output inference for every route.
+type Root = TRPCRootObject<Context, object, { transformer: typeof superjson }>;
+export type AuthenticatedProcedure = TRPCProcedureBuilder<
+  Context,
+  object,
+  AuthenticatedContext,
+  TRPCUnsetMarker,
+  TRPCUnsetMarker,
+  TRPCUnsetMarker,
+  TRPCUnsetMarker,
+  false
+>;
+
 const t = initTRPC.context<Context>().create({
   transformer: superjson,
 });
 
-export const router = t.router;
-export const publicProcedure = t.procedure;
-export const middleware = t.middleware;
+export const router: Root["router"] = t.router;
+const tracked=t.procedure.use(t.middleware(({path,type,next})=>trackCustomerCreation(path,type,next)));
+export const publicProcedure: Root["procedure"] = tracked;
+export const middleware: Root["middleware"] = t.middleware;
 
 const isAuthed = middleware(({ ctx, next }) => {
   if (!ctx.user) {
@@ -39,8 +69,22 @@ const isAdmin = middleware(({ ctx, next }) => {
   return next({ ctx: { ...ctx, user: ctx.user } });
 });
 
-export const protectedProcedure = t.procedure.use(isAuthed);
-export const adminProcedure = t.procedure.use(isAdmin);
+const auditAdminMutation = middleware(async ({ ctx, path, type, input, next }) => {
+  const result = await next();
+  if (type === "mutation" && result.ok && ctx.user?.role === "admin") {
+    // Storage problems must never turn a successful business action into a failed one.
+    // The journal stores procedure paths and safe field names, never submitted values.
+    void recordAdminMutation({
+      path,
+      actor: ctx.user.username || ctx.user.email || "admin",
+      input,
+    });
+  }
+  return result;
+});
+
+export const protectedProcedure: AuthenticatedProcedure = tracked.use(isAuthed).use(auditAdminMutation);
+export const adminProcedure: AuthenticatedProcedure = tracked.use(isAdmin).use(auditAdminMutation);
 
 // Product Manager: role = "admin" OR role = "product_manager"
 // Kein Zugriff auf orders, customers, invoices, payments, checkout, users, migrations
@@ -54,7 +98,21 @@ const isProductManager = middleware(({ ctx, next }) => {
   return next({ ctx: { ...ctx, user: ctx.user } });
 });
 
-export const productManagerProcedure = t.procedure.use(isProductManager);
+export const productManagerProcedure: AuthenticatedProcedure = t.procedure.use(isProductManager).use(auditAdminMutation);
+
+// Goodies: product managers maintain the catalog while packing users assign
+// items to orders. Neither role receives unrelated financial or user access.
+const isGoodieOperator = middleware(({ ctx, next }) => {
+  if (!ctx.user) {
+    throw new TRPCError({ code: "UNAUTHORIZED", message: "Bitte anmelden" });
+  }
+  if (!["admin", "product_manager", "packing"].includes(ctx.user.role)) {
+    throw new TRPCError({ code: "FORBIDDEN", message: "Keine Berechtigung für Goodies" });
+  }
+  return next({ ctx: { ...ctx, user: ctx.user } });
+});
+
+export const goodieProcedure: AuthenticatedProcedure = t.procedure.use(isGoodieOperator).use(auditAdminMutation);
 
 // Packing: role = "admin" OR role = "packing"
 // Zugriff auf: Bestellungen, Labels, Kunden, Artikel (lesen+Bestand), Rechnungen, Eingang
@@ -69,4 +127,17 @@ const isPacking = middleware(({ ctx, next }) => {
   return next({ ctx: { ...ctx, user: ctx.user } });
 });
 
-export const packingProcedure = t.procedure.use(isPacking);
+export const packingProcedure: AuthenticatedProcedure = t.procedure.use(isPacking).use(auditAdminMutation);
+
+// Inventory-only access. Never use this for orders, customers or payments.
+const isStockOperator = middleware(({ ctx, next }) => {
+  if (!ctx.user) {
+    throw new TRPCError({ code: "UNAUTHORIZED", message: "Bitte anmelden" });
+  }
+  if (!["admin", "packing", "product_manager"].includes(ctx.user.role)) {
+    throw new TRPCError({ code: "FORBIDDEN", message: "Keine Berechtigung für Bestandskorrekturen" });
+  }
+  return next({ ctx: { ...ctx, user: ctx.user } });
+});
+
+export const stockProcedure: AuthenticatedProcedure = t.procedure.use(isStockOperator).use(auditAdminMutation);

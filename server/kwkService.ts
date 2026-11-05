@@ -20,6 +20,7 @@
 
 import { ENV } from "./env.js";
 import { getPool, getDb } from "./db.js";
+import { isKwkCreditReleaseEligible } from "./kwkCreditEligibility.js";
 import crypto from "crypto";
 
 // ── Feature Flag ──────────────────────────────────────────────────────────
@@ -115,8 +116,10 @@ export async function computeBalanceFromLedger(kwkId: number): Promise<{
 /**
  * Aktualisiert den Cache in kwk_accounts aus dem Ledger.
  * Wird nach jeder Ledger-Buchung aufgerufen.
+ * Der übergebene Client bleibt Teil derselben Transaktion, damit Ledger und
+ * Anzeige-Caches nie auseinanderlaufen.
  */
-async function syncCacheFromLedger(kwkId: number, client: any): Promise<void> {
+export async function syncKwkAccountCache(kwkId: number, client: any): Promise<void> {
   const result = await client.query(
     `SELECT
        COALESCE(SUM(CASE WHEN type = 'pending_credit' AND status = 'pending' THEN amount ELSE 0 END), 0) AS pending,
@@ -173,7 +176,7 @@ export async function bookPendingCredit(
     // Serialisiert parallele Requests derselben Bestellung. Der bisherige
     // SELECT-vor-INSERT-Check allein war bei zwei gleichzeitigen Requests
     // nicht ausreichend.
-    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`kwk-pending:${orderId}`]);
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`kwk-order:${orderId}`]);
 
     // Idempotenz-Check
     const existing = await client.query(
@@ -194,7 +197,7 @@ export async function bookPendingCredit(
     );
 
     // Cache synchronisieren
-    await syncCacheFromLedger(kwkId, client);
+    await syncKwkAccountCache(kwkId, client);
 
     await client.query("COMMIT");
     console.log(`[KWK] Pending credit booked: ${amount.toFixed(2)}€ for KWK-${kwkId}, order ${orderId}`);
@@ -206,11 +209,21 @@ export async function bookPendingCredit(
   }
 }
 
+export type KwkCreditReleaseResult = {
+  released: boolean;
+  reason: "released" | "order_not_found" | "order_not_paid" | "no_pending_credit" | "ambiguous_pending_credit";
+};
+
 /**
- * Guthaben freigeben wenn Bestellung final (versendet/zugestellt).
- * Gegenbuchung: pending_credit → credit_released
+ * Guthaben ausschließlich nach gespeichertem Zahlungsnachweis freigeben.
+ * Gegenbuchung: pending_credit → credit_released. Die Prüfung liegt bewusst
+ * in dieser Ledger-Funktion, damit kein Aufrufer versehentlich Guthaben für
+ * offene oder stornierte Bestellungen freigeben kann.
  */
-export async function releaseCredit(orderId: string): Promise<void> {
+export async function releaseCredit(
+  orderId: string,
+  options: { source?: "payment_status" | "paid_credit_reconciliation" } = {},
+): Promise<KwkCreditReleaseResult> {
   const pool = await getPool();
   if (!pool) throw new Error("Database not available");
   const client = await pool.connect();
@@ -219,18 +232,51 @@ export async function releaseCredit(orderId: string): Promise<void> {
 
     // Status-Webhooks und manuelle Klicks können gleichzeitig eintreffen.
     // Pro Bestellung darf Guthaben nur einmal freigegeben werden.
-    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`kwk-release:${orderId}`]);
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`kwk-order:${orderId}`]);
+
+    // The order is the payment source of truth. Status alone is not enough:
+    // a paid fulfilment status must carry the persisted payment timestamp.
+    const orderResult = await client.query<{
+      status: string;
+      paid_at: Date | null;
+      cancelled_at: Date | null;
+    }>(
+      `SELECT status, paid_at, cancelled_at
+         FROM orders
+        WHERE order_id = $1
+        FOR UPDATE`,
+      [orderId],
+    );
+    if (orderResult.rows.length !== 1) {
+      await client.query("COMMIT");
+      return { released: false, reason: "order_not_found" };
+    }
+    const order = orderResult.rows[0];
+    if (!isKwkCreditReleaseEligible({
+      status: order.status,
+      paidAt: order.paid_at,
+      cancelledAt: order.cancelled_at,
+    })) {
+      await client.query("COMMIT");
+      return { released: false, reason: "order_not_paid" };
+    }
 
     // Pending-Eintrag finden
     const pendingResult = await client.query(
       `SELECT id, kwk_id, amount FROM kwk_ledger
        WHERE order_id = $1 AND type = 'pending_credit' AND status = 'pending'
-      LIMIT 1 FOR UPDATE`,
+       ORDER BY id ASC
+       FOR UPDATE`,
       [orderId]
     );
     if (pendingResult.rows.length === 0) {
-      await client.query("ROLLBACK");
-      return; // Kein pending credit für diese Bestellung
+      await client.query("COMMIT");
+      return { released: false, reason: "no_pending_credit" };
+    }
+    if (pendingResult.rows.length > 1) {
+      await client.query("COMMIT");
+      console.error(`[KWK] Mehrdeutige Pending-Gutschrift für ${orderId}; keine automatische Freigabe vorgenommen`);
+      return { released: false, reason: "ambiguous_pending_credit" };
     }
     const { id: pendingId, kwk_id: kwkId, amount } = pendingResult.rows[0];
 
@@ -244,7 +290,14 @@ export async function releaseCredit(orderId: string): Promise<void> {
     await client.query(
       `INSERT INTO kwk_ledger (kwk_id, order_id, amount, type, status, note, created_by)
        VALUES ($1, $2, $3, 'credit_released', 'confirmed', $4, 'system')`,
-      [kwkId, orderId, amount, `Guthaben freigegeben für Bestellung ${orderId}`]
+      [
+        kwkId,
+        orderId,
+        amount,
+        options.source === "paid_credit_reconciliation"
+          ? `Guthaben nachbezahlt freigegeben nach Zahlungsabgleich für Bestellung ${orderId}`
+          : `Guthaben freigegeben für bezahlte Bestellung ${orderId}`,
+      ]
     );
 
     await client.query(
@@ -253,10 +306,19 @@ export async function releaseCredit(orderId: string): Promise<void> {
     );
 
     // Cache synchronisieren
-    await syncCacheFromLedger(kwkId, client);
+    await syncKwkAccountCache(kwkId, client);
+
+    if (options.source === "paid_credit_reconciliation") {
+      await client.query(
+        `INSERT INTO kwk_audit_log (kwk_id, admin_user, action, old_value, new_value, note)
+         VALUES ($1, 'system', 'paid_credit_reconciled', 'pending', 'confirmed', $2)`,
+        [kwkId, `Historische, als bezahlt belegte KWK-Bestellung ${orderId} automatisch nachgezogen`],
+      );
+    }
 
     await client.query("COMMIT");
     console.log(`[KWK] Credit released: ${amount}€ for order ${orderId}`);
+    return { released: true, reason: "released" };
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
@@ -277,7 +339,7 @@ export async function cancelCredit(orderId: string): Promise<void> {
     await client.query("BEGIN");
 
     // Order-bound lock makes repeated status changes idempotent.
-    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`kwk-cancel:${orderId}`]);
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`kwk-order:${orderId}`]);
 
     // Alle Einträge für diese Bestellung finden
     const entries = await client.query(
@@ -317,7 +379,7 @@ export async function cancelCredit(orderId: string): Promise<void> {
           );
         }
       }
-      await syncCacheFromLedger(kwkId, client);
+      await syncKwkAccountCache(kwkId, client);
     }
 
     await client.query("UPDATE kwk_referrals SET status='cancelled' WHERE order_id=$1", [orderId]);
@@ -345,7 +407,7 @@ export async function partialRefundCredit(
   try {
     await client.query("BEGIN");
 
-    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`kwk-refund:${orderId}`]);
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`kwk-order:${orderId}`]);
     const entries = await client.query(
       `SELECT kwk_id,
         COALESCE(MAX(amount) FILTER (WHERE type IN ('pending_credit','credit_released') AND status <> 'cancelled'),0) original_amount,
@@ -377,7 +439,7 @@ export async function partialRefundCredit(
           `Teilrückerstattung: Gutschrift anteilig korrigiert für Bestellung ${orderId} (-${correctionAmount.toFixed(2)}€)`,
         ]
       );
-      await syncCacheFromLedger(kwkId, client);
+      await syncKwkAccountCache(kwkId, client);
     }
 
     await client.query("COMMIT");
@@ -406,7 +468,11 @@ export async function redeemCredit(
     await client.query("BEGIN");
 
     if (!Number.isFinite(amount) || amount <= 0) throw new Error("Ungültiger Guthabenbetrag");
-    await client.query("SELECT id FROM kwk_accounts WHERE id=$1 FOR UPDATE", [kwkId]);
+    const account = await client.query(
+      "SELECT id FROM kwk_accounts WHERE id=$1 AND status='aktiv' AND deleted_at IS NULL FOR UPDATE",
+      [kwkId],
+    );
+    if (account.rows.length !== 1) throw new Error("KWK-Konto ist nicht aktiv");
     const orderResult = await client.query(
       "SELECT status, kwk_credit_requested FROM orders WHERE order_id=$1 FOR UPDATE",
       [orderId],
@@ -450,7 +516,7 @@ export async function redeemCredit(
     await client.query("UPDATE orders SET kwk_credit_used=$1, updated_at=NOW() WHERE order_id=$2", [amount.toFixed(2), orderId]);
 
     // Cache synchronisieren
-    await syncCacheFromLedger(kwkId, client);
+    await syncKwkAccountCache(kwkId, client);
 
     await client.query("COMMIT");
     console.log(`[KWK] Credit redeemed: ${amount.toFixed(2)}€ by KWK-${kwkId} for order ${orderId}`);

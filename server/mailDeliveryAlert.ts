@@ -1,7 +1,6 @@
 import { ENV } from "./env.js";
 
 const RESEND_EMAILS_URL = "https://api.resend.com/emails";
-const OPERATOR_DELIVERY_ALERT_TO = "369rebackup@gmail.com";
 
 export const DELIVERY_FAILURE_EVENT_TYPES = new Set([
   "email.bounced",
@@ -52,9 +51,11 @@ export function shouldSendOperatorDeliveryFailureAlert(input: {
   eventType: string;
   recipientEmail: string | null | undefined;
   customerRecordExists: boolean;
+  deliveryIssueResolvedAt?: Date | string | null;
 }): boolean {
   return shouldAlertOnDeliveryEvent(input.eventType)
     && input.customerRecordExists
+    && !input.deliveryIssueResolvedAt
     && !isTechnicalQaRecipient(input.recipientEmail);
 }
 
@@ -97,7 +98,7 @@ export async function sendOperatorDeliveryFailureAlert(input: DeliveryFailureAle
       body: JSON.stringify({
         from: "369 Research <noreply@coreversand.de>",
         reply_to: "support@369research.eu",
-        to: [OPERATOR_DELIVERY_ALERT_TO],
+        to: [ENV.operatorAlertEmail],
         subject: message.subject,
         html: message.html,
         text: message.text,

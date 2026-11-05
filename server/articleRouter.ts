@@ -3,9 +3,12 @@
  */
 import { z } from "zod";
 import { eq, desc, asc, like, and, sql, gte, lte, inArray } from "drizzle-orm";
-import { router, adminProcedure, productManagerProcedure, packingProcedure, publicProcedure } from "./trpc.js";
+import { TRPCError } from "@trpc/server";
+import { router, adminProcedure, productManagerProcedure, stockProcedure, publicProcedure } from "./trpc.js";
 import { getDb, getPool } from "./db.js";
+import {applyStockMovement} from "./stockMovementService.js";
 import { articles, stockHistory, orderItems, orders, articleTranslations, articleFaq } from "../drizzle/schema.js";
+import { isBillableOrderItem, isCompletedCommercialOrder } from "./commercialOrderMetrics.js";
 
 type PublicShopVariant = {
   dosage: string;
@@ -14,6 +17,8 @@ type PublicShopVariant = {
   stock: number;
   inStock: boolean;
   articleId: number;
+  /** Reale Lager-SKU der Variantenzeile für Warenkorb- und Checkout-Schutz. */
+  sku: string;
   hidden?: boolean;
 };
 
@@ -152,16 +157,17 @@ function getManualArticleVariants(
  * canonical article's variants JSON (consolidated products). The public shop
  * must support both forms so mg selections never disappear after consolidation.
  */
-function getPublicShopVariants(
+export function getPublicShopVariants(
   article: {
     id: number;
     name: string;
+    sku: string;
     stock: number;
     sellingPrice: string | null;
     shopProductId?: string | null;
     variants: unknown;
   },
-  inventoryArticles: Array<{ id: number; stock: number; shopProductId: string | null }> = [],
+  inventoryArticles: Array<{ id: number; sku: string; stock: number; shopProductId: string | null }> = [],
 ): PublicShopVariant[] {
   const configured = Array.isArray(article.variants) ? article.variants : [];
   const fromConfigured = configured.flatMap((raw): PublicShopVariant[] => {
@@ -193,6 +199,7 @@ function getPublicShopVariants(
       stock,
       inStock: !explicitlyHidden && stock > 0,
       articleId: inventoryArticle?.id ?? article.id,
+      sku: inventoryArticle?.sku ?? article.sku,
       ...(explicitlyHidden ? { hidden: true } : {}),
     }];
   });
@@ -209,8 +216,27 @@ function getPublicShopVariants(
     stock: article.stock,
     inStock: article.stock > 0,
     articleId: article.id,
+    sku: article.sku,
   }];
 }
+
+const articleVariantSchema = z.object({
+  sku: z.string().min(1).optional(),
+  name: z.string().min(1).optional(),
+  label: z.string().min(1).optional(),
+  dosage: z.string().min(1).optional(),
+  price: z.number().min(0).max(9999).optional(),
+  inventoryArticleId: z.number().int().positive().optional(),
+  isActive: z.boolean().optional(),
+  hidden: z.boolean().optional(),
+}).superRefine((variant, context) => {
+  if (!variant.dosage && !variant.label && !variant.name) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Jede Variante benötigt mindestens dosage, label oder name.",
+    });
+  }
+});
 
 const articleSchema = z.object({
   sku: z.string().min(1),
@@ -237,6 +263,9 @@ const articleSchema = z.object({
   shortDescription: z.string().nullable().optional(),
   categories: z.array(z.string()).nullable().optional(),
   beautyData: z.record(z.unknown()).nullable().optional(),
+  // Kanonische Variantenkonfiguration einer Produktfamilie. Jeder Bestand wird
+  // ausschließlich über die referenzierte operative Lagerzeile geführt.
+  variants: z.array(articleVariantSchema).nullable().optional(),
 });
 
 export const articleRouter = router({
@@ -247,6 +276,7 @@ export const articleRouter = router({
 
     const allArticles = await db.select({
       id: articles.id,
+      sku: articles.sku,
       shopProductId: articles.shopProductId,
       stock: articles.stock,
       name: articles.name,
@@ -290,6 +320,7 @@ export const articleRouter = router({
           inStock: variant.inStock,
           stock: variant.stock,
           name: `${canonical.name} (${variant.dosage})`,
+          inventorySku: variant.sku,
         }));
       }
 
@@ -303,14 +334,16 @@ export const articleRouter = router({
             inStock: (article.stock ?? 0) > 0,
             stock: article.stock ?? 0,
             name: article.name,
+            inventorySku: article.sku,
           }];
         }
         return variants.map(variant => ({
           shopProductId: article.shopProductId!,
           inStock: variant.inStock,
           stock: variant.stock,
-          name: `${article.name} (${variant.dosage})`,
-        }));
+            name: `${article.name} (${variant.dosage})`,
+            inventorySku: variant.sku,
+          }));
       });
     });
   }),
@@ -490,6 +523,7 @@ export const articleRouter = router({
       if (data.description !== undefined) updateData.description = data.description || null;
       if (data.categories !== undefined) updateData.categories = data.categories && data.categories.length > 0 ? data.categories : null;
       if (data.beautyData !== undefined) updateData.beautyData = data.beautyData || null;
+      if (data.variants !== undefined) updateData.variants = data.variants || null;
 
       if (Object.keys(updateData).length === 0) return { success: true };
       await db.update(articles).set(updateData).where(eq(articles.id, id));
@@ -535,12 +569,13 @@ export const articleRouter = router({
     }),
 
   // Update article(Wareneingang / Korrektur)
-  adjustStock: packingProcedure
+  adjustStock: stockProcedure
     .input(z.object({
       id: z.number(),
       change: z.number().int(),
       type: z.enum(["wareneingang", "verkauf", "korrektur", "retoure"]),
       reason: z.string().optional(),
+      expectedStock: z.number().int().min(0).max(2147483647).optional(),
     }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
@@ -548,23 +583,14 @@ export const articleRouter = router({
 
       const [article] = await db.select().from(articles).where(eq(articles.id, input.id)).limit(1);
       if (!article) throw new Error("Article not found");
+      if (input.expectedStock !== undefined && article.stock !== input.expectedStock) {
+        throw new TRPCError({ code: "CONFLICT", message: "Bestand wurde inzwischen geändert. Bitte neu laden." });
+      }
 
       const newStock = article.stock + input.change;
       if (newStock < 0) throw new Error("Bestand kann nicht negativ werden");
 
-      // Update stock
-      await db.update(articles).set({ stock: newStock }).where(eq(articles.id, input.id));
-
-      // Log history
-      await db.insert(stockHistory).values({
-        articleId: input.id,
-        changeType: input.type,
-        quantityBefore: article.stock,
-        quantityChange: input.change,
-        quantityAfter: newStock,
-        reason: input.reason || null,
-        userName: ctx.user?.name || "Admin",
-      });
+      await db.transaction(async tx=>{await applyStockMovement(tx,{articleId:article.id,sku:article.sku,expectedStock:article.stock,change:input.change,type:input.type,reason:input.reason||"WaWi-Bestandsbewegung",actor:ctx.user?.name||ctx.user?.username||"Admin"});});
 
       // E-Mail-Benachrichtigung an Pakko wenn packing-User Bestand manuell reduziert (kein Verkauf)
       if (ctx.user?.role === "packing" && input.change < 0 && input.type !== "verkauf") {
@@ -668,11 +694,11 @@ export const articleRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
-      // Get all paid/shipped/delivered orders
+      // Only commercial sales belong to sales/product analytics. Zero-total
+      // replacements, samples and goodwill orders remain in operations but
+      // must never inflate sales counts, revenue or product rankings.
       const allOrders = await db.select().from(orders);
-      const paidOrders = allOrders.filter(o =>
-        ["bezahlt", "gepackt", "versendet", "zugestellt"].includes(o.status)
-      );
+      const paidOrders = allOrders.filter(isCompletedCommercialOrder);
 
       // Date filter
       let filtered = paidOrders;
@@ -697,6 +723,7 @@ export const articleRouter = router({
       // Product stats
       const productMap = new Map<string, { name: string; quantity: number; revenue: number }>();
       for (const item of allItems) {
+        if (!isBillableOrderItem(item)) continue;
         const key = item.name;
         const existing = productMap.get(key) || { name: item.name, quantity: 0, revenue: 0 };
         existing.quantity += item.quantity;
@@ -853,6 +880,7 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
     // Variantenbestände werden jedoch immer an ihren echten Lagerzeilen gelesen.
     const inventoryArticles = await db.select({
       id: articles.id,
+      sku: articles.sku,
       stock: articles.stock,
       shopProductId: articles.shopProductId,
     }).from(articles);

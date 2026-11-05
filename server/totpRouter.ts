@@ -5,13 +5,11 @@
  */
 import { z } from "zod";
 import { eq } from "drizzle-orm";
-import * as OTPAuth from "otpauth";
 import QRCode from "qrcode";
 import { router, protectedProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
 import { users } from "../drizzle/schema.js";
-
-const ISSUER = "369 Research WaWi";
+import { canStartTotpSetup, createTotpSetup, verifyTotpToken } from "./totpService.js";
 
 /** Generate a new TOTP secret and QR code for the current user */
 export const totpRouter = router({
@@ -21,19 +19,16 @@ export const totpRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Datenbank nicht verfügbar");
 
-      // Generate new secret
-      const newSecret = new OTPAuth.Secret({ size: 20 });
-      const totp = new OTPAuth.TOTP({
-        issuer: ISSUER,
-        label: ctx.user!.username,
-        algorithm: "SHA1",
-        digits: 6,
-        period: 30,
-        secret: newSecret,
-      });
+      const [user] = await db
+        .select({ totpEnabled: users.totpEnabled })
+        .from(users)
+        .where(eq(users.id, ctx.user!.id))
+        .limit(1);
+      if (!user || !canStartTotpSetup(user.totpEnabled)) {
+        throw new Error("2FA ist bereits aktiv. Ein neues Setup ist nur über einen autorisierten Reset möglich.");
+      }
 
-      const secret = totp.secret.base32;
-      const otpAuthUrl = totp.toString();
+      const { secret, otpAuthUrl } = createTotpSetup(ctx.user!.username);
 
       // Generate QR code as data URL
       const qrDataUrl = await QRCode.toDataURL(otpAuthUrl, {
@@ -72,17 +67,7 @@ export const totpRouter = router({
         throw new Error("Kein TOTP-Secret gefunden. Bitte Setup erneut starten.");
       }
 
-      const totp = new OTPAuth.TOTP({
-        issuer: ISSUER,
-        label: user.username,
-        algorithm: "SHA1",
-        digits: 6,
-        period: 30,
-        secret: OTPAuth.Secret.fromBase32(user.totpSecret),
-      });
-
-      const delta = totp.validate({ token: input.code, window: 1 });
-      if (delta === null) {
+      if (!verifyTotpToken(user.totpSecret, input.code)) {
         throw new Error("Ungültiger Code. Bitte erneut versuchen.");
       }
 
@@ -111,17 +96,7 @@ export const totpRouter = router({
         throw new Error("2FA ist nicht aktiviert.");
       }
 
-      const totp = new OTPAuth.TOTP({
-        issuer: ISSUER,
-        label: user.username,
-        algorithm: "SHA1",
-        digits: 6,
-        period: 30,
-        secret: OTPAuth.Secret.fromBase32(user.totpSecret),
-      });
-
-      const delta = totp.validate({ token: input.code, window: 1 });
-      if (delta === null) {
+      if (!verifyTotpToken(user.totpSecret, input.code)) {
         throw new Error("Ungültiger Code. Bitte erneut versuchen.");
       }
 
@@ -161,16 +136,5 @@ export async function verifyTotpCode(userId: number, code: string): Promise<bool
     .limit(1);
 
   if (!user?.totpSecret || !user.totpEnabled) return true; // 2FA not enabled = pass
-
-  const totp = new OTPAuth.TOTP({
-    issuer: ISSUER,
-    label: "user",
-    algorithm: "SHA1",
-    digits: 6,
-    period: 30,
-    secret: OTPAuth.Secret.fromBase32(user.totpSecret),
-  });
-
-  const delta = totp.validate({ token: code, window: 1 });
-  return delta !== null;
+  return verifyTotpToken(user.totpSecret, code);
 }

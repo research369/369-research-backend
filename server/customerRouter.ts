@@ -1,14 +1,25 @@
+import {nextCustomerNumber,requireCustomerNumberMigration} from './customerNumberService.js';
+import {checkCustomerCreationMaintenance} from './customerCreationMaintenance.js';
 /**
  * Customer Router – tRPC routes for CRM / customer management
  * Features: CRUD, advanced filtering, communication history, email sending, CSV export
  */
 import { z } from "zod";
-import { eq, desc, sql, and, gte, lte, like, or } from "drizzle-orm";
+import { eq, desc, sql, and, gte, lte, like, or, inArray } from "drizzle-orm";
 import { router, adminProcedure } from "./trpc.js";
-import { getDb } from "./db.js";
+import { getDb, getPool } from "./db.js";
 import { customers, orders, orderItems, customerCommunications, emailTemplates, emailCampaigns, partners } from "../drizzle/schema.js";
 import { queueCustomerDuplicateReview } from "./customerIntegrityService.js";
 import { persistAddressValidation, validateGermanAddress } from "./addressValidationService.js";
+import { calculateCustomerOrderMetrics } from "./customerOrderMetrics.js";
+import { isCommercialOrder, isCompletedCommercialOrder } from "./commercialOrderMetrics.js";
+import {
+  activateCustomerOrderBlock,
+  getActiveCustomerOrderBlockForCustomer,
+  getActiveCustomerOrderBlocksForCustomers,
+  revokeCustomerOrderBlock,
+} from "./customerOrderBlockService.js";
+import { getPersonalPromoAssignmentsForCustomerIds } from "./customerPromoAssignmentService.js";
 
 const RESEND_API_URL = "https://api.resend.com/emails";
 
@@ -28,6 +39,7 @@ const customerSchema = z.object({
   source: z.string().optional(),
   notes: z.string().optional(),
   dhlPostNumber: z.string().optional(), // DHL-Postnummer für Packstation-Lieferungen
+  communicationLanguage: z.enum(["de", "en"]).optional(),
   // Nur nach sichtbarer Warnung möglich; wird serverseitig erneut geprüft.
   addressValidationOverride: z.object({ confirmed: z.literal(true) }).optional(),
 });
@@ -149,13 +161,42 @@ export const customerRouter = router({
           if (partnerIds.includes(p.id)) partnerCodeMap[p.id] = p.code;
         }
       }
+      const activeOrderBlocks = await getActiveCustomerOrderBlocksForCustomers(allCustomers.map((customer) => customer.id));
       return allCustomers.map(c => ({
         ...c,
         totalSpent: parseFloat(c.totalSpent),
         tags: c.tags ? JSON.parse(c.tags) : [],
         acquiredByPartnerCode: c.acquiredByPartnerId ? (partnerCodeMap[c.acquiredByPartnerId] || null) : null,
+        orderBlock: activeOrderBlocks.get(c.id) ?? null,
       }));
     }),
+
+  // One authoritative whole-CRM summary: every active order is counted exactly
+  // once, independently from duplicate identities or the current list filters.
+  summary: adminProcedure.query(async () => {
+    const db = await getDb();
+    if (!db) throw new Error("Database not available");
+
+    const [allCustomers, allOrders] = await Promise.all([
+      db.select({ id: customers.id, email: customers.email }).from(customers),
+      db.select({ customerId: orders.customerId, total: orders.total, status: orders.status }).from(orders),
+    ]);
+    const activeOrders = allOrders.filter(isCommercialOrder);
+    const customerIds = new Set(allCustomers.map((customer) => customer.id));
+    const linkedActiveOrders = activeOrders.filter((order) => order.customerId !== null && customerIds.has(order.customerId));
+    const unlinkedActiveOrders = activeOrders.filter((order) => order.customerId === null || !customerIds.has(order.customerId));
+
+    return {
+      totalCustomers: allCustomers.length,
+      customersWithEmail: allCustomers.filter((customer) => Boolean(customer.email?.trim())).length,
+      totalOrders: activeOrders.length,
+      totalRevenue: activeOrders.reduce((sum, order) => sum + parseFloat(order.total), 0),
+      linkedOrderCount: linkedActiveOrders.length,
+      linkedRevenue: linkedActiveOrders.reduce((sum, order) => sum + parseFloat(order.total), 0),
+      unlinkedOrderCount: unlinkedActiveOrders.length,
+      unlinkedRevenue: unlinkedActiveOrders.reduce((sum, order) => sum + parseFloat(order.total), 0),
+    };
+  }),
 
   // Get single customer with full history
   get: adminProcedure
@@ -167,33 +208,13 @@ export const customerRouter = router({
       const [customer] = await db.select().from(customers).where(eq(customers.id, input.id)).limit(1);
       if (!customer) throw new Error("Customer not found");
 
-      // Get orders linked by customerId, email, or phone
-      // Placeholder emails/phones are excluded from matching to avoid false positives
-      const PLACEHOLDER_EMAILS_GET = new Set([
-        'keine@angabe.de', 'noemail@noemail.de', 'no@email.de', 'noreply@noreply.de',
-        'placeholder@placeholder.de', 'test@test.de', 'info@info.de', 'otc@369research.eu',
-      ]);
-      const allOrders = await db.select().from(orders).orderBy(desc(orders.orderDate));
-      const emailKey = customer.email?.toLowerCase().trim() || '';
-      const phoneKey = customer.phone?.trim() || '';
-      const emailUsable = emailKey && !PLACEHOLDER_EMAILS_GET.has(emailKey);
-      const phoneUsable = phoneKey && phoneKey.length > 4;
-      const customerOrders = allOrders.filter(o => {
-        // Primary: direct customerId link
-        if (o.customerId === customer.id) return true;
-        // Secondary: email match (only if customer has a real email)
-        if (emailUsable && o.email.toLowerCase().trim() === emailKey) return true;
-        // Tertiary: phone match (only if customer has a real phone)
-        if (phoneUsable && o.phone.trim() === phoneKey) return true;
-        return false;
-      });
-      // Deduplicate by orderId
-      const seenIds = new Set<string>();
-      const uniqueCustomerOrders = customerOrders.filter(o => {
-        if (seenIds.has(o.orderId)) return false;
-        seenIds.add(o.orderId);
-        return true;
-      });
+      // A historical order belongs to precisely one customer record. Never infer
+      // history from a shared e-mail address or phone number here: that was the
+      // source of CRM total overcounts and misleading customer histories.
+      const uniqueCustomerOrders = await db.select()
+        .from(orders)
+        .where(eq(orders.customerId, customer.id))
+        .orderBy(desc(orders.orderDate));
 
       // Get items for these orders
       const orderIds = uniqueCustomerOrders.map(o => o.orderId);
@@ -220,6 +241,8 @@ export const customerRouter = router({
         .from(customerCommunications)
         .where(eq(customerCommunications.customerId, customer.id))
         .orderBy(desc(customerCommunications.createdAt));
+      const orderBlock = await getActiveCustomerOrderBlockForCustomer(customer.id);
+      const personalPromoAssignments = await getPersonalPromoAssignmentsForCustomerIds([customer.id]);
 
       return {
         ...customer,
@@ -227,7 +250,38 @@ export const customerRouter = router({
         tags: customer.tags ? JSON.parse(customer.tags) : [],
         orders: ordersWithItems,
         communications,
+        orderBlock,
+        personalPromoCodes: personalPromoAssignments.get(customer.id) ?? [],
       };
+    }),
+
+  // An explicit block is always bound to the exact current e-mail and/or phone
+  // stored on this individual record. A name, tag, city or address is never
+  // used as a blocking criterion.
+  blockOrders: adminProcedure
+    .input(z.object({ customerId: z.number(), reason: z.string().trim().min(5).max(2_000) }))
+    .mutation(async ({ input, ctx }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+      const [customer] = await db.select().from(customers).where(eq(customers.id, input.customerId)).limit(1);
+      if (!customer) throw new Error("Kunde nicht gefunden");
+      const actor = ctx.user.name || ctx.user.username || "Master-Admin";
+      const orderBlock = await activateCustomerOrderBlock({
+        customerId: customer.id,
+        email: customer.email,
+        phone: customer.phone,
+        reason: input.reason,
+        actor,
+      });
+      return { success: true, orderBlock };
+    }),
+
+  unblockOrders: adminProcedure
+    .input(z.object({ customerId: z.number() }))
+    .mutation(async ({ input, ctx }) => {
+      const actor = ctx.user.name || ctx.user.username || "Master-Admin";
+      const changed = await revokeCustomerOrderBlock({ customerId: input.customerId, actor });
+      return { success: true, changed };
     }),
 
   // Create customer (manual)
@@ -237,6 +291,7 @@ export const customerRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
+      await checkCustomerCreationMaintenance('customer.create','mutation',await getPool());
       const addressHasInput = [input.street, input.houseNumber, input.zip, input.city, input.country].some((value) => !!value?.trim());
       const addressValidation = addressHasInput ? await validateGermanAddress({
         street: input.street || "", houseNumber: input.houseNumber || "", zip: input.zip || "", city: input.city || "", country: input.country || "",
@@ -246,16 +301,8 @@ export const customerRouter = router({
         throw new Error(`ADRESSPRUEFUNG_BESTAETIGUNG_ERFORDERLICH: ${addressValidation!.warnings.map((warning) => warning.message).join(" ")}`);
       }
 
-      // Generate next customer number
-      const maxResult = await db.execute(sql`SELECT COALESCE(MAX(CAST(customer_number AS INTEGER)), 1209) as max_num FROM customers WHERE customer_number ~ '^[0-9]+$'`);
-      const rows = maxResult as any;
-      let nextNum = 1210;
-      if (rows && rows.length > 0 && rows[0].max_num) {
-        nextNum = parseInt(rows[0].max_num) + 1;
-      } else if (rows?.rows && rows.rows.length > 0) {
-        nextNum = parseInt(rows.rows[0].max_num) + 1;
-      }
-      if (nextNum < 1210) nextNum = 1210;
+      // Sequence is allocated once and reused for the inserted record lookup.
+      const nextNum = await nextCustomerNumber(db);
 
       console.log(`[customer.create] houseNumber=${JSON.stringify(input.houseNumber)}, street=${JSON.stringify(input.street)}, zip=${JSON.stringify(input.zip)}, city=${JSON.stringify(input.city)}`);
       await db.insert(customers).values({
@@ -274,6 +321,7 @@ export const customerRouter = router({
         tags: input.tags || null,
         source: input.source || "manual",
         notes: input.notes || null,
+        communicationLanguage: input.communicationLanguage || "de",
       });
 
       // SELECT after INSERT - more robust than RETURNING (works on all DB systems)
@@ -304,7 +352,7 @@ export const customerRouter = router({
     // Update customer
   update: adminProcedure
     .input(z.object({ id: z.number() }).merge(customerSchema.partial()))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
       const { id, ...data } = input;
@@ -341,11 +389,31 @@ export const customerRouter = router({
       if (data.source !== undefined) updateData.source = data.source || null;
       if (data.notes !== undefined) updateData.notes = data.notes || null;
       if (data.dhlPostNumber !== undefined) updateData.dhlPostNumber = data.dhlPostNumber || null;
+      if (data.communicationLanguage !== undefined) updateData.communicationLanguage = data.communicationLanguage;
 
       await db.update(customers).set(updateData).where(eq(customers.id, id));
 
-      // ── Sync address/contact data to all linked orders ──
-      // Only sync fields that are actually address/contact related (not tags, notes, source)
+      // A corrected recipient address resolves prior delivery incidents for the
+      // obsolete address. Provider retries remain journalled but must not create
+      // duplicate operator alerts after the correction is already completed.
+      const previousEmail = existingCustomer.email?.trim().toLowerCase() || "";
+      const correctedEmail = data.email?.trim().toLowerCase() || "";
+      if (data.email !== undefined && previousEmail && correctedEmail && previousEmail !== correctedEmail) {
+        await db.update(customerCommunications).set({
+          deliveryIssueResolvedAt: new Date(),
+          deliveryIssueResolution: `E-Mail-Adresse korrigiert: ${previousEmail} → ${correctedEmail}`,
+          deliveryIssueResolvedBy: ctx.user.name || ctx.user.username,
+        }).where(and(
+          eq(customerCommunications.customerId, id),
+          eq(customerCommunications.recipientEmail, previousEmail),
+          inArray(customerCommunications.deliveryStatus, ["delayed", "bounced", "failed", "suppressed"]),
+          sql`${customerCommunications.deliveryIssueResolvedAt} IS NULL`,
+        ));
+      }
+
+      // ── Ergänze nur fehlende Kontaktfelder in verknüpften Bestellungen ──
+      // Eine Bestellung ist der historische Versand- und Rechnungs-Snapshot.
+      // Spätere Stammdatenänderungen dürfen sie niemals überschreiben.
       const orderSyncFields: Record<string, any> = {};
       if (data.firstName !== undefined) orderSyncFields.firstName = data.firstName || null;
       if (data.lastName !== undefined) orderSyncFields.lastName = data.lastName || null;
@@ -371,18 +439,22 @@ export const customerRouter = router({
             if (!order) continue;
 
             const orderUpdate: Record<string, any> = {};
-            // Always sync ALL address/contact fields from customer to order (full overwrite)
-            if (data.firstName !== undefined) orderUpdate.firstName = data.firstName || null;
-            if (data.lastName !== undefined) orderUpdate.lastName = data.lastName || null;
-            if (data.phone !== undefined) orderUpdate.phone = data.phone || null;
-            if (data.email !== undefined) orderUpdate.email = data.email || null;
-            if (data.company !== undefined) orderUpdate.company = data.company || null;
-            if (data.street !== undefined) orderUpdate.street = data.street || null;
-            if (data.houseNumber !== undefined) orderUpdate.houseNumber = data.houseNumber || null;
-            if (data.zip !== undefined) orderUpdate.zip = data.zip || null;
-            if (data.city !== undefined) orderUpdate.city = data.city || null;
-            if (data.country !== undefined) orderUpdate.country = data.country || null;
-            if (data.dhlPostNumber !== undefined) orderUpdate.dhlPostNumber = data.dhlPostNumber || null;
+            const onlyIfMissing = (field: string, value: unknown) => {
+              if (value === undefined || value === null || String(value).trim() === "") return;
+              const existing = (order as any)[field];
+              if (existing === null || existing === undefined || String(existing).trim() === "") orderUpdate[field] = value;
+            };
+            onlyIfMissing("firstName", data.firstName);
+            onlyIfMissing("lastName", data.lastName);
+            onlyIfMissing("phone", data.phone);
+            onlyIfMissing("email", data.email);
+            onlyIfMissing("company", data.company);
+            onlyIfMissing("street", data.street);
+            onlyIfMissing("houseNumber", data.houseNumber);
+            onlyIfMissing("zip", data.zip);
+            onlyIfMissing("city", data.city);
+            onlyIfMissing("country", data.country);
+            onlyIfMissing("dhlPostNumber", data.dhlPostNumber);
 
             if (Object.keys(orderUpdate).length > 0) {
               await db.update(orders).set(orderUpdate).where(eq(orders.orderId, orderId));
@@ -803,6 +875,8 @@ export const customerRouter = router({
     const db = await getDb();
     if (!db) throw new Error("Database not available");
 
+    if(!input?.dryRun)await checkCustomerCreationMaintenance('customer.backfillFromOrders','mutation',await getPool());
+
     const PLACEHOLDER_EMAILS = new Set([
       'keine@angabe.de', 'noemail@noemail.de', 'no@email.de', 'noreply@noreply.de',
       'placeholder@placeholder.de', 'test@test.de', 'info@info.de', 'otc@369research.eu',
@@ -815,15 +889,32 @@ export const customerRouter = router({
     // Build lookup maps from existing customers (ignore placeholder emails)
     const emailToCustomer: Record<string, typeof existingCustomers[0]> = {};
     const phoneToCustomer: Record<string, typeof existingCustomers[0]> = {};
+    const emailMatchCounts: Record<string, number> = {};
+    const phoneMatchCounts: Record<string, number> = {};
     for (const c of existingCustomers) {
       if (c.email) {
         const k = c.email.toLowerCase().trim();
-        if (!PLACEHOLDER_EMAILS.has(k)) emailToCustomer[k] = c;
+        if (!PLACEHOLDER_EMAILS.has(k)) {
+          emailToCustomer[k] = c;
+          emailMatchCounts[k] = (emailMatchCounts[k] || 0) + 1;
+        }
       }
       if (c.phone) {
         const k = normalizePhone(c.phone);
-        if (k.length >= 7) phoneToCustomer[k] = c;
+        if (k.length >= 7) {
+          phoneToCustomer[k] = c;
+          phoneMatchCounts[k] = (phoneMatchCounts[k] || 0) + 1;
+        }
       }
+    }
+    // A shared e-mail address or phone number is not evidence of identity. It
+    // must be reviewed manually rather than silently attributing an order to
+    // the last profile that happened to be inserted into a lookup map.
+    for (const [key, count] of Object.entries(emailMatchCounts)) {
+      if (count !== 1) delete emailToCustomer[key];
+    }
+    for (const [key, count] of Object.entries(phoneMatchCounts)) {
+      if (count !== 1) delete phoneToCustomer[key];
     }
 
     // Group orders by identity (email preferred, then phone, then single order)
@@ -871,7 +962,7 @@ export const customerRouter = router({
         email: (o.email && !PLACEHOLDER_EMAILS.has(o.email.toLowerCase().trim())) ? o.email : null,
         phone: o.phone || null,
         orderCount: grpOrders.length,
-        totalSpent: grpOrders.filter(x => ['bezahlt','gepackt','versendet','zugestellt'].includes(x.status)).reduce((s, x) => s + parseFloat(x.total || '0'), 0).toFixed(2),
+        totalSpent: grpOrders.filter(isCompletedCommercialOrder).reduce((s, x) => s + parseFloat(x.total || '0'), 0).toFixed(2),
         city: o.city || null,
         country: o.country || null,
         sampleOrderId: o.orderId,
@@ -891,16 +982,11 @@ export const customerRouter = router({
       };
     }
 
+    await requireCustomerNumberMigration(db);
     // Execute backfill
     let created = 0;
     let linked = 0;
 
-    // Get starting customer number
-    const maxResult = await db.execute(sql`SELECT COALESCE(MAX(CAST(customer_number AS INTEGER)), 1209) as max_num FROM customers WHERE customer_number ~ '^[0-9]+$'`);
-    const maxRows = maxResult as any;
-    let nextNum = 1210;
-    const rawMax = maxRows?.rows?.[0]?.max_num ?? maxRows?.[0]?.max_num;
-    if (rawMax) nextNum = Math.max(1210, parseInt(rawMax) + 1);
 
     for (const [, grpOrders] of Object.entries(groups)) {
       const o = grpOrders[grpOrders.length - 1];
@@ -911,14 +997,11 @@ export const customerRouter = router({
 
       const emailKey = (o.email || '').toLowerCase().trim();
       const emailUsable = emailKey && !PLACEHOLDER_EMAILS.has(emailKey);
-      const PAID_STATUSES = new Set(['bezahlt', 'gepackt', 'versendet', 'zugestellt']);
-      const totalOrders = grpOrders.length;
-      const totalSpent = grpOrders.filter(x => PAID_STATUSES.has(x.status)).reduce((s, x) => s + parseFloat(x.total || '0'), 0);
-      const dates = grpOrders.map(x => x.orderDate).filter(Boolean).sort();
+      const metrics = calculateCustomerOrderMetrics(grpOrders);
 
       try {
         const [newCustomer] = await db.insert(customers).values({
-          customerNumber: String(nextNum),
+          customerNumber: await nextCustomerNumber(db),
           name,
           firstName: firstName || null,
           lastName: lastName || null,
@@ -931,10 +1014,10 @@ export const customerRouter = router({
           city: o.city || null,
           country: o.country || null,
           source: 'backfill',
-          totalOrders,
-          totalSpent: totalSpent.toFixed(2),
-          firstOrderDate: dates[0] ?? null,
-          lastOrderDate: dates[dates.length - 1] ?? null,
+          totalOrders: metrics.totalOrders,
+          totalSpent: metrics.totalSpent.toFixed(2),
+          firstOrderDate: metrics.firstOrderDate,
+          lastOrderDate: metrics.lastOrderDate,
         }).returning();
 
         // Link all orders in this group to the new customer
@@ -948,7 +1031,6 @@ export const customerRouter = router({
         const pk = normalizePhone(o.phone || '');
         if (pk.length >= 7) phoneToCustomer[pk] = newCustomer;
 
-        nextNum++;
         created++;
       } catch (_e) { /* skip on duplicate */ }
     }
@@ -969,72 +1051,16 @@ export const customerRouter = router({
     const allCustomers = await db.select().from(customers);
     const allOrders = await db.select().from(orders);
 
-    // Placeholder/dummy emails that should NOT be used for matching
-    const PLACEHOLDER_EMAILS = new Set([
-      'keine@angabe.de', 'noemail@noemail.de', 'no@email.de', 'noreply@noreply.de',
-      'placeholder@placeholder.de', 'test@test.de', 'info@info.de', 'otc@369research.eu',
-    ]);
-    // Placeholder phones
-    const PLACEHOLDER_PHONES = new Set(['0000000', '00000000000', '']);
-
-    // Build a map: email -> list of customerIds that use it
-    // If multiple customers share the same email, email-matching is ambiguous → skip it
-    const emailToCustomerIds: Record<string, number[]> = {};
-    for (const c of allCustomers) {
-      if (c.email && !PLACEHOLDER_EMAILS.has(c.email.toLowerCase().trim())) {
-        const key = c.email.toLowerCase().trim();
-        if (!emailToCustomerIds[key]) emailToCustomerIds[key] = [];
-        emailToCustomerIds[key].push(c.id);
-      }
-    }
-    // Same for phone
-    const phoneToCustomerIds: Record<string, number[]> = {};
-    for (const c of allCustomers) {
-      if (c.phone && !PLACEHOLDER_PHONES.has(c.phone.trim())) {
-        const key = c.phone.trim();
-        if (!phoneToCustomerIds[key]) phoneToCustomerIds[key] = [];
-        phoneToCustomerIds[key].push(c.id);
-      }
-    }
-
     let updated = 0;
     for (const customer of allCustomers) {
-      const emailKey = customer.email?.toLowerCase().trim() || '';
-      const phoneKey = customer.phone?.trim() || '';
-      // Only use email for matching if it's unique (not shared with other customers) and not a placeholder
-      const emailIsUsable = emailKey && !PLACEHOLDER_EMAILS.has(emailKey) && (emailToCustomerIds[emailKey]?.length ?? 0) === 1;
-      // Only use phone for matching if it's unique and not a placeholder
-      const phoneIsUsable = phoneKey && !PLACEHOLDER_PHONES.has(phoneKey) && (phoneToCustomerIds[phoneKey]?.length ?? 0) === 1;
+      const uniqueOrders = allOrders.filter((order) => order.customerId === customer.id);
 
-      const customerOrders = allOrders.filter(o => {
-        // Primary: direct customerId link (always reliable)
-        if (o.customerId === customer.id) return true;
-        // Secondary: unique email match
-        if (emailIsUsable && o.email.toLowerCase().trim() === emailKey) return true;
-        // Tertiary: unique phone match
-        if (phoneIsUsable && o.phone.trim() === phoneKey) return true;
-        return false;
-      });
-
-      // Deduplicate by orderId (avoid counting same order twice)
-      const seen = new Set<string>();
-      const uniqueOrders = customerOrders.filter(o => {
-        if (seen.has(o.orderId)) return false;
-        seen.add(o.orderId);
-        return true;
-      });
-
-      const PAID_STATUSES_REBUILD = new Set(['bezahlt', 'gepackt', 'versendet', 'zugestellt']);
-      const totalOrders = uniqueOrders.length;
-      const totalSpent = uniqueOrders.filter(o => PAID_STATUSES_REBUILD.has(o.status)).reduce((sum, o) => sum + parseFloat(o.total), 0);
-      const orderDates = uniqueOrders.map(o => o.orderDate).filter(Boolean) as Date[];
-      const firstOrderDate = orderDates.length > 0 ? new Date(Math.min(...orderDates.map(d => d.getTime()))) : null;
-      const lastOrderDate = orderDates.length > 0 ? new Date(Math.max(...orderDates.map(d => d.getTime()))) : null;
+      const metrics = calculateCustomerOrderMetrics(uniqueOrders);
       await db.update(customers).set({
-        totalOrders,
-        totalSpent: totalSpent.toFixed(2),
-        firstOrderDate,
-        lastOrderDate,
+        totalOrders: metrics.totalOrders,
+        totalSpent: metrics.totalSpent.toFixed(2),
+        firstOrderDate: metrics.firstOrderDate,
+        lastOrderDate: metrics.lastOrderDate,
         updatedAt: new Date(),
       }).where(eq(customers.id, customer.id));
       updated++;

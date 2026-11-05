@@ -181,3 +181,13 @@ Kein echtes Label ohne explizite Bestätigung. Tracking-Feld: `shipmentNo`. Aktu
 | [research369/369-academy](https://github.com/research369/369-academy) | 369 Research Academy Mitgliederplattform |
 
 *Dokumentation aktualisiert: Juni 2026*
+
+## Guardian inventory reader (prepared 2026-10-08)
+
+`GET /api/guardian/inventory` uses a separate `GUARDIAN_INVENTORY_READ_KEY`
+(Bearer, at least 40 characters). It accepts no parameters or writes and reads
+only article identity, stock, shop visibility and allowlisted variant fields in
+a bounded read-only transaction. No customer, order, cost or credential fields.
+Missing configuration denies access. Over 5000 articles fails instead of returning
+an apparently complete partial inventory. Existing Jarvy/admin keys do not grant
+access. Activation and deployment evidence must be recorded separately.

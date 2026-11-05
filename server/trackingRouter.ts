@@ -38,10 +38,34 @@ import { Router, type Request, type Response } from "express";
 import { ENV } from "./env.js";
 import { getDb } from "./db.js";
 import { orders } from "../drizzle/schema.js";
-import { gte, isNotNull, ne } from "drizzle-orm";
+import { eq, gte, isNotNull, ne } from "drizzle-orm";
 import { getUserFromRequest } from "./auth.js";
 
-export const trackingRouter = Router();
+export const trackingRouter: Router = Router();
+
+function normalizeCustomerName(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLocaleLowerCase("de-DE")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function normalizeCustomerPhone(value: string): string {
+  const digits = value.replace(/[^0-9]/g, "");
+  if (digits.startsWith("00")) return digits.slice(2);
+  if (digits.startsWith("0")) return "49" + digits.slice(1);
+  return digits;
+}
+
+function hasPepGptBridgeAccess(req: Request): boolean {
+  const key = process.env.PEPGPT_COMMERCE_BRIDGE_KEY || "";
+  const authorization = req.get("authorization") || "";
+  const provided = req.get("x-pepgpt-commerce-key") || authorization.replace(/^Bearer\s+/i, "");
+  return Boolean(key) && provided === key;
+}
 
 // ─── Typen ────────────────────────────────────────────────────────────────────
 
@@ -228,6 +252,76 @@ async function requireWawiAdmin(req: Request, res: Response, next: () => void): 
   }
   next();
 }
+
+// ─── GET /api/internal/pepgpt/order-status ─────────────────────────────────────
+// Read-only service bridge. It deliberately returns no address, email or full customer dossier.
+trackingRouter.get("/api/internal/pepgpt/order-status", async (req: Request, res: Response) => {
+  if (!hasPepGptBridgeAccess(req)) {
+    res.status(401).json({ success: false, error: "Nicht autorisiert" });
+    return;
+  }
+  const orderId = typeof req.query.orderId === "string" ? req.query.orderId.trim().slice(0, 64) : "";
+  const customerName = typeof req.query.customerName === "string" ? req.query.customerName.trim().slice(0, 160) : "";
+  const customerPhone = typeof req.query.customerPhone === "string" ? req.query.customerPhone.trim().slice(0, 40) : "";
+  if (!orderId || (!customerName && !customerPhone)) {
+    res.status(400).json({ success: false, error: "Bestellnummer und vollständiger Name oder verifizierte Telefonnummer erforderlich" });
+    return;
+  }
+  try {
+    const db = await getDb();
+    if (!db) {
+      res.status(503).json({ success: false, error: "DB nicht verfügbar" });
+      return;
+    }
+    const [order] = await db
+      .select({
+        orderId: orders.orderId,
+        firstName: orders.firstName,
+        lastName: orders.lastName,
+        phone: orders.phone,
+        status: orders.status,
+        orderDate: orders.orderDate,
+        shippedAt: orders.shippedAt,
+        trackingNumber: orders.trackingNumber,
+      })
+      .from(orders)
+      .where(eq(orders.orderId, orderId))
+      .limit(1);
+    const nameMatches = Boolean(customerName)
+      && normalizeCustomerName(`${order?.firstName || ""} ${order?.lastName || ""}`) === normalizeCustomerName(customerName);
+    const phoneMatches = Boolean(customerPhone)
+      && normalizeCustomerPhone(order?.phone || "") === normalizeCustomerPhone(customerPhone);
+    if (!order || (!nameMatches && !phoneMatches)) {
+      res.status(404).json({ success: false, error: "Bestellung nicht gefunden" });
+      return;
+    }
+    const tracking = order.trackingNumber ? await fetchDhlTracking(order.trackingNumber) : null;
+    const relevantDate = order.shippedAt || order.orderDate;
+    const ageDays = relevantDate ? Math.max(0, Math.floor((Date.now() - new Date(relevantDate).getTime()) / 86400000)) : null;
+    const shipmentRecency = ageDays !== null && ageDays > 45 ? "older" : "current";
+    res.json({
+      success: true,
+      order: {
+        orderId: order.orderId,
+        status: order.status,
+        orderDate: order.orderDate,
+        shippedAt: order.shippedAt,
+        shipmentRecency,
+        ageDays,
+        tracking: tracking ? {
+          number: order.trackingNumber,
+          url: `https://www.dhl.de/de/privatkunden/pakete-empfangen/verfolgen.html?piececode=${encodeURIComponent(order.trackingNumber!)}`,
+          status: tracking.statusText,
+          detail: tracking.description,
+          timestamp: tracking.timestamp,
+        } : null,
+      },
+    });
+  } catch (err: any) {
+    console.error("[pepgpt-order-status] Fehler:", err?.message);
+    res.status(500).json({ success: false, error: "Interner Fehler" });
+  }
+});
 
 // ─── GET /api/tracking/overview ───────────────────────────────────────────────
 // Gibt alle Bestellungen der letzten 30 Tage mit Tracking-Nummer zurück,

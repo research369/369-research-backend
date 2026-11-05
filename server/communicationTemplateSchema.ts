@@ -7,22 +7,35 @@ type SeedTemplate = {
   title: string;
   subject: string | null;
   body: string;
+  /** WhatsApp can carry additional plain-text resources without changing email copy. */
+  whatsappBody?: string;
   sortOrder: number;
 };
+
+// These templates are stored in the CRM database and can be maintained in the
+// WaWi. The legacy values let this release upgrade only untouched originals.
+export const LEGACY_DE_ORDER_CONFIRMATION_BODY = "Hallo {{firstName}},\n\nvielen Dank für deine Bestellung bei 369 Research.\n\nBestellnummer: {{orderId}}\n{{items}}\n\nGesamtbetrag: {{total}}\n\nSobald deine Zahlung eingegangen ist, bereiten wir deine Bestellung für den Versand vor.\n\nBei Fragen erreichst du uns jederzeit unter {{supportEmail}}.\n\nViele Grüße\n369 Research";
+export const PREVIOUS_DE_ORDER_CONFIRMATION_BODY = "Hallo {{firstName}},\n\nvielen Dank für deine Bestellung bei 369 Research.\n\nBestellnummer: {{orderId}}\n{{items}}\n\nGesamtbetrag: {{total}}\n\nBitte überweise den Gesamtbetrag per SEPA- oder Echtzeitüberweisung auf eines der folgenden Konten:\n\n{{paymentDetails}}\n\nVerwendungszweck: {{orderId}}\n\nSobald deine Zahlung eingegangen ist, bereiten wir deine Bestellung für den Versand vor.\n\nBei Fragen erreichst du uns jederzeit unter {{supportEmail}}.\n\nViele Grüße\n369 Research";
+export const DE_ORDER_CONFIRMATION_BODY = "Hallo {{firstName}},\n\nvielen Dank für deine Bestellung bei 369 Research.\n\nBestellnummer: {{orderId}}\n{{items}}\n\nGesamtbetrag: {{total}}\n\nBitte überweise den Gesamtbetrag per SEPA- oder Echtzeitüberweisung auf unser Wise-Konto:\n\n{{paymentDetails}}\n\nVerwendungszweck: {{orderId}}\n\nHinweis zur Kreditkarte: Der Zahlungslink ist ein zusätzliches Angebot. Es tut uns leid: Kreditkartenzahlungen können in unserer Branche technisch nicht immer verarbeitet werden. Falls der Link oder die Kartenzahlung nicht funktioniert, überweise den Betrag bitte einfach per SEPA- oder Echtzeitüberweisung auf unser Wise-Konto – Überweisung funktioniert zuverlässig.\n\nSobald deine Zahlung eingegangen ist, bereiten wir deine Bestellung für den Versand vor.\n\nBei Fragen erreichst du uns jederzeit unter {{supportEmail}}.\n\nViele Grüße\n369 Research";
+export const LEGACY_EN_ORDER_CONFIRMATION_BODY = "Hello {{firstName}},\n\nthank you for your order with 369 Research.\n\nOrder number: {{orderId}}\n{{items}}\n\nOrder total: {{total}}\n\nAs soon as your payment has been received, we will prepare your order for dispatch.\n\nFor any questions, please contact us at {{supportEmail}}.\n\nKind regards\n369 Research";
+export const PREVIOUS_EN_ORDER_CONFIRMATION_BODY = "Hello {{firstName}},\n\nthank you for your order with 369 Research.\n\nOrder number: {{orderId}}\n{{items}}\n\nOrder total: {{total}}\n\nPlease transfer the total amount by SEPA or instant bank transfer to one of the following accounts:\n\n{{paymentDetails}}\n\nPayment reference: {{orderId}}\n\nAs soon as your payment has been received, we will prepare your order for dispatch.\n\nFor any questions, please contact us at {{supportEmail}}.\n\nKind regards\n369 Research";
+export const EN_ORDER_CONFIRMATION_BODY = "Hello {{firstName}},\n\nthank you for your order with 369 Research.\n\nOrder number: {{orderId}}\n{{items}}\n\nOrder total: {{total}}\n\nPlease transfer the total amount by SEPA or instant bank transfer to our Wise bank account:\n\n{{paymentDetails}}\n\nPayment reference: {{orderId}}\n\nCard payment notice: The payment link is an additional option. We are sorry: card payments may not always be processed successfully in our industry. If the link or card payment does not work, please simply transfer the amount by SEPA or instant bank transfer to our Wise bank account – bank transfer works reliably.\n\nAs soon as your payment has been received, we will prepare your order for dispatch.\n\nFor any questions, please contact us at {{supportEmail}}.\n\nKind regards\n369 Research";
+export const LEGACY_EN_WHATSAPP_SHIPPING_REGISTERED_BODY = "Hello {{firstName}},\n\nyour parcel for order {{orderId}} has been carefully packed and registered with {{carrier}} for dispatch. It will be handed in later today.\n\nTracking number: {{trackingNumber}}\nTrack your parcel: {{trackingUrl}}\n\nInformation on dosing, mixing and pen settings: {{penCalculatorUrl}}\nHow to use your pen system with the Plug&Play cartridge: {{plugAndPlayUrl}}\n\nFor offers, insights and research protocols, join our WhatsApp channel: {{whatsappChannelUrl}}\n\nKind regards\n369 Research";
+export const EN_WHATSAPP_SHIPPING_REGISTERED_BODY = "Hello {{firstName}} 👋\n\n📦 *Your parcel is registered for dispatch*\nYour order {{orderId}} has been carefully packed and registered with *{{carrier}}* for dispatch.\n\nIt will be handed over to {{carrier}} later today.\n\n🔍 *Track your shipment:*\nTracking number: `{{trackingNumber}}`\n{{trackingUrl}}\n\n💉 *Dosing, mixing & pen settings*\n{{penCalculatorUrl}}\n\n📖 *Pen system & Plug&Play*\nGuide for using your pen system with the Plug&Play cartridge:\n{{plugAndPlayUrl}}\n\n📲 *369 Research WhatsApp Channel*\nOffers, research protocols & insights directly on your phone:\n{{whatsappChannelUrl}}\n\n🤝 *Refer a Friend*\n\n• *10% off* for your referred new customer\n• *10% credit* for you after their payment has been confirmed\n\nRegister quickly, share your link & earn credit:\nhttps://www.369research.eu/kwk/register\n\nBest regards,\n369 Research 🔬";
 
 const DE: Array<Omit<SeedTemplate, "channel" | "language">> = [
   {
     key: "order_confirmation",
     title: "Bestellbestätigung",
     subject: "Bestellbestätigung {{orderId}}",
-    body: "Hallo {{firstName}},\n\nvielen Dank für deine Bestellung bei 369 Research.\n\nBestellnummer: {{orderId}}\n{{items}}\n\nGesamtbetrag: {{total}}\n\nNach Zahlungseingang erfolgt der Versand spätestens innerhalb von 48 Stunden an Werktagen (Montag bis Freitag). Wochenenden und gesetzliche Feiertage sind ausgenommen; die Zustellzeit richtet sich nach dem Versanddienstleister.\n\nBei Fragen erreichst du uns jederzeit unter {{supportEmail}}.\n\nViele Grüße\n369 Research",
+    body: DE_ORDER_CONFIRMATION_BODY,
     sortOrder: 10,
   },
   {
     key: "payment_received",
     title: "Zahlung eingegangen",
     subject: "Zahlung zu {{orderId}} eingegangen",
-    body: "Hallo {{firstName}},\n\ndeine Zahlung für die Bestellung {{orderId}} ist bei uns eingegangen. Vielen Dank.\n\nWir bereiten deine Bestellung jetzt sorgfältig für den Versand vor. Der Versand erfolgt spätestens innerhalb von 48 Stunden an Werktagen (Montag bis Freitag); Wochenenden und gesetzliche Feiertage sind ausgenommen. Sobald dein Paket bei DHL registriert ist, erhältst du die Versandinformation.\n\nViele Grüße\n369 Research",
+    body: "Hallo {{firstName}},\n\ndeine Zahlung für die Bestellung {{orderId}} ist bei uns eingegangen. Vielen Dank.\n\nWir bereiten deine Bestellung jetzt sorgfältig für den Versand vor. Sobald dein Paket bei DHL registriert ist, erhältst du die Versandinformation.\n\nViele Grüße\n369 Research",
     sortOrder: 20,
   },
   {
@@ -81,14 +94,14 @@ const EN: Array<Omit<SeedTemplate, "channel" | "language">> = [
     key: "order_confirmation",
     title: "Order confirmation",
     subject: "Order confirmation {{orderId}}",
-    body: "Hello {{firstName}},\n\nthank you for your order with 369 Research.\n\nOrder number: {{orderId}}\n{{items}}\n\nOrder total: {{total}}\n\nAfter payment has been received, orders are dispatched no later than 48 hours on business days (Monday to Friday). Weekends and public holidays are excluded; delivery time depends on the carrier.\n\nFor any questions, please contact us at {{supportEmail}}.\n\nKind regards\n369 Research",
+    body: EN_ORDER_CONFIRMATION_BODY,
     sortOrder: 10,
   },
   {
     key: "payment_received",
     title: "Payment received",
     subject: "Payment received for {{orderId}}",
-    body: "Hello {{firstName}},\n\nwe have received your payment for order {{orderId}}. Thank you.\n\nWe are now carefully preparing your order for dispatch. Orders are dispatched no later than 48 hours on business days (Monday to Friday); weekends and public holidays are excluded. Once your parcel is registered with DHL, you will receive the shipping update.\n\nKind regards\n369 Research",
+    body: "Hello {{firstName}},\n\nwe have received your payment for order {{orderId}}. Thank you.\n\nWe are now carefully preparing your order for dispatch. Once your parcel is registered with DHL, you will receive the shipping update.\n\nKind regards\n369 Research",
     sortOrder: 20,
   },
   {
@@ -103,6 +116,7 @@ const EN: Array<Omit<SeedTemplate, "channel" | "language">> = [
     title: "Shipping update",
     subject: "Your shipment {{orderId}} is registered with {{carrier}}",
     body: "Hello {{firstName}},\n\nyour parcel for order {{orderId}} has been carefully packed and registered with {{carrier}} for dispatch. It will be handed in later today.\n\nTracking number: {{trackingNumber}}\nTrack your parcel: {{trackingUrl}}\n\nInformation on dosing, mixing and pen settings: {{penCalculatorUrl}}\nHow to use your pen system with the Plug&Play cartridge: {{plugAndPlayUrl}}\n\nFor offers, insights and research protocols, join our WhatsApp channel: {{whatsappChannelUrl}}\n\nKind regards\n369 Research",
+    whatsappBody: EN_WHATSAPP_SHIPPING_REGISTERED_BODY,
     sortOrder: 40,
   },
   {
@@ -147,9 +161,6 @@ const SETTINGS: Array<[string, string]> = [
   ["communication_plug_and_play_url", "https://www.369research.eu/plug-and-play"],
   ["communication_whatsapp_channel_url", "https://whatsapp.com/channel/0029VbCjCg73rZZbFb5d8A11"],
   ["communication_support_email", "support@369research.eu"],
-  ["communication_payment_iban", "DE81 3701 9000 1011 3936 89"],
-  ["communication_payment_bic", "BUNQDE82"],
-  ["communication_payment_recipient", "369 Research"],
 ];
 
 /**
@@ -204,11 +215,11 @@ export async function ensureCommunicationTemplateSchema(): Promise<void> {
   const seedTemplates: SeedTemplate[] = [
     ...DE.flatMap((template) => ([
       { ...template, channel: "email" as const, language: "de" as const },
-      { ...template, channel: "whatsapp" as const, language: "de" as const, subject: null },
+      { ...template, channel: "whatsapp" as const, language: "de" as const, subject: null, body: template.whatsappBody || template.body },
     ])),
     ...EN.flatMap((template) => ([
       { ...template, channel: "email" as const, language: "en" as const },
-      { ...template, channel: "whatsapp" as const, language: "en" as const, subject: null },
+      { ...template, channel: "whatsapp" as const, language: "en" as const, subject: null, body: template.whatsappBody || template.body },
     ])),
   ];
 
@@ -219,6 +230,117 @@ export async function ensureCommunicationTemplateSchema(): Promise<void> {
        VALUES ($1, $2, $3, $4, $5, $6, 1, $7)
        ON CONFLICT (template_key, channel, language) DO NOTHING`,
       [template.key, template.channel, template.language, template.title, template.subject, template.body, template.sortOrder],
+    );
+  }
+
+  // Upgrade only the exact untouched original. Custom admin wording is never
+  // overwritten, and each automatic change remains visible in the audit ledger.
+  const orderConfirmationUpgrades = [
+    { language: "de", legacyBody: LEGACY_DE_ORDER_CONFIRMATION_BODY, body: DE_ORDER_CONFIRMATION_BODY },
+    { language: "de", legacyBody: PREVIOUS_DE_ORDER_CONFIRMATION_BODY, body: DE_ORDER_CONFIRMATION_BODY },
+    { language: "en", legacyBody: LEGACY_EN_ORDER_CONFIRMATION_BODY, body: EN_ORDER_CONFIRMATION_BODY },
+    { language: "en", legacyBody: PREVIOUS_EN_ORDER_CONFIRMATION_BODY, body: EN_ORDER_CONFIRMATION_BODY },
+  ] as const;
+  for (const upgrade of orderConfirmationUpgrades) {
+    for (const channel of ["email", "whatsapp"] as const) {
+      const result = await pool.query(
+        `UPDATE communication_templates
+         SET body_template = $1, version = version + 1, updated_at = NOW()
+         WHERE template_key = 'order_confirmation'
+           AND channel = $2
+           AND language = $3
+           AND body_template = $4
+         RETURNING id, title, subject_template, is_active, sort_order, version, created_at, updated_at`,
+        [upgrade.body, channel, upgrade.language, upgrade.legacyBody],
+      );
+      const updated = result.rows[0];
+      if (!updated) continue;
+      const previousValue = {
+        ...updated,
+        body_template: upgrade.legacyBody,
+        version: Number(updated.version) - 1,
+      };
+      const nextValue = { ...updated, body_template: upgrade.body };
+      await pool.query(
+        `INSERT INTO communication_template_audit (template_id, action, previous_value, next_value, changed_by)
+         VALUES ($1, 'system_migration', $2::jsonb, $3::jsonb, $4)`,
+        [updated.id, JSON.stringify(previousValue), JSON.stringify(nextValue), "system:order-confirmation-card-fallback-v3"],
+      );
+    }
+  }
+
+  // Normalize only the obsolete multi-account wording in existing order
+  // confirmation templates. Custom WaWi wording remains otherwise untouched.
+  const wiseAccountWordingNormalizations = [
+    { language: "de", from: "auf eines der folgenden Konten", to: "auf unser Wise-Konto" },
+    { language: "de", from: "auf eines der oben genannten Konten", to: "auf unser Wise-Konto" },
+    { language: "en", from: "to one of the following accounts", to: "to our Wise bank account" },
+    { language: "en", from: "to one of the accounts above", to: "to our Wise bank account" },
+  ] as const;
+  for (const normalization of wiseAccountWordingNormalizations) {
+    const result = await pool.query(
+      `WITH candidates AS (
+         SELECT id, body_template AS previous_body
+         FROM communication_templates
+         WHERE template_key = 'order_confirmation'
+           AND language = $1
+           AND body_template LIKE '%' || $2 || '%'
+       ), updated AS (
+         UPDATE communication_templates AS template
+         SET body_template = REPLACE(candidates.previous_body, $2, $3),
+             version = template.version + 1,
+             updated_at = NOW()
+         FROM candidates
+         WHERE template.id = candidates.id
+         RETURNING template.id, template.title, template.subject_template,
+                   template.body_template, template.is_active, template.sort_order,
+                   template.version, template.created_at, template.updated_at
+       )
+       SELECT updated.*, candidates.previous_body
+       FROM updated
+       JOIN candidates ON candidates.id = updated.id`,
+      [normalization.language, normalization.from, normalization.to],
+    );
+    for (const row of result.rows) {
+      const { previous_body: previousBody, ...updated } = row;
+      const previousValue = {
+        ...updated,
+        body_template: previousBody,
+        version: Number(updated.version) - 1,
+      };
+      await pool.query(
+        `INSERT INTO communication_template_audit (template_id, action, previous_value, next_value, changed_by)
+         VALUES ($1, 'system_migration', $2::jsonb, $3::jsonb, $4)`,
+        [updated.id, JSON.stringify(previousValue), JSON.stringify(updated), "system:wise-single-account-wording-v1"],
+      );
+    }
+  }
+
+  // Keep the English CRM shipping WhatsApp on the same current standard as the
+  // WaWi shipping message. Only the untouched original is upgraded; any manual
+  // customer-specific wording remains untouched and is never overwritten.
+  const englishShippingWhatsAppUpgrade = await pool.query(
+    `UPDATE communication_templates
+     SET body_template = $1, version = version + 1, updated_at = NOW()
+     WHERE template_key = 'shipping_registered'
+       AND channel = 'whatsapp'
+       AND language = 'en'
+       AND body_template = $2
+     RETURNING id, title, subject_template, is_active, sort_order, version, created_at, updated_at`,
+    [EN_WHATSAPP_SHIPPING_REGISTERED_BODY, LEGACY_EN_WHATSAPP_SHIPPING_REGISTERED_BODY],
+  );
+  const updatedEnglishShippingWhatsApp = englishShippingWhatsAppUpgrade.rows[0];
+  if (updatedEnglishShippingWhatsApp) {
+    const previousValue = {
+      ...updatedEnglishShippingWhatsApp,
+      body_template: LEGACY_EN_WHATSAPP_SHIPPING_REGISTERED_BODY,
+      version: Number(updatedEnglishShippingWhatsApp.version) - 1,
+    };
+    const nextValue = { ...updatedEnglishShippingWhatsApp, body_template: EN_WHATSAPP_SHIPPING_REGISTERED_BODY };
+    await pool.query(
+      `INSERT INTO communication_template_audit (template_id, action, previous_value, next_value, changed_by)
+       VALUES ($1, 'system_migration', $2::jsonb, $3::jsonb, $4)`,
+      [updatedEnglishShippingWhatsApp.id, JSON.stringify(previousValue), JSON.stringify(nextValue), "system:english-shipping-whatsapp-v2"],
     );
   }
 

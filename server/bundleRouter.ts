@@ -66,6 +66,7 @@ export const bundleRouter = router({
         ? await db
           .select({
             sku: articles.sku,
+            shopProductId: articles.shopProductId,
             name: articles.name,
             sellingPrice: articles.sellingPrice,
             stock: articles.stock,

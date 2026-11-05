@@ -6,7 +6,7 @@ import { integer, pgTable, text, timestamp, varchar, decimal, pgEnum, serial, js
 export const userRoleEnum = pgEnum("user_role", ["user", "admin"]);
 export const stockChangeTypeEnum = pgEnum("stock_change_type", ["wareneingang", "verkauf", "korrektur", "retoure", "bestellung"]);
 export const paymentMethodEnum = pgEnum("payment_method", ["bunq", "creditCard", "wise", "SEPA", "Bar", "Kreditkarte", "PayPal", "Crypto", "Guthaben", "Sonstige"]);
-export const orderStatusEnum = pgEnum("order_status", ["offen", "bezahlt", "gepackt", "versendet", "zugestellt", "storniert"]);
+export const orderStatusEnum = pgEnum("order_status", ["offen", "bezahlt", "gepackt", "versendet", "zugestellt", "storniert", "abgeholt"]);
 export const commissionTypeEnum = pgEnum("commission_type", ["einmalig", "dauerhaft"]);
 export const acquiredByEnum = pgEnum("acquired_by", ["shop", "partner", "direkt"]);
 export const communicationTypeEnum = pgEnum("communication_type", ["email", "note", "whatsapp", "phone"]);
@@ -112,7 +112,10 @@ export const stockHistory = pgTable("stock_history", {
   userName: varchar("user_name", { length: 100 }),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+}, (t) => ({
+  createdAtIdx: index("stock_history_created_at_idx").on(t.createdAt),
+  articleCreatedAtIdx: index("stock_history_article_created_at_idx").on(t.articleId, t.createdAt),
+}));
 
 export type StockHistoryEntry = typeof stockHistory.$inferSelect;
 export type InsertStockHistory = typeof stockHistory.$inferInsert;
@@ -123,6 +126,7 @@ export type InsertStockHistory = typeof stockHistory.$inferInsert;
 export const customers = pgTable("customers", {
   id: serial("id").primaryKey(),
   customerNumber: varchar("customer_number", { length: 20 }).unique(),
+  preferredDeliveryType: varchar("preferred_delivery_type", { length: 20 }),
   name: varchar("name", { length: 200 }).notNull(),
   firstName: varchar("first_name", { length: 200 }),
   lastName: varchar("last_name", { length: 200 }),
@@ -136,6 +140,8 @@ export const customers = pgTable("customers", {
   city: varchar("city", { length: 100 }),
   country: varchar("country", { length: 100 }),
   dhlPostNumber: varchar("dhl_post_number", { length: 20 }), // DHL-Postnummer für Packstation
+  // Current customer preference. Each order additionally stores its own immutable snapshot.
+  communicationLanguage: varchar("communication_language", { length: 2 }).notNull().default("de"),
 
   // CRM fields
   tags: text("tags"), // JSON array of tags, e.g. ["VIP", "Stammkunde", "B2B"]
@@ -158,6 +164,48 @@ export const customers = pgTable("customers", {
 
 export type Customer = typeof customers.$inferSelect;
 export type InsertCustomer = typeof customers.$inferInsert;
+
+/**
+ * Immutable history of a customer-confirmed checkout change. The canonical
+ * customer profile may move forward, but the old and submitted snapshots stay
+ * visible forever and the historical order itself is never rewritten.
+ */
+export const customerDataChangeEvents = pgTable("customer_data_change_events", {
+  id: serial("id").primaryKey(),
+  customerId: integer("customer_id").notNull(),
+  orderId: varchar("order_id", { length: 32 }).notNull(),
+  matchMethod: varchar("match_method", { length: 24 }).notNull(),
+  previousSnapshotJson: text("previous_snapshot_json").notNull(),
+  submittedSnapshotJson: text("submitted_snapshot_json").notNull(),
+  changedFieldsJson: text("changed_fields_json").notNull(),
+  customerConfirmedAt: timestamp("customer_confirmed_at").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (t) => ({
+  customerCreatedIdx: index("customer_data_change_events_customer_idx").on(t.customerId, t.createdAt),
+  orderCreatedIdx: index("customer_data_change_events_order_idx").on(t.orderId, t.createdAt),
+}));
+
+export type CustomerDataChangeEvent = typeof customerDataChangeEvents.$inferSelect;
+
+/**
+ * Explicit, contact-identifier-based order blocks. This stays separate from a
+ * customer record so a name, tag or address can never accidentally reject an
+ * unrelated checkout.
+ */
+export const customerOrderBlocks = pgTable("customer_order_blocks", {
+  id: serial("id").primaryKey(),
+  customerId: integer("customer_id").notNull().references(() => customers.id),
+  status: varchar("status", { length: 16 }).notNull().default("active"),
+  reason: text("reason").notNull(),
+  emailNormalized: varchar("email_normalized", { length: 320 }),
+  phoneNormalized: varchar("phone_normalized", { length: 32 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  createdBy: varchar("created_by", { length: 100 }).notNull(),
+  revokedAt: timestamp("revoked_at"),
+  revokedBy: varchar("revoked_by", { length: 100 }),
+});
+
+export type CustomerOrderBlock = typeof customerOrderBlocks.$inferSelect;
 
 /**
  * Customer dossier – configurable tag library plus immutable issue history.
@@ -287,6 +335,11 @@ export const customerCommunications = pgTable("customer_communications", {
   deliveryStatus: varchar("delivery_status", { length: 32 }),
   deliveryStatusAt: timestamp("delivery_status_at"),
   errorMessage: text("error_message"),
+  // Resolution metadata preserves the failed historical message while
+  // suppressing duplicate alerts from later provider retries after correction.
+  deliveryIssueResolvedAt: timestamp("delivery_issue_resolved_at"),
+  deliveryIssueResolution: varchar("delivery_issue_resolution", { length: 500 }),
+  deliveryIssueResolvedBy: varchar("delivery_issue_resolved_by", { length: 100 }),
   idempotencyKey: varchar("idempotency_key", { length: 200 }),
   direction: varchar("direction", { length: 16 }).default("outbound").notNull(),
   source: varchar("source", { length: 32 }).default("manual").notNull(),
@@ -409,6 +462,7 @@ export type InsertEmailCampaign = typeof emailCampaigns.$inferInsert;
 export const orders = pgTable("orders", {
   id: serial("id").primaryKey(),
   orderId: varchar("order_id", { length: 32 }).notNull().unique(),
+  orderOrigin: varchar("order_origin", { length: 32 }),
   // Additive storefront metadata. Existing 369 orders retain the default and NULL values.
   storeKey: varchar("store_key", { length: 32 }).notNull().default("369research"),
   externalOrderReference: varchar("external_order_reference", { length: 32 }),
@@ -425,6 +479,8 @@ export const orders = pgTable("orders", {
   city: varchar("city", { length: 100 }).notNull(),
   country: varchar("country", { length: 100 }).notNull(),
   company: varchar("company", { length: 200 }),
+  // Immutable communication-language snapshot used for all automatic order messages.
+  communicationLanguage: varchar("communication_language", { length: 2 }).notNull().default("de"),
 
   // Delivery type: 'home' (default) or 'packstation'
   deliveryType: varchar("delivery_type", { length: 20 }).notNull().default("home"),
@@ -471,10 +527,23 @@ export const orders = pgTable("orders", {
   weightGrams: integer("weight_grams"),
 
   // Partner / Affiliate
+  partnerSourceId: integer("partner_source_id"),
+  // Exact public-code row used for this order. The text and financial snapshots
+  // remain alongside it so later code edits cannot change historical evidence.
+  partnerCodeIdSnapshot: integer("partner_code_id_snapshot"),
   partnerCode: varchar("partner_code", { length: 50 }),
   partnerNumber: varchar("partner_number", { length: 50 }),
   partnerDiscount: decimal("partner_discount", { precision: 10, scale: 2 }).default("0"),
   partnerCommission: decimal("partner_commission", { precision: 10, scale: 2 }).default("0"),
+  // Immutable program terms for each new partner-attributed order. Existing orders
+  // deliberately remain NULL and continue on their historical settlement path.
+  partnerProgramSnapshot: varchar("partner_program_snapshot", { length: 32 }),
+  partnerSettlementMethodSnapshot: varchar("partner_settlement_method_snapshot", { length: 24 }),
+  partnerCommissionPolicySnapshot: varchar("partner_commission_policy_snapshot", { length: 40 }),
+  partnerCustomerDiscountPolicySnapshot: varchar("partner_customer_discount_policy_snapshot", { length: 40 }),
+  partnerCommissionPercentSnapshot: decimal("partner_commission_percent_snapshot", { precision: 6, scale: 2 }),
+  partnerCustomerDiscountPercentSnapshot: decimal("partner_customer_discount_percent_snapshot", { precision: 6, scale: 2 }),
+  partnerCommissionBaseSnapshot: decimal("partner_commission_base_snapshot", { precision: 10, scale: 2 }),
   creditUsed: decimal("credit_used", { precision: 10, scale: 2 }).default("0"),
   kwkCreditUsed: decimal("kwk_credit_used", { precision: 10, scale: 2 }).default("0"),
   kwkCreditRequested: decimal("kwk_credit_requested", { precision: 10, scale: 2 }).default("0"),
@@ -517,6 +586,23 @@ export type Order = typeof orders.$inferSelect;
 export type InsertOrder = typeof orders.$inferInsert;
 
 /**
+ * Immutable packing-photo evidence. The original order photo columns remain as
+ * a backwards-compatible pointer; this table preserves every later retake.
+ */
+export const packingPhotoHistory = pgTable("packing_photo_history", {
+  id: serial("id").primaryKey(),
+  orderId: varchar("order_id", { length: 32 }).notNull(),
+  photoData: text("photo_data").notNull(),
+  photoAt: timestamp("photo_at").defaultNow().notNull(),
+  source: varchar("source", { length: 16 }).notNull().default("retake"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (t) => ({
+  orderCreatedIdx: index("packing_photo_history_order_created_idx").on(t.orderId, t.createdAt),
+}));
+export type PackingPhotoHistory = typeof packingPhotoHistory.$inferSelect;
+export type InsertPackingPhotoHistory = typeof packingPhotoHistory.$inferInsert;
+
+/**
  * Order items – individual line items per order
  */
 export const orderItems = pgTable("order_items", {
@@ -540,7 +626,9 @@ export const orderItems = pgTable("order_items", {
   isPlugPlay: boolean("is_plug_play").notNull().default(false),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+}, (t) => ({
+  orderIdIdx: index("order_items_order_id_idx").on(t.orderId),
+}));
 
 export type OrderItem = typeof orderItems.$inferSelect;
 export type InsertOrderItem = typeof orderItems.$inferInsert;
@@ -579,6 +667,10 @@ export const partners = pgTable("partners", {
   // Commission type: einmalig = one-time cash payout, dauerhaft = ongoing shop credit
   commissionType: commissionTypeEnum("commission_type").default("dauerhaft").notNull(),
 
+  // Program policies are data-driven in partner_programs; commissionType is kept
+  // solely as a legacy compatibility field for historical records.
+  programKey: varchar("program_key", { length: 32 }).notNull().default("partner"),
+
   // Partner login credentials
   passwordHash: text("password_hash"),
   lastLogin: timestamp("last_login"),
@@ -600,6 +692,63 @@ export const partners = pgTable("partners", {
 
 export type Partner = typeof partners.$inferSelect;
 export type InsertPartner = typeof partners.$inferInsert;
+
+/** Data-driven financial terms for Creator, Partner and Eigennutzer programs. */
+export const partnerPrograms = pgTable("partner_programs", {
+  key: varchar("key", { length: 32 }).primaryKey(),
+  label: varchar("label", { length: 80 }).notNull(),
+  customerDiscountPolicy: varchar("customer_discount_policy", { length: 40 }).notNull(),
+  commissionPolicy: varchar("commission_policy", { length: 40 }).notNull(),
+  settlementMethod: varchar("settlement_method", { length: 24 }).notNull(),
+  allowSelfOrderCredit: boolean("allow_self_order_credit").notNull().default(false),
+  active: boolean("active").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+/** Individual public codes with independently configurable commercial terms. */
+export const partnerCodes = pgTable("partner_codes", {
+  id: serial("id").primaryKey(),
+  partnerId: integer("partner_id").notNull(),
+  displayCode: varchar("display_code", { length: 50 }).notNull(),
+  codeNormalized: varchar("code_normalized", { length: 50 }).notNull().unique(),
+  commissionPercent: decimal("commission_percent", { precision: 6, scale: 2 }).notNull(),
+  customerDiscountPercent: decimal("customer_discount_percent", { precision: 6, scale: 2 }).notNull(),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+/**
+ * Partner address requests – partner-submitted delivery-address changes.
+ * Requests are auditable and require an explicit admin review before the
+ * canonical partner delivery address is changed.
+ */
+export const partnerAddressRequests = pgTable("partner_address_requests", {
+  id: serial("id").primaryKey(),
+  partnerId: integer("partner_id").notNull(),
+  partnerNameSnapshot: varchar("partner_name_snapshot", { length: 200 }).notNull(),
+  partnerNumberSnapshot: varchar("partner_number_snapshot", { length: 50 }).notNull(),
+  partnerEmailSnapshot: varchar("partner_email_snapshot", { length: 320 }),
+  currentAddressJson: text("current_address_json").notNull().default("{}"),
+  requestedAddressJson: text("requested_address_json").notNull(),
+  requestFingerprint: varchar("request_fingerprint", { length: 128 }).notNull(),
+  status: varchar("status", { length: 24 }).notNull().default("open"),
+  notificationStatus: varchar("notification_status", { length: 24 }).notNull().default("pending"),
+  notificationError: text("notification_error"),
+  notificationSentAt: timestamp("notification_sent_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  reviewedAt: timestamp("reviewed_at"),
+  reviewedBy: varchar("reviewed_by", { length: 100 }),
+  reviewNote: text("review_note"),
+}, (t) => ({
+  partnerStatusIdx: index("partner_address_requests_partner_status_idx").on(t.partnerId, t.status, t.createdAt),
+  statusCreatedIdx: index("partner_address_requests_status_created_idx").on(t.status, t.createdAt),
+}));
+
+export type PartnerAddressRequest = typeof partnerAddressRequests.$inferSelect;
+export type InsertPartnerAddressRequest = typeof partnerAddressRequests.$inferInsert;
 
 /**
  * Partner transactions – tracks all credit movements
@@ -685,6 +834,9 @@ export const promoCodes = pgTable("promo_codes", {
   // Validity period
   validFrom: timestamp("valid_from"),
   validUntil: timestamp("valid_until"),
+  // A follow-up code has a minute-exact validity window from customer contact.
+  // Manually managed WaWi promo codes keep their existing end-of-day semantics.
+  validUntilExact: integer("valid_until_exact").notNull().default(0),
   
   // Status
   isActive: integer("is_active").default(1).notNull(),
@@ -697,6 +849,52 @@ export const promoCodes = pgTable("promo_codes", {
 
 export type PromoCode = typeof promoCodes.$inferSelect;
 export type InsertPromoCode = typeof promoCodes.$inferInsert;
+
+/**
+ * A personal action code remains a regular promo code with its existing
+ * commercial terms. This separate, additive assignment records its origin in
+ * the WaWi only; redemption is never bound to customer contact data.
+ */
+export const customerPromoAssignments = pgTable("customer_promo_assignments", {
+  id: serial("id").primaryKey(),
+  promoCodeId: integer("promo_code_id").notNull().unique().references(() => promoCodes.id),
+  customerId: integer("customer_id").notNull().references(() => customers.id),
+  originOrderId: varchar("origin_order_id", { length: 32 }).notNull().references(() => orders.orderId),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  createdBy: varchar("created_by", { length: 100 }).notNull(),
+}, (t) => ({
+  customerCreatedIdx: index("customer_promo_assignments_customer_idx").on(t.customerId, t.createdAt),
+  originOrderCreatedIdx: index("customer_promo_assignments_origin_order_idx").on(t.originOrderId, t.createdAt),
+}));
+export type CustomerPromoAssignment = typeof customerPromoAssignments.$inferSelect;
+export type InsertCustomerPromoAssignment = typeof customerPromoAssignments.$inferInsert;
+
+/**
+ * Internal WaWi reminders for codes issued directly from an order. This is
+ * intentionally separate from sales_followups: an order can retain its normal
+ * cross-sell follow-up while a code-expiry reminder remains independently due.
+ */
+export const personalPromoExpiryReminders = pgTable("personal_promo_expiry_reminders", {
+  id: serial("id").primaryKey(),
+  promoCodeId: integer("promo_code_id").notNull().unique().references(() => promoCodes.id),
+  customerId: integer("customer_id").notNull().references(() => customers.id),
+  originOrderId: varchar("origin_order_id", { length: 32 }).notNull().references(() => orders.orderId),
+  code: varchar("code", { length: 50 }).notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  dueAt: timestamp("due_at").notNull(),
+  status: varchar("status", { length: 16 }).notNull().default("pending"),
+  completedAt: timestamp("completed_at"),
+  skippedAt: timestamp("skipped_at"),
+  completedBy: varchar("completed_by", { length: 100 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (t) => ({
+  statusDueIdx: index("personal_promo_expiry_reminders_status_due_idx").on(t.status, t.dueAt),
+  customerCreatedIdx: index("personal_promo_expiry_reminders_customer_idx").on(t.customerId, t.createdAt),
+  orderCreatedIdx: index("personal_promo_expiry_reminders_order_idx").on(t.originOrderId, t.createdAt),
+}));
+export type PersonalPromoExpiryReminder = typeof personalPromoExpiryReminders.$inferSelect;
+export type InsertPersonalPromoExpiryReminder = typeof personalPromoExpiryReminders.$inferInsert;
 
 /**
  * Partner code usage – tracks which emails have used a partner code
@@ -927,6 +1125,9 @@ export const salesFollowups = pgTable("sales_followups", {
   // Individual promo code (AGAIN-[ORDERNR]-[4CHARS])
   promoCodeId: integer("promo_code_id"),
   discountCode: varchar("discount_code", { length: 50 }),
+  // Offer terms are selected per follow-up and become immutable when its code is first created.
+  discountPercent: decimal("discount_percent", { precision: 5, scale: 2 }).notNull().default("10"),
+  codeValidityHours: integer("code_validity_hours").notNull().default(48),
   codeCreatedAt: timestamp("code_created_at"),
   codeExpiresAt: timestamp("code_expires_at"),
   messageGeneratedAt: timestamp("message_generated_at"),
@@ -948,6 +1149,11 @@ export const salesFollowupProducts = pgTable("sales_followup_products", {
   id: serial("id").primaryKey(),
   followupId: integer("followup_id").notNull(), // FK to salesFollowups.id
   articleId: integer("article_id").notNull(),   // FK to articles.id
+  // Exact copy used in the customer-facing follow-up. Kept as a snapshot so
+  // later catalogue edits cannot change an already generated offer.
+  generatedCopy: text("generated_copy"),
+  generatedCopySource: varchar("generated_copy_source", { length: 20 }),
+  generatedCopyGeneratedAt: timestamp("generated_copy_generated_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 export type SalesFollowupProduct = typeof salesFollowupProducts.$inferSelect;

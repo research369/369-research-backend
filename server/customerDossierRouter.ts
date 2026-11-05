@@ -2,7 +2,8 @@ import { asc, desc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { router, adminProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
-import { customerIssueCases, customerTagDefinitions, customers, orders, shopSettings } from "../drizzle/schema.js";
+import { customerDataChangeEvents, customerIssueCases, customerTagDefinitions, customers, orders, shopSettings } from "../drizzle/schema.js";
+import { isCompletedCommercialOrder } from "./commercialOrderMetrics.js";
 
 const issueStatus = z.enum(["open", "in_progress", "resolved", "archived"]);
 const issueSeverity = z.enum(["low", "normal", "high", "critical"]);
@@ -22,6 +23,23 @@ function uniqueTags(tags: string[]) {
   return Array.from(new Set(tags.map((tag) => tag.trim()).filter(Boolean)));
 }
 
+function parseJsonObject(value: string): Record<string, string> {
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return Object.fromEntries(Object.entries(parsed).map(([key, field]) => [key, String(field ?? "")]));
+    }
+  } catch { /* A malformed legacy row remains visible as an empty snapshot. */ }
+  return {};
+}
+
+function parseJsonFields(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.map((field) => String(field)).filter(Boolean) : [];
+  } catch { return []; }
+}
+
 function actor(ctx: { user?: { name?: string | null; username?: string | null } }) {
   return ctx.user?.name || ctx.user?.username || "admin";
 }
@@ -35,8 +53,6 @@ export function deriveCustomerStatus(paidOrderCount: number, totalSpent: number,
   if (paidOrderCount === 1) return { key: "erstbesteller", label: "Erstbesteller", color: "sky" };
   return { key: "neukunde", label: "Neukunde", color: "slate" };
 }
-
-const PAID_STATUSES = new Set(["bezahlt", "gepackt", "versendet", "zugestellt"]);
 
 export const customerDossierRouter = router({
   tagDefinitions: adminProcedure.input(z.object({ activeOnly: z.boolean().optional().default(true) }).optional()).query(async ({ input }) => {
@@ -74,11 +90,12 @@ export const customerDossierRouter = router({
     const [customer] = await db.select().from(customers).where(eq(customers.id, input.customerId)).limit(1);
     if (!customer) throw new Error("Kunde nicht gefunden");
 
-    const [definitions, allOrders, allCases, settings] = await Promise.all([
+    const [definitions, allOrders, allCases, settings, dataChangeEvents] = await Promise.all([
       db.select().from(customerTagDefinitions).orderBy(asc(customerTagDefinitions.sortOrder), asc(customerTagDefinitions.label)),
       db.select().from(orders).where(eq(orders.customerId, customer.id)).orderBy(desc(orders.orderDate)),
       db.select().from(customerIssueCases).where(eq(customerIssueCases.customerId, customer.id)).orderBy(desc(customerIssueCases.occurredAt)),
       db.select().from(shopSettings).where(inArray(shopSettings.key, ["customer_dossier_issue_categories"])),
+      db.select().from(customerDataChangeEvents).where(eq(customerDataChangeEvents.customerId, customer.id)).orderBy(desc(customerDataChangeEvents.createdAt)).limit(50),
     ]);
     const rawTags = parseTags(customer.tags);
     const categoriesSetting = settings.find((item) => item.key === "customer_dossier_issue_categories")?.value;
@@ -93,7 +110,7 @@ export const customerDossierRouter = router({
       const definition = definitionsByKey.get(key) || definitions.find((row) => row.label.toLocaleLowerCase("de-DE") === tag.toLocaleLowerCase("de-DE"));
       return { key: definition?.tagKey || key, label: definition?.label || tag, color: definition?.color || "slate" };
     });
-    const paidOrders = allOrders.filter((order) => PAID_STATUSES.has(order.status));
+    const paidOrders = allOrders.filter(isCompletedCommercialOrder);
     const totalSpent = paidOrders.reduce((sum, order) => sum + Number(order.total || 0), 0);
     const status = deriveCustomerStatus(paidOrders.length, totalSpent, rawTags);
     const openCases = allCases.filter((item) => item.status === "open" || item.status === "in_progress");
@@ -110,6 +127,17 @@ export const customerDossierRouter = router({
       status, tags, tagDefinitions: definitions.filter((row) => row.isActive === 1), issueCategories,
       metrics: { paidOrders: paidOrders.length, totalSpent, lastOrderAt: allOrders[0]?.orderDate || null },
       openCases: openCases.map(toCaseDto), recentCases: allCases.slice(0, 20).map(toCaseDto),
+      dataChanges: dataChangeEvents.map((event) => ({
+        id: event.id,
+        customerId: event.customerId,
+        orderId: event.orderId,
+        matchMethod: event.matchMethod,
+        previousSnapshot: parseJsonObject(event.previousSnapshotJson),
+        submittedSnapshot: parseJsonObject(event.submittedSnapshotJson),
+        changedFields: parseJsonFields(event.changedFieldsJson),
+        customerConfirmedAt: event.customerConfirmedAt,
+        createdAt: event.createdAt,
+      })),
     };
   }),
 

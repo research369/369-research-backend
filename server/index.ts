@@ -1,3 +1,4 @@
+import {customerCreationActivity} from './customerCreationMaintenance.js';
 // Zeitzone auf Deutschland setzen (muss vor allen anderen Imports stehen)
 process.env.TZ = "Europe/Berlin";
 
@@ -13,11 +14,13 @@ import { ENV } from "./env.js";
 import { appRouter } from "./routers.js";
 import { getUserFromRequest, handleLogin, handleLogout, handleMe, seedAdminUser } from "./auth.js";
 import { getPool } from "./db.js";
+import { checkDatabaseReadiness, softwareReleaseCheck, serverSoftwareReleaseCheck } from "./databaseReadiness.js";
 import type { Context } from "./trpc.js";
 import { startBackupScheduler } from "./backupService.js";
+import { reconcilePaidKwkCredits } from "./kwkCreditReconciliation.js";
 import { dhlExpressRouter } from "./dhlExpressRouter.js";
 import { trackingRouter } from "./trackingRouter.js";
-import { checkoutErrorRouter } from "./checkoutErrorRouter.js";
+import { checkoutErrorRouter, ensureCheckoutFailureSchema } from "./checkoutErrorRouter.js";
 import { packingPhotoRouter } from "./packingPhotoRouter.js";
 import { resendWebhookRouter } from "./resendWebhookRouter.js";
 import { ensureCrmCommunicationSchema } from "./crmCommunicationSchema.js";
@@ -29,10 +32,41 @@ import { ensureAddressValidationSchema } from "./addressValidationSchema.js";
 import { ensureCustomerDossierSchema } from "./customerDossierSchema.js";
 import { ensureQrCampaignSchema } from "./qrCampaignSchema.js";
 import { ensureDiscountProvenanceSchema } from "./discountProvenanceSchema.js";
+import { ensureShipmentLabelOverrideConfig } from "./shipmentLabelOverrideConfig.js";
+import { ensurePartnerAddressRequestSchema } from "./partnerAddressRequestSchema.js";
+import { ensurePartnerProgramSchema } from "./partnerProgramSchema.js";
+import { ensureFollowUpTermsSchema } from "./followUpTermsSchema.js";
 import { qrRedirectRouter } from "./qrRedirectRouter.js";
 import { ensurePeps4petsCheckoutSchema, isPeps4petsCheckoutSchemaReady } from "./peps4petsCheckoutSchema.js";
+import { ensureGoodieSchema } from "./goodieSchema.js";
+import { ensureCustomerOrderBlockSchema } from "./customerOrderBlockService.js";
+import { ensureCustomerPromoAssignmentSchema } from "./customerPromoAssignmentService.js";
+import { ensurePersonalPromoExpiryReminderSchema, syncPersonalPromoExpiryReminders } from "./personalPromoExpiryReminderService.js";
+import { ensureCustomerDataChangeSchema } from "./customerDataChangeService.js";
+import { ensureCommunicationLanguageSchema } from "./communicationLanguageService.js";
+import { ensureWawiPerformanceIndexes } from "./wawiPerformanceSchema.js";
+import { ensureSwissCustomsSchema } from "./swissCustomsSchema.js";
+import { ensureOrderCommunicationPhoneSchema } from "./orderCommunicationPhoneService.js";
+import { ensureKwkDemoSchema } from "./kwkDemoService.js";
+import { ensureAdminChangeLogSchema } from "./adminChangeLogService.js";
+
+import {jarvyOrderRouter} from "./jarvyOrderRouter.js";
+import { jarvyReadRouter } from "./jarvyReadRouter.js";
+import {guardianInventoryRouter} from './guardianInventoryRouter.js';
+import {pepgptOffersRouter} from './pepgptOffersRouter.js';
+import {operationsRouter} from './operationsRouter.js';
 
 const app = express();
+app.get('/_internal/customer-creation-activity',(req,res)=>{
+ if(!['127.0.0.1','::1','::ffff:127.0.0.1'].includes(req.socket.remoteAddress||'')){res.sendStatus(404);return;}
+ res.set('Cache-Control','no-store').json(customerCreationActivity());
+});
+
+// Railway must be able to observe a live process while the application performs
+// its additive schema checks. Operational routes stay unavailable until the
+// initialization sequence has completed successfully.
+let startupState: "initializing" | "ready" | "failed" = "initializing";
+const startupStartedAt = Date.now();
 
 // CORS – allow frontend domains
 const allowedOrigins = [
@@ -53,24 +87,82 @@ app.use(cors({
 // Resend signs the original raw request body. The webhook must therefore be mounted
 // before the global JSON parser, otherwise its signature could not be verified safely.
 app.use("/api/webhooks/resend", express.raw({ type: "application/json", limit: "1mb" }));
-app.use(resendWebhookRouter);
 
 app.use(express.json({ limit: "50mb" }));
 
-// Health check
+// Liveness: Der Prozess ist erreichbar. Railway uses this lightweight endpoint
+// while additive database setup is running. Business routes are still guarded
+// below until `/health/ready` returns ready.
 app.get("/health", (_req, res) => {
   res.json({
     status: "ok",
+    startup: startupState,
+    uptimeMs: Date.now() - startupStartedAt,
     timestamp: new Date().toISOString(),
     version: "1.2.0-kwk",
+    releaseCheck: softwareReleaseCheck,
+    serverReleaseCheck: serverSoftwareReleaseCheck,
     fix: "paid-status-filter",
     peps4petsCheckoutSchema: isPeps4petsCheckoutSchemaReady() ? "ready" : "pending",
   });
 });
 
+// Readiness: keine Fachroute wird freigegeben, bevor die additive
+// Initialisierung und die produktive Datenquelle tatsächlich bereit sind.
+// Keine Daten werden geschrieben oder verändert.
+app.get("/health/ready", async (_req, res) => {
+  if (startupState !== "ready") {
+    return res.status(503).json({
+      status: "unavailable",
+      startup: startupState,
+      database: "initializing",
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  const database = await checkDatabaseReadiness();
+  if (!database.ready) {
+    return res.status(503).json({
+      status: "unavailable",
+      database: "unavailable",
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  return res.json({
+    status: "ok",
+    database: "ready",
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// All business routes remain unavailable until initialization completes. The
+// liveness and readiness routes above deliberately stay reachable for Railway.
+app.use((_req, res, next) => {
+  if (startupState === "ready") {
+    next();
+    return;
+  }
+
+  res.status(503).json({
+    error: "Der Server wird vorbereitet. Bitte kurz erneut versuchen.",
+    startup: startupState,
+  });
+});
+
+// The raw body parser above remains before the JSON parser, while handling the
+// provider event itself waits for the same ready gate as all other business routes.
+app.use(resendWebhookRouter);
+
 // First-party marketing QR redirects. Only `/r/*` is mounted here; `/i/*` remains
 // reserved for the prepared individual product/serial URLs.
 app.use(qrRedirectRouter);
+
+app.use("/api/jarvy-read", jarvyReadRouter);
+app.use('/api/guardian', guardianInventoryRouter);
+app.use('/api/pepgpt-read', pepgptOffersRouter);
+app.use('/api/operations', operationsRouter);
+app.use("/api/jarvy-orders", jarvyOrderRouter);
 
 // Manueller Backup-Trigger (gesichert mit WAWI_INTERNAL_KEY)
 app.post("/api/backup/trigger", async (req: any, res: any) => {
@@ -206,6 +298,15 @@ async function start() {
     console.warn("[Server] CRM communication schema migration failed:", err);
   }
 
+  // Checkout-Ausfälle werden separat und ohne Änderung operativer Aufträge
+  // archiviert. Der Alarmzustand verhindert doppelte Betreibermails bei
+  // wiederholten Browserübermittlungen derselben Fehlerreferenz.
+  try {
+    await ensureCheckoutFailureSchema();
+  } catch (err) {
+    console.warn("[Server] Checkout failure schema migration failed:", err);
+  }
+
   // Additive customer-integrity migration. Reviews are now event-driven only:
   // newly created or identity-relevant changed records are checked, never the full base each day.
   try {
@@ -221,6 +322,14 @@ async function start() {
     await ensureCommunicationTemplateSchema();
   } catch (err) {
     console.warn("[Server] Communication template schema migration failed:", err);
+  }
+
+  // Der Administratorverlauf ist rein additiv und protokolliert nie Inhalte
+  // oder Kontaktdaten; sein Ausfall darf keinen operativen Prozess blockieren.
+  try {
+    await ensureAdminChangeLogSchema();
+  } catch (err) {
+    console.warn("[Server] Admin change-log schema migration failed:", err);
   }
 
   // DIY-Nasenspray-Set: persistente Bestellkennzeichnung und zentrale Set-Konfiguration.
@@ -244,6 +353,108 @@ async function start() {
     console.warn("[Server] Customer dossier schema migration failed:", err);
   }
 
+  // Explizite Kundensperren sind strikt kontaktbasiert (E-Mail/Telefon), nie
+  // namens- oder tagbasiert. Die Prüfung läuft vor jeder Bestellpersistenz.
+  try {
+    await ensureCustomerOrderBlockSchema();
+  } catch (err) {
+    console.warn("[Server] Customer order-block schema migration failed:", err);
+  }
+
+  // Bestätigte Checkout-Datenänderungen bleiben als additive, unveränderliche
+  // Historie erhalten; weder alte Bestellungen noch fremde Kundenakten werden
+  // dadurch überschrieben.
+  try {
+    await ensureCustomerDataChangeSchema();
+  } catch (err) {
+    console.warn("[Server] Customer data-change schema migration failed:", err);
+  }
+
+  // Automatic customer messages use only the explicitly selected DE/EN language.
+  // Historic records remain on the safe German default.
+  try {
+    await ensureCommunicationLanguageSchema();
+  } catch (err) {
+    console.warn("[Server] Communication-language schema migration failed:", err);
+  }
+
+  // DHL Paket Schweiz: auftragsbezogene Zolldaten bleiben getrennt von
+  // Artikelstammdaten, damit kein HS-Code, Ursprung oder Gewicht geraten wird.
+  try {
+    await ensureSwissCustomsSchema();
+    console.log("[Server] Swiss customs declaration schema ready");
+  } catch (err) {
+    console.warn("[Server] Swiss customs declaration schema migration failed:", err);
+  }
+
+  // Persönliche Aktionscodes sind separat und nur bei einer bewussten
+  // Bestellausgabe aktiv; allgemeine Aktionscodes bleiben unverändert.
+  try {
+    await ensureCustomerPromoAssignmentSchema();
+  } catch (err) {
+    console.warn("[Server] Customer promo-assignment schema migration failed:", err);
+  }
+
+  // Eine korrigierte WhatsApp-Nummer bleibt ausschließlich am jeweiligen Auftrag
+  // und ändert weder Kundenstamm noch Liefer-/Rechnungssnapshot.
+  try {
+    await ensureOrderCommunicationPhoneSchema();
+    console.log("[Server] Order communication phone override schema ready");
+  } catch (err) {
+    console.warn("[Server] Order communication phone override schema migration failed:", err);
+  }
+
+  // KWK-Schauzugang: vollständig getrennte Vorführdaten ohne Zugriff auf
+  // Orders, Kunden, Zahlungen, Abrechnung, Versand oder produktives Guthaben.
+  try {
+    await ensureKwkDemoSchema();
+    console.log("[Server] KWK demo schema ready");
+  } catch (err) {
+    console.warn("[Server] KWK demo schema migration failed:", err);
+  }
+
+  // Persönliche Bestellcodes erhalten ausschließlich intern eine Erinnerung,
+  // sobald ihre Gültigkeit in zehn Tagen endet. Es wird nichts an Kunden gesendet.
+  try {
+    await ensurePersonalPromoExpiryReminderSchema();
+    const created = await syncPersonalPromoExpiryReminders();
+    console.log(`[Server] Personal promo expiry reminders ready${created ? ` (${created} backfilled)` : ""}`);
+  } catch (err) {
+    console.warn("[Server] Personal promo expiry-reminder schema migration failed:", err);
+  }
+
+  // Goodies: additive inventory catalog and immutable packing assignments.
+  // Checkout reward selection remains disabled until explicitly configured and tested.
+  try {
+    await ensureGoodieSchema();
+  } catch (err) {
+    console.warn("[Server] Goodie schema migration failed:", err);
+  }
+
+  // Partnerportal: revisionssichere Adressanträge mit WaWi-Prüfung.
+  try {
+    await ensurePartnerAddressRequestSchema();
+  } catch (err) {
+    console.warn("[Server] Partner address request schema migration failed:", err);
+  }
+
+  // Creator, Partner und Eigennutzer sind programmorientiert konfiguriert.
+  // Jede neue Partnerbestellung speichert ihre Bedingungen als unveränderlichen Snapshot.
+  try {
+    await ensurePartnerProgramSchema();
+    console.log("[Server] Partner program schema ready");
+  } catch (err) {
+    console.warn("[Server] Partner program schema migration failed:", err);
+  }
+
+  // Follow-up-Angebote erhalten vor dem Versand eigene, revisionssichere Konditionen.
+  try {
+    await ensureFollowUpTermsSchema();
+    console.log("[Server] Follow-up offer terms schema ready");
+  } catch (err) {
+    console.warn("[Server] Follow-up offer terms schema migration failed:", err);
+  }
+
   // Additive first-party QR campaign and order-attribution schema.
   try {
     await ensureQrCampaignSchema();
@@ -261,10 +472,26 @@ async function start() {
   // Peps4pets: isolated storefront metadata, a separate visible reference and
   // evidence-bound retry protection. Existing 369 order contracts stay unchanged.
   try {
+    await ensureShipmentLabelOverrideConfig();
+    console.log("[Packing] Manuelle DHL-Label-Override-Konfiguration bereit");
+  } catch (err) {
+    console.error("[Packing] Label-Override-Konfiguration fehlgeschlagen:", err);
+  }
+
+  try {
     await ensurePeps4petsCheckoutSchema();
     console.log("[Server] Peps4pets checkout schema ready");
   } catch (err) {
     console.warn("[Server] Peps4pets checkout schema migration failed:", err);
+  }
+
+  // Additive, lock-bounded indexes speed up dashboard reads without changing
+  // stock, order or checkout records. A short lock timeout protects operations.
+  try {
+    await ensureWawiPerformanceIndexes();
+    console.log("[Server] WaWi performance indexes ready");
+  } catch (err) {
+    console.warn("[Server] WaWi performance indexes skipped:", err);
   }
 
   // Seed admin user on first start
@@ -476,6 +703,15 @@ async function start() {
           ADD COLUMN IF NOT EXISTS message_generated_at TIMESTAMP,
           ADD COLUMN IF NOT EXISTS whatsapp_opened_at TIMESTAMP,
           ADD COLUMN IF NOT EXISTS reminder_stage INTEGER NOT NULL DEFAULT 1;
+
+        ALTER TABLE sales_followup_products
+          ADD COLUMN IF NOT EXISTS generated_copy TEXT,
+          ADD COLUMN IF NOT EXISTS generated_copy_source VARCHAR(20),
+          ADD COLUMN IF NOT EXISTS generated_copy_generated_at TIMESTAMP;
+
+        CREATE INDEX IF NOT EXISTS idx_sales_followup_products_generated_copy
+          ON sales_followup_products(followup_id)
+          WHERE generated_copy IS NOT NULL;
       `);
       console.log("[Server] Follow-up tables ready (incl. code fields v2)");
     }
@@ -497,101 +733,9 @@ async function start() {
     console.warn("[Server] Failed to add follow_up_category to articles:", err);
   }
 
-  // FEHLER-019 Fix: Backfill customers from orders (one-time, idempotent)
-  // Creates customer records for orders that predate the customers table
-  try {
-    const pool = await getPool();
-    if (pool) {
-      const PLACEHOLDER_EMAILS = new Set([
-        'keine@angabe.de', 'noemail@noemail.de', 'no@email.de', 'noreply@noreply.de',
-        'placeholder@placeholder.de', 'test@test.de', 'info@info.de', 'otc@369research.eu',
-      ]);
-      const normalizePhone = (p: string) => (p || '').replace(/[\s\-\.\(\)]/g, '');
-
-      // Get all existing customers
-      const custRes = await pool.query('SELECT id, email, phone FROM customers');
-      const existingEmails = new Set<string>();
-      const existingPhones = new Set<string>();
-      for (const c of custRes.rows) {
-        if (c.email) {
-          const k = c.email.toLowerCase().trim();
-          if (!PLACEHOLDER_EMAILS.has(k)) existingEmails.add(k);
-        }
-        if (c.phone) {
-          const k = normalizePhone(c.phone);
-          if (k.length >= 8) existingPhones.add(k);
-        }
-      }
-
-      // Get all orders without a customer_id
-      const ordersRes = await pool.query(
-        'SELECT * FROM orders WHERE customer_id IS NULL ORDER BY order_date DESC'
-      );
-
-      // Get max customer number
-      const maxRes = await pool.query(
-        "SELECT COALESCE(MAX(CAST(customer_number AS INTEGER)), 1209) as max_num FROM customers WHERE customer_number ~ '^[0-9]+$'"
-      );
-      let nextNum = Math.max(1210, parseInt(maxRes.rows[0]?.max_num || '1209') + 1);
-
-      // Group orders by identity key
-      const groups: Record<string, any[]> = {};
-      for (const o of ordersRes.rows) {
-        const emailKey = (o.email || '').toLowerCase().trim();
-        const phoneKey = normalizePhone(o.phone || '');
-        const emailUsable = emailKey && !PLACEHOLDER_EMAILS.has(emailKey);
-        const phoneUsable = phoneKey.length >= 8;
-        if (emailUsable && existingEmails.has(emailKey)) continue;
-        if (!emailUsable && phoneUsable && existingPhones.has(phoneKey)) continue;
-        const gk = emailUsable ? `e:${emailKey}` : (phoneUsable ? `p:${phoneKey}` : `o:${o.order_id}`);
-        if (!groups[gk]) groups[gk] = [];
-        groups[gk].push(o);
-      }
-
-      let created = 0;
-      for (const [, grpOrders] of Object.entries(groups)) {
-        const o = grpOrders[0];
-        const firstName = o.first_name || '';
-        const lastName = o.last_name || '';
-        const name = `${firstName} ${lastName}`.trim();
-        if (!name) continue;
-        const emailKey = (o.email || '').toLowerCase().trim();
-        const emailUsable = emailKey && !PLACEHOLDER_EMAILS.has(emailKey);
-        const totalOrders = grpOrders.length;
-        const totalSpent = grpOrders.reduce((s: number, x: any) => s + parseFloat(x.total || '0'), 0);
-        const dates = grpOrders.map((x: any) => x.order_date).filter(Boolean).sort();
-        try {
-          await pool.query(
-            `INSERT INTO customers
-              (customer_number, name, first_name, last_name, phone, email, company,
-               street, house_number, zip, city, country, source,
-               total_orders, total_spent, first_order_date, last_order_date, created_at, updated_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW(),NOW())`,
-            [
-              String(nextNum), name, firstName || null, lastName || null,
-              o.phone || null, emailUsable ? o.email : null, o.company || null,
-              o.street || null, o.house_number || null, o.zip || null,
-              o.city || null, o.country || null, 'backfill',
-              totalOrders, totalSpent.toFixed(2),
-              dates[0] || null, dates[dates.length - 1] || null,
-            ]
-          );
-          if (emailUsable) existingEmails.add(emailKey);
-          const pk = normalizePhone(o.phone || '');
-          if (pk.length >= 8) existingPhones.add(pk);
-          nextNum++;
-          created++;
-        } catch (_e) { /* skip duplicates */ }
-      }
-      if (created > 0) {
-        console.log(`[Server] FEHLER-019 Backfill: created ${created} customer records from orders`);
-      } else {
-        console.log('[Server] FEHLER-019 Backfill: no new customers needed (all already exist)');
-      }
-    }
-  } catch (err) {
-    console.warn('[Server] FEHLER-019 Backfill failed (non-fatal):', err);
-  }
+  // Historical customer backfills are intentionally not run here. They scan the
+  // full customer/order history and are available only as an explicit maintenance
+  // task in server/maintenance/legacyCustomerBackfill.ts.
 
   // Auto-migrate: DHL EU – weight_grams column for orders
   try {
@@ -1183,14 +1327,32 @@ async function start() {
     console.warn('[Server] KWK-Migration fehlgeschlagen (non-fatal):', err);
   }
 
-  app.listen(port, "0.0.0.0", () => {
-    console.log(`[Server] 369 Research Backend running on port ${port}`);
-    // Täglicher Datenbank-Backup um 03:00 Uhr UTC
-    startBackupScheduler();
-  });
 }
 
-start().catch((err) => {
-  console.error("[Server] Fatal error:", err);
-  process.exit(1);
+const server = app.listen(port, "0.0.0.0", () => {
+  console.log(`[Server] 369 Research Backend listening on port ${port}; initialization continues in the background`);
+});
+
+server.on("error", (err) => {
+  startupState = "failed";
+  console.error("[Server] HTTP listener failed:", err);
+});
+
+start().then(() => {
+  startupState = "ready";
+  console.log(`[Server] 369 Research Backend ready after ${Date.now() - startupStartedAt}ms`);
+  // The email archive scheduler is permanently disabled in backupService, so
+  // this remains a safe no-op while preserving the platform-snapshot policy.
+  startBackupScheduler();
+  // Historical KWK positions are reconciled only after the shop is ready, so
+  // they never prolong startup. The ledger operation is order-locked and
+  // idempotent; it releases only pending credits with a stored paid timestamp.
+  void reconcilePaidKwkCredits().then((result) => {
+    console.log(`[KWK] Zahlungsabgleich abgeschlossen: ${result.released} freigegeben, ${result.skipped} übersprungen, ${result.failed} Fehler`);
+  }).catch((err) => {
+    console.error("[KWK] Zahlungsabgleich fehlgeschlagen (non-fatal):", err);
+  });
+}).catch((err) => {
+  startupState = "failed";
+  console.error("[Server] Initialization failed; liveness remains available and business routes stay blocked:", err);
 });

@@ -1,0 +1,125 @@
+name: Produktionsüberwachung – Shop und Checkout-Datenquelle
+
+on:
+  schedule:
+    # GitHub Actions unterstützt als kleinsten zuverlässigen Intervall fünf Minuten.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: production-readiness-monitor
+  cancel-in-progress: false
+
+env:
+  BACKEND_URL: https://369-research-backend-production.up.railway.app
+  INCIDENT_TITLE: "[Produktionsalarm] Shop- oder Checkout-Datenquelle nicht erreichbar"
+
+jobs:
+  monitor:
+    name: Produktquelle und Datenbank prüfen
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    steps:
+      - name: Produktionsschnittstellen ausschließlich lesend prüfen
+        id: readiness
+        shell: bash
+        run: |
+          set -uo pipefail
+          failures=()
+
+          check_json_endpoint() {
+            local name="$1"
+            local url="$2"
+            local body
+            body="$(mktemp)"
+            if ! curl --fail-with-body --silent --show-error \
+              --retry 2 --retry-all-errors --connect-timeout 8 --max-time 20 \
+              "$url" -o "$body"; then
+              failures+=("${name}: HTTP-/Netzwerkfehler")
+              rm -f "$body"
+              return
+            fi
+
+            if [ "$name" = "Produktquelle" ] && ! grep -q '"shopProductId"' "$body"; then
+              failures+=("${name}: keine Shopprodukte in der Antwort")
+            fi
+            rm -f "$body"
+          }
+
+          check_json_endpoint "Datenbank-Readiness" "$BACKEND_URL/health/ready"
+          check_json_endpoint "Produktquelle" "$BACKEND_URL/api/trpc/article.shopProducts?input=%7B%22json%22%3Anull%7D"
+
+          if [ "${#failures[@]}" -gt 0 ]; then
+            printf '%s\n' "${failures[@]}" > /tmp/production-readiness-failures.txt
+            echo "state=failed" >> "$GITHUB_OUTPUT"
+            echo "details<<EOF" >> "$GITHUB_OUTPUT"
+            cat /tmp/production-readiness-failures.txt >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+          else
+            echo "state=healthy" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Sichtbaren Produktionsalarm anlegen oder aktualisieren
+        if: steps.readiness.outputs.state == 'failed'
+        uses: actions/github-script@v7
+        env:
+          INCIDENT_DETAILS: ${{ steps.readiness.outputs.details }}
+        with:
+          script: |
+            const title = process.env.INCIDENT_TITLE;
+            const details = process.env.INCIDENT_DETAILS;
+            const { owner, repo } = context.repo;
+            const openIssues = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'open', per_page: 100,
+            });
+            const existing = openIssues.find((issue) => issue.title === title);
+            const body = [
+              'Die externe Produktionsüberwachung hat einen lesenden Fehler erkannt.',
+              '',
+              'Zeitpunkt (UTC): ' + new Date().toISOString(),
+              '',
+              '```text',
+              details,
+              '```',
+              '',
+              'Geprüft wurden ausschließlich `/health/ready` und die öffentliche Produktquelle. Es wurden keine Produkt-, Bestell-, Bestands- oder Zahlungsdaten verändert.',
+            ].join('\n');
+            if (existing) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body });
+              core.notice(`Vorhandener Produktionsalarm #${existing.number} wurde aktualisiert.`);
+            } else {
+              const created = await github.rest.issues.create({ owner, repo, title, body });
+              core.warning(`Produktionsalarm #${created.data.number} wurde angelegt.`);
+            }
+
+      - name: Erledigten Produktionsalarm schließen
+        if: steps.readiness.outputs.state == 'healthy'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = process.env.INCIDENT_TITLE;
+            const { owner, repo } = context.repo;
+            const openIssues = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'open', per_page: 100,
+            });
+            for (const issue of openIssues.filter((entry) => entry.title === title)) {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: issue.number,
+                body: 'Die externe Produktionsüberwachung meldet wieder eine lesbare Datenbank und eine nicht leere Produktquelle. Zeitpunkt (UTC): ' + new Date().toISOString(),
+              });
+              await github.rest.issues.update({ owner, repo, issue_number: issue.number, state: 'closed' });
+            }
+
+      - name: Fehlstatus für GitHub-Benachrichtigungen setzen
+        if: steps.readiness.outputs.state == 'failed'
+        shell: bash
+        run: |
+          echo "Die Produktionsüberwachung hat einen Ausfall erkannt. Details stehen im offenen Produktionsalarm." >&2
+          exit 1

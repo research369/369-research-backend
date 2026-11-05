@@ -9,7 +9,8 @@
     "db:push": "drizzle-kit generate && drizzle-kit migrate",
     "db:seed": "tsx server/seed.ts",
     "checkout-v2:commerce-staging:bootstrap": "./node_modules/.bin/tsx scripts/checkout-v2-commerce-staging-bootstrap.ts",
-    "checkout-v2:commerce-staging:smoke": "./node_modules/.bin/tsx scripts/checkout-v2-commerce-staging-smoke.ts"
+    "checkout-v2:commerce-staging:smoke": "./node_modules/.bin/tsx scripts/checkout-v2-commerce-staging-smoke.ts",
+    "maintenance:legacy-customer-backfill": "tsx server/maintenance/runLegacyCustomerBackfill.ts"
   },
   "dependencies": {
     "@trpc/server": "^11.6.0",
@@ -25,6 +26,7 @@
     "jsonwebtoken": "^9.0.3",
     "nanoid": "^5.1.5",
     "otpauth": "^9.5.1",
+    "pdf-lib": "^1.17.1",
     "pg": "^8.13.1",
     "qrcode": "^1.5.4",
     "resend": "^6.10.0",

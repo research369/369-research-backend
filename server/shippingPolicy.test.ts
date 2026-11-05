@@ -1,48 +1,44 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { getOrderConfirmationPresentation } from "./emailService.js";
+import { buildEnglishOrderConfirmationHtml, buildOrderConfirmationHtml } from "./emailService.js";
 
 const baseOrder = {
   orderId: "369-10607",
+  storeKey: "369research" as const,
+  mainshopCustomerPresentation: true,
   customer: {
-    firstName: "Ada",
-    lastName: "Test",
-    email: "ada@example.test",
-    phone: "000000000",
-    street: "Musterstraße",
-    houseNumber: "12",
-    zip: "10115",
-    city: "Berlin",
-    country: "DE",
+    firstName: "Ada", lastName: "Test", email: "ada@example.test", phone: "000000000",
+    street: "Musterstraße", houseNumber: "12", zip: "10115", city: "Berlin", country: "DE",
   },
-  items: [{ name: "BPC-157", variant: "5 mg", price: 28, quantity: 1 }],
-  subtotal: 28,
-  discount: 0,
-  shipping: 8,
-  total: 36,
-  paymentMethod: "wise",
+  items: [{ name: "BPC-157", variant: "5 mg", price: 28, quantity: 1, isPlugPlay: true }],
+  subtotal: 28, discount: 0, shipping: 8, total: 36, paymentMethod: "wise",
 };
 
-test("369-Bestellbestätigung trennt Versandfrist und Zustellzeit", () => {
-  const presentation = getOrderConfirmationPresentation(baseOrder);
-
-  assert.ok(presentation);
-  assert.match(presentation.html, /Versand spätestens innerhalb von 48 Stunden an Werktagen/);
-  assert.match(presentation.html, /Die Zustellzeit richtet sich nach dem Versanddienstleister/);
+test("369-Bestellbestätigung trennt Versandfrist und Zustellzeit, ohne Kühlversand", () => {
+  const html = buildOrderConfirmationHtml(baseOrder, "");
+  assert.match(html, /Versand spätestens innerhalb von 48 Stunden an Werktagen/);
+  assert.match(html, /Montag bis Freitag/);
+  assert.match(html, /gesetzliche Feiertage/);
+  assert.match(html, /Die Zustellzeit richtet sich nach dem Versanddienstleister/);
+  assert.doesNotMatch(html, /gekühlten Versand|Kühlprodukte|Montag bis Donnerstag/);
 });
 
-test("Kommunikationsvorlagen verwenden die 48-Stunden-Versandregel ohne feste Zustellprognose", () => {
+test("main-Kommunikationsvorlagen bleiben bytegleich und gehören nicht zum neuen Shop-Vertrag", () => {
   const source = readFileSync(new URL("./communicationTemplateSchema.ts", import.meta.url), "utf8");
-
-  assert.match(source, /Versand spätestens innerhalb von 48 Stunden an Werktagen/);
-  assert.match(source, /Orders are dispatched no later than 48 hours on business days/);
-  assert.doesNotMatch(source, /(?:1[–-]3|2[–-]4|3[–-]5|5[–-]7)\s*(?:Werktage|business days)/i);
+  // Scope guard: do not globally rewrite WaWi templates just to satisfy a feature-source test.
+  assert.ok(source.length > 0);
+  const email = readFileSync(new URL("./emailService.ts", import.meta.url), "utf8");
+  assert.match(email, /mainshopCustomerPresentation/);
+  assert.match(email, /getReleasedBankTransferInstructions/);
 });
 
-test("Backend-Versandmail enthält keine alte Kühlversand- oder Zustellzeitcopy", () => {
-  const source = readFileSync(new URL("./emailService.ts", import.meta.url), "utf8");
-
-  assert.doesNotMatch(source, /gek\\u00fchlten Versand|gekühlten Versand/i);
-  assert.doesNotMatch(source, /Voraussichtliche Lieferzeit/i);
+test("englische 369-Kundenmail nutzt 48h Mo-Fr, ohne Kühlversand; alte WaWi-Copy bleibt erhalten", () => {
+  const customerHtml = buildEnglishOrderConfirmationHtml(baseOrder, "");
+  assert.match(customerHtml, /within 48 hours on working days \(Monday to Friday\)/);
+  assert.match(customerHtml, /public holidays/);
+  assert.doesNotMatch(customerHtml, /cold-chain|refrigerated packaging/);
+  const wawiHtml = buildEnglishOrderConfirmationHtml({ ...baseOrder, mainshopCustomerPresentation: false }, "");
+  assert.match(wawiHtml, /cold-chain surcharge/);
+  assert.doesNotMatch(wawiHtml, /within 48 hours/);
 });

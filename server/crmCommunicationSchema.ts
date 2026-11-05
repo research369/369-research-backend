@@ -19,6 +19,9 @@ export async function ensureCrmCommunicationSchema(): Promise<void> {
       ADD COLUMN IF NOT EXISTS delivery_status VARCHAR(32),
       ADD COLUMN IF NOT EXISTS delivery_status_at TIMESTAMP,
       ADD COLUMN IF NOT EXISTS error_message TEXT,
+      ADD COLUMN IF NOT EXISTS delivery_issue_resolved_at TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS delivery_issue_resolution VARCHAR(500),
+      ADD COLUMN IF NOT EXISTS delivery_issue_resolved_by VARCHAR(100),
       ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(200),
       ADD COLUMN IF NOT EXISTS direction VARCHAR(16) NOT NULL DEFAULT 'outbound',
       ADD COLUMN IF NOT EXISTS source VARCHAR(32) NOT NULL DEFAULT 'manual';

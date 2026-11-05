@@ -14,15 +14,12 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - name: PostgreSQL Client installieren
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y postgresql-client
-
       - name: Backup erstellen
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        shell: bash
         run: |
+          set -euo pipefail
           # Datum für Dateiname
           TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
           BACKUP_FILE="backup_369research_${TIMESTAMP}.sql.gz"
@@ -30,13 +27,12 @@ jobs:
           echo "🗄️ Starte Backup: $BACKUP_FILE"
           
           # pg_dump mit Komprimierung
-          pg_dump "$DATABASE_URL" \
-            --no-password \
-            --format=plain \
-            --no-owner \
-            --no-acl \
+          docker run --rm -e DATABASE_URL postgres:18-bookworm sh -c 'exec pg_dump "$DATABASE_URL" --no-password --format=plain --no-owner --no-acl' \
             | gzip > "$BACKUP_FILE"
           
+          gzip -t "$BACKUP_FILE"
+          test "$(wc -c < "$BACKUP_FILE")" -gt 1024
+
           # Dateigröße prüfen
           SIZE=$(du -sh "$BACKUP_FILE" | cut -f1)
           echo "✅ Backup erstellt: $BACKUP_FILE ($SIZE)"

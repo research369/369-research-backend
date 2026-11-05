@@ -172,7 +172,7 @@ function evidenceSvg(input: AddressValidationInput, result: AddressValidationRes
 export async function persistAddressValidation(params: {
   input: AddressValidationInput;
   result: AddressValidationResult;
-  context: "checkout" | "customer_create" | "customer_update" | "manual_order" | "shipping_automation";
+  context: "checkout" | "customer_create" | "customer_update" | "manual_order" | "shipping_automation" | "partner_address_update";
   customerId?: number | null;
   orderId?: string | null;
   overrideConfirmed?: boolean;

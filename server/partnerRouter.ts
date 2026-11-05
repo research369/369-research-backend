@@ -1,79 +1,53 @@
+import { hasOtherPaidCodeOrder } from "./partnerCodeHistory.js";
 /**
  * Partner Router – tRPC routes for partner/affiliate management
  * 
  * Business Logic:
  * - Partners have a unique CODE (for customers) and a unique PARTNER NUMBER (for themselves)
  * - Customer enters CODE at checkout → gets discount % on product subtotal (NOT shipping)
- * - commissionType "einmalig": partner gets one-time cash payout on FIRST order only
- * - commissionType "dauerhaft": partner gets ongoing shop credit (Guthaben) on EVERY order
- * - Dauerhaft-partners can redeem credit at checkout via login
+ * - Program policies are data-driven: Creator earns a payout on every paid code order;
+ *   Partner retains the historical first-order credit policy; Eigennutzer is credit-only.
+ * - Each order snapshots its program conditions, so future configuration changes never
+ *   alter historical settlement rights.
  * - All transactions are tracked for transparent accounting
  */
 
 import { z } from "zod";
-import { eq, desc, and, sql } from "drizzle-orm";
+import { eq, desc, and, inArray, isNull, or, sql } from "drizzle-orm";
+import { createHash } from "node:crypto";
 import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
 import { router, publicProcedure, adminProcedure, middleware } from "./trpc.js";
-import { getDb } from "./db.js";
-import { partners, partnerTransactions, orders, orderItems, partnerCodeUsage, customers } from "../drizzle/schema.js";
+import { getDb, getPool } from "./db.js";
+import { partners, partnerAddressRequests, partnerTransactions, orders, orderItems, partnerCodeUsage, customers } from "../drizzle/schema.js";
 import { ENV } from "./env.js";
 import { bookPaidPartnerCommission, redeemPartnerCreditForOrder } from "./partnerCreditService.js";
+import { buildPartnerSettlementReport } from "./partnerSettlementReport.js";
 import type { Request } from "express";
-
+import {
+  createPartnerToken,
+  getAuthenticatedPartnerFromRequest,
+  PARTNER_COOKIE_NAME,
+  PARTNER_TOKEN_EXPIRY,
+} from "./partnerAuth.js";
+import {
+  buildLegacyPartnerCodeTerms,
+  calculateSelfOrderDiscountPercent,
+  canRedeemShopCredit,
+  getPartnerProgram,
+  isDiscountAllowedForProgram,
+  isRepeatCodeUseAllowed,
+  listPartnerCodeTerms,
+  normalizePartnerCodeTerms,
+  replacePartnerCodes,
+  resolveActivePartnerCode,
+  splitPartnerCodes,
+} from "./partnerProgramService.js";
+import { persistAddressValidation, validateGermanAddress } from "./addressValidationService.js";
+import { PARTNER_SUPPORT_CONTACT, PARTNER_TECHNICAL_CONTACT } from "./partnerContactProfile.js";
 // ─── Partner Auth Helpers ─────────────────────────────────────────
-const PARTNER_TOKEN_EXPIRY = "30d";
-const PARTNER_COOKIE_NAME = "369_partner_session";
-
-function createPartnerToken(partnerId: number): string {
-  return jwt.sign({ partnerId, type: "partner" }, ENV.jwtSecret, { expiresIn: PARTNER_TOKEN_EXPIRY });
-}
-
-function verifyPartnerToken(token: string): { partnerId: number } | null {
-  try {
-    const payload = jwt.verify(token, ENV.jwtSecret) as any;
-    if (payload.type !== "partner") return null;
-    return { partnerId: payload.partnerId };
-  } catch {
-    return null;
-  }
-}
-
-export async function getPartnerFromRequest(req: Request) {
-  // Check Authorization header (Bearer token)
-  const authHeader = req.headers.authorization;
-  let token: string | undefined;
-  if (authHeader?.startsWith("Bearer ")) {
-    token = authHeader.slice(7);
-  }
-  // Also check cookie
-  if (!token) {
-    const cookieHeader = req.headers.cookie || "";
-    const cookies = Object.fromEntries(
-      cookieHeader.split(";").map(c => {
-        const [k, ...v] = c.trim().split("=");
-        return [k, v.join("=")];
-      })
-    );
-    token = cookies[PARTNER_COOKIE_NAME];
-  }
-  if (!token) return null;
-
-  const payload = verifyPartnerToken(token);
-  if (!payload) return null;
-
-  const db = await getDb();
-  if (!db) return null;
-
-  const [partner] = await db.select().from(partners).where(eq(partners.id, payload.partnerId)).limit(1);
-  if (!partner || partner.isActive !== 1) return null;
-
-  return partner;
-}
-
 // Middleware for partner-authenticated procedures
 const isPartner = middleware(async ({ ctx, next }) => {
-  const partner = await getPartnerFromRequest(ctx.req);
+  const partner = await getAuthenticatedPartnerFromRequest(ctx.req);
   if (!partner) {
     const { TRPCError } = await import("@trpc/server");
     throw new TRPCError({ code: "UNAUTHORIZED", message: "Partner-Login erforderlich" });
@@ -82,6 +56,152 @@ const isPartner = middleware(async ({ ctx, next }) => {
 });
 
 const partnerProcedure = publicProcedure.use(isPartner);
+
+const partnerAddressInput = z.object({
+  street: z.string().trim().min(1).max(300),
+  houseNumber: z.string().trim().max(100).optional().default(""),
+  zip: z.string().trim().min(1).max(30),
+  city: z.string().trim().min(1).max(100),
+  country: z.string().trim().min(1).max(100),
+});
+
+const partnerAddressUpdateInput = partnerAddressInput.extend({
+  addressValidationOverride: z.object({ confirmed: z.literal(true) }).optional(),
+});
+
+const partnerCodeTermsInput = z.object({
+  id: z.number().int().positive().optional(),
+  code: z.string().trim().min(1).max(50),
+  commissionPercent: z.number().min(0).max(100),
+  customerDiscountPercent: z.number().min(0).max(100),
+  isActive: z.boolean().optional(),
+});
+
+type PartnerAddress = z.infer<typeof partnerAddressInput>;
+
+async function getPartnerAttributionCodes(partnerId: number, legacyCsv: string): Promise<string[]> {
+  const storedCodes = await listPartnerCodeTerms(partnerId);
+  return [...new Set([
+    ...splitPartnerCodes(legacyCsv),
+    ...storedCodes.map((entry) => entry.code),
+  ])];
+}
+
+function partnerAttributionWhere(partnerId: number, codes: string[]) {
+  // All post-program orders use partner_source_id. The code-only fallback is
+  // deliberately limited to legacy rows with no source ID, so no order can be
+  // attributed to two partners when a historical CSV mirror changes.
+  return codes.length > 0
+    ? or(
+        eq(orders.partnerSourceId, partnerId),
+        and(isNull(orders.partnerSourceId), inArray(orders.partnerCode, codes)),
+      )
+    : eq(orders.partnerSourceId, partnerId);
+}
+
+function normalisePartnerAddress(address: PartnerAddress) {
+  return {
+    street: address.street.trim(),
+    houseNumber: address.houseNumber.trim(),
+    zip: address.zip.trim(),
+    city: address.city.trim(),
+    country: address.country.trim(),
+  };
+}
+
+function addressFingerprint(address: Record<string, string>): string {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      street: address.street.trim().toLowerCase(),
+      houseNumber: address.houseNumber.trim().toLowerCase(),
+      zip: address.zip.trim().toLowerCase(),
+      city: address.city.trim().toLowerCase(),
+      country: address.country.trim().toLowerCase(),
+    }))
+    .digest("hex");
+}
+
+function serialisePartnerAddress(address: Record<string, string | null | undefined>): string {
+  return JSON.stringify({
+    street: address.street || "",
+    houseNumber: address.houseNumber || "",
+    zip: address.zip || "",
+    city: address.city || "",
+    country: address.country || "",
+  });
+}
+
+function partnerAddressValidationError(warnings: Array<{ message: string }>): Error {
+  return new Error(`PARTNER_ADRESSE_UNGUELTIG: ${warnings.map((warning) => warning.message).join(" ")}`);
+}
+
+async function getPartnerAddressNotificationRecipients(): Promise<string[]> {
+  const pool = await getPool();
+  if (!pool) return [];
+  const result = await pool.query<{ value: string }>(
+    "SELECT value FROM shop_settings WHERE key = 'partner_address_request_notification_recipients' LIMIT 1"
+  );
+  const raw = result.rows[0]?.value || "";
+  return raw.split(/[;,\n]/).map((value) => value.trim()).filter((value) => z.string().email().safeParse(value).success);
+}
+
+async function isPartnerAddressNotificationEnabled(): Promise<boolean> {
+  const pool = await getPool();
+  if (!pool) return false;
+  const result = await pool.query<{ value: string }>(
+    "SELECT value FROM shop_settings WHERE key = 'partner_address_request_notification_enabled' LIMIT 1"
+  );
+  return result.rows[0]?.value !== "false";
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>'\"]/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", "\"": "&quot;",
+  }[character] || character));
+}
+
+async function sendPartnerAddressRequestNotification(request: {
+  id: number;
+  partnerName: string;
+  partnerNumber: string;
+  partnerEmail: string | null;
+  currentAddress: Record<string, string>;
+  requestedAddress: Record<string, string>;
+}): Promise<{ sent: boolean; error?: string }> {
+  if (!await isPartnerAddressNotificationEnabled()) return { sent: false, error: "Benachrichtigungen sind zentral deaktiviert" };
+  const recipients = await getPartnerAddressNotificationRecipients();
+  if (!ENV.resendApiKey || recipients.length === 0) {
+    return { sent: false, error: "Kein zentral konfigurierter Benachrichtigungsempfänger" };
+  }
+
+  const formatAddress = (address: Record<string, string>) =>
+    `${escapeHtml(address.street)} ${escapeHtml(address.houseNumber)}<br>${escapeHtml(address.zip)} ${escapeHtml(address.city)}<br>${escapeHtml(address.country)}`;
+  const html = `<!doctype html><html lang="de"><body style="font-family:Arial,sans-serif;color:#111827;line-height:1.5">
+    <h2>Partnerportal: Adressänderung prüfen</h2>
+    <p><strong>${escapeHtml(request.partnerName)}</strong> (${escapeHtml(request.partnerNumber)}) hat eine Lieferadressänderung beantragt.</p>
+    <table style="border-collapse:collapse"><tr><td style="padding:8px 20px 8px 0;vertical-align:top"><strong>Bisher</strong><br>${formatAddress(request.currentAddress)}</td><td style="padding:8px;vertical-align:top"><strong>Beantragt</strong><br>${formatAddress(request.requestedAddress)}</td></tr></table>
+    <p>Die Änderung ist in der WaWi unter <strong>Partner / Affiliates</strong> als offener Antrag sichtbar und muss dort ausdrücklich freigegeben oder abgelehnt werden.</p>
+    <p style="color:#6b7280;font-size:12px">Partner-E-Mail: ${escapeHtml(request.partnerEmail || "nicht hinterlegt")} · Antrag #${request.id}</p>
+  </body></html>`;
+
+  try {
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${ENV.resendApiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from: "369 Research <noreply@coreversand.de>",
+        reply_to: "support@369research.eu",
+        to: recipients,
+        subject: `Adressänderung prüfen: ${request.partnerName} (${request.partnerNumber})`,
+        html,
+      }),
+    });
+    if (!response.ok) return { sent: false, error: `Resend antwortete mit HTTP ${response.status}` };
+    return { sent: true };
+  } catch (error) {
+    return { sent: false, error: error instanceof Error ? error.message : "Unbekannter Versandfehler" };
+  }
+}
 
 export const partnerRouter = router({
   // ─── ADMIN: CRUD ───────────────────────────────────────────────
@@ -112,13 +232,14 @@ export const partnerRouter = router({
         );
       }
 
-      return allPartners.map(p => ({
+      return Promise.all(allPartners.map(async (p) => ({
         ...p,
         commissionPercent: parseFloat(p.commissionPercent),
         customerDiscountPercent: parseFloat(p.customerDiscountPercent),
         creditBalance: parseFloat(p.creditBalance),
+        codeTerms: await listPartnerCodeTerms(p.id),
         passwordHash: undefined, // Never expose
-      }));
+      })));
     }),
 
   // Get single partner with transactions
@@ -134,12 +255,14 @@ export const partnerRouter = router({
       const transactions = await db.select().from(partnerTransactions)
         .where(eq(partnerTransactions.partnerId, input.id))
         .orderBy(desc(partnerTransactions.createdAt));
+      const codeTerms = await listPartnerCodeTerms(input.id);
 
       return {
         ...partner,
         commissionPercent: parseFloat(partner.commissionPercent),
         customerDiscountPercent: parseFloat(partner.customerDiscountPercent),
         creditBalance: parseFloat(partner.creditBalance),
+        codeTerms,
         passwordHash: undefined,
         hasPassword: !!partner.passwordHash,
         transactions: transactions.map(t => ({
@@ -152,6 +275,73 @@ export const partnerRouter = router({
       };
     }),
 
+  // Offene oder erledigte Partneradressanträge für die WaWi-Prüfung.
+  addressRequests: adminProcedure
+    .input(z.object({ status: z.enum(["open", "approved", "rejected", "all"]).optional() }).optional())
+    .query(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+      const query = db.select().from(partnerAddressRequests).orderBy(desc(partnerAddressRequests.createdAt));
+      const requests = input?.status && input.status !== "all"
+        ? await query.where(eq(partnerAddressRequests.status, input.status))
+        : await query;
+      return requests.map((request) => ({
+        ...request,
+        currentAddress: JSON.parse(request.currentAddressJson),
+        requestedAddress: JSON.parse(request.requestedAddressJson),
+      }));
+    }),
+
+  // Freigabe ist die einzige Stelle, an der die kanonische Partneradresse aus einem Portal-Antrag geändert wird.
+  reviewAddressRequest: adminProcedure
+    .input(z.object({
+      requestId: z.number().int().positive(),
+      decision: z.enum(["approve", "reject"]),
+      reviewNote: z.string().trim().max(2000).optional(),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      const pool = await getPool();
+      if (!pool) throw new Error("Database not available");
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const result = await client.query<{
+          id: number; partner_id: number; status: string; requested_address_json: string;
+        }>("SELECT id, partner_id, status, requested_address_json FROM partner_address_requests WHERE id = $1 FOR UPDATE", [input.requestId]);
+        const request = result.rows[0];
+        if (!request) throw new Error("Adressantrag nicht gefunden");
+        if (request.status !== "open") throw new Error("Dieser Adressantrag wurde bereits bearbeitet");
+
+        const reviewedBy = (ctx as any).user?.username || (ctx as any).user?.name || "admin";
+        const reviewNote = input.reviewNote || null;
+        if (input.decision === "approve") {
+          let address: PartnerAddress;
+          try {
+            address = normalisePartnerAddress(partnerAddressInput.parse(JSON.parse(request.requested_address_json)));
+          } catch {
+            throw new Error("Der gespeicherte Adressantrag ist unvollständig");
+          }
+          await client.query(
+            `UPDATE partners SET street = $1, house_number = $2, zip = $3, city = $4, country = $5, updated_at = NOW() WHERE id = $6`,
+            [address.street, address.houseNumber || null, address.zip, address.city, address.country, request.partner_id]
+          );
+        }
+        await client.query(
+          `UPDATE partner_address_requests
+           SET status = $1, reviewed_at = NOW(), reviewed_by = $2, review_note = $3, updated_at = NOW()
+           WHERE id = $4`,
+          [input.decision === "approve" ? "approved" : "rejected", reviewedBy, reviewNote, request.id]
+        );
+        await client.query("COMMIT");
+        return { success: true, status: input.decision === "approve" ? "approved" : "rejected" };
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
+    }),
+
   // Create new partner
   create: adminProcedure
     .input(z.object({
@@ -159,11 +349,13 @@ export const partnerRouter = router({
       email: z.string().email().optional().or(z.literal("")),
       phone: z.string().optional(),
       company: z.string().optional(),
-      code: z.string().min(2).max(50),
+      code: z.string().min(2).max(500).optional(),
+      codes: z.array(partnerCodeTermsInput).min(1).optional(),
       partnerNumber: z.string().min(2).max(50),
       commissionPercent: z.number().min(0).max(100),
       customerDiscountPercent: z.number().min(0).max(100),
       commissionType: z.enum(["einmalig", "dauerhaft"]).optional(),
+      programKey: z.enum(["creator", "partner", "self_user"]).optional(),
       password: z.string().min(6).optional(),
       notes: z.string().optional(),
       street: z.string().optional(),
@@ -171,14 +363,30 @@ export const partnerRouter = router({
       zip: z.string().optional(),
       city: z.string().optional(),
       country: z.string().optional(),
+    }).refine((value) => Boolean(value.code || value.codes?.length), {
+      message: "Mindestens ein Partnercode ist erforderlich",
+      path: ["codes"],
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
-      // Check uniqueness of code
-      const existingCode = await db.select().from(partners).where(eq(partners.code, input.code.toUpperCase())).limit(1);
-      if (existingCode.length > 0) throw new Error(`Code "${input.code}" ist bereits vergeben`);
+      const codeTerms = input.codes
+        ? normalizePartnerCodeTerms(input.codes)
+        : normalizePartnerCodeTerms(splitPartnerCodes(input.code || "").map((code) => ({
+            code,
+            commissionPercent: input.commissionPercent,
+            customerDiscountPercent: input.customerDiscountPercent,
+            isActive: true,
+          })));
+      const activeCodes = codeTerms.filter((entry) => entry.isActive).map((entry) => entry.code);
+      const pool = await getPool();
+      if (!pool) throw new Error("Database not available");
+      const duplicateCode = await pool.query(
+        "SELECT code_normalized FROM partner_codes WHERE code_normalized = ANY($1::varchar[])",
+        [codeTerms.map((entry) => entry.code)],
+      );
+      if (duplicateCode.rows.length > 0) throw new Error(`Code "${duplicateCode.rows[0].code_normalized}" ist bereits vergeben`);
 
       // Check uniqueness of partner number
       const existingPN = await db.select().from(partners).where(eq(partners.partnerNumber, input.partnerNumber)).limit(1);
@@ -194,7 +402,7 @@ export const partnerRouter = router({
         email: input.email || null,
         phone: input.phone || null,
         company: input.company || null,
-        code: input.code.toUpperCase(),
+        code: activeCodes.join(", "),
         partnerNumber: input.partnerNumber,
         street: input.street || null,
         houseNumber: input.houseNumber || null,
@@ -204,13 +412,15 @@ export const partnerRouter = router({
         commissionPercent: input.commissionPercent.toFixed(2),
         customerDiscountPercent: input.customerDiscountPercent.toFixed(2),
         commissionType: input.commissionType || "dauerhaft",
+        programKey: input.programKey || (input.commissionType === "einmalig" ? "creator" : "partner"),
         creditBalance: "0.00",
         passwordHash,
         notes: input.notes || null,
       }).returning();
 
-      console.log(`[Partners] Created partner: ${input.name} (Code: ${input.code}, Nr: ${input.partnerNumber}, Type: ${input.commissionType || "dauerhaft"})`);
-      return { ...newPartner, passwordHash: undefined };
+      const storedCodes = await replacePartnerCodes(newPartner.id, codeTerms);
+      console.log(`[Partners] Created partner: ${input.name} (Code: ${activeCodes.join(", ")}, Nr: ${input.partnerNumber}, Program: ${newPartner.programKey})`);
+      return { ...newPartner, codeTerms: storedCodes, passwordHash: undefined };
     }),
 
   // Update partner
@@ -219,12 +429,14 @@ export const partnerRouter = router({
       id: z.number(),
       name: z.string().min(1).optional(),
       code: z.string().min(1).optional(),
+      codes: z.array(partnerCodeTermsInput).min(1).optional(),
       email: z.string().email().optional().or(z.literal("")),
       phone: z.string().optional(),
       company: z.string().optional(),
       commissionPercent: z.number().min(0).max(100).optional(),
       customerDiscountPercent: z.number().min(0).max(100).optional(),
       commissionType: z.enum(["einmalig", "dauerhaft"]).optional(),
+      programKey: z.enum(["creator", "partner", "self_user"]).optional(),
       isActive: z.number().min(0).max(1).optional(),
       notes: z.string().optional(),
       street: z.string().optional(),
@@ -237,32 +449,33 @@ export const partnerRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
-      // Check for code uniqueness if code is being changed
-      if (input.code !== undefined) {
-        const normalizedCode = input.code.toUpperCase().trim();
-        // Check each code in the comma-separated list for duplicates
-        const codeParts = normalizedCode.split(",").map(c => c.trim()).filter(Boolean);
-        for (const codePart of codeParts) {
-          const existing = await db.select({ id: partners.id }).from(partners)
-            .where(and(
-              sql`UPPER(${partners.code}) LIKE ${'%' + codePart + '%'}`,
-              sql`${partners.id} != ${input.id}`
-            ));
-          if (existing.length > 0) {
-            throw new Error(`Code "${codePart}" ist bereits vergeben`);
-          }
-        }
-      }
+      const existingCodeTerms = input.codes || input.code !== undefined
+        ? await listPartnerCodeTerms(input.id)
+        : [];
+      const nextCommissionDefault = input.commissionPercent;
+      const nextDiscountDefault = input.customerDiscountPercent;
+      const requestedCodeTerms = input.codes
+        ? normalizePartnerCodeTerms(input.codes)
+        : input.code === undefined
+          ? null
+          : buildLegacyPartnerCodeTerms(
+              input.code,
+              existingCodeTerms,
+              {
+                commissionPercent: nextCommissionDefault ?? Number(existingCodeTerms[0]?.commissionPercent ?? 0),
+                customerDiscountPercent: nextDiscountDefault ?? Number(existingCodeTerms[0]?.customerDiscountPercent ?? 0),
+              },
+            );
 
       const updateData: Record<string, any> = { updatedAt: new Date() };
       if (input.name !== undefined) updateData.name = input.name;
-      if (input.code !== undefined) updateData.code = input.code.toUpperCase().trim();
       if (input.email !== undefined) updateData.email = input.email || null;
       if (input.phone !== undefined) updateData.phone = input.phone || null;
       if (input.company !== undefined) updateData.company = input.company || null;
       if (input.commissionPercent !== undefined) updateData.commissionPercent = input.commissionPercent.toFixed(2);
       if (input.customerDiscountPercent !== undefined) updateData.customerDiscountPercent = input.customerDiscountPercent.toFixed(2);
       if (input.commissionType !== undefined) updateData.commissionType = input.commissionType;
+      if (input.programKey !== undefined) updateData.programKey = input.programKey;
       if (input.isActive !== undefined) updateData.isActive = input.isActive;
       if (input.notes !== undefined) updateData.notes = input.notes || null;
       if (input.street !== undefined) updateData.street = input.street || null;
@@ -272,7 +485,10 @@ export const partnerRouter = router({
       if (input.country !== undefined) updateData.country = input.country || null;
 
       await db.update(partners).set(updateData).where(eq(partners.id, input.id));
-      return { success: true };
+      const storedCodes = requestedCodeTerms
+        ? await replacePartnerCodes(input.id, requestedCodeTerms)
+        : await listPartnerCodeTerms(input.id);
+      return { success: true, codeTerms: storedCodes };
     }),
 
   // Set/reset partner password (admin)
@@ -301,34 +517,56 @@ export const partnerRouter = router({
       partnerId: z.number(),
       amount: z.number(), // positive or negative
       description: z.string().min(1),
+      requestId: z.string().uuid(),
     }))
     .mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database not available");
+      const pool = await getPool();
+      if (!pool) throw new Error("Database not available");
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`partner-adjust:${input.partnerId}`]);
 
-      const [partner] = await db.select().from(partners).where(eq(partners.id, input.partnerId)).limit(1);
-      if (!partner) throw new Error("Partner nicht gefunden");
+        const duplicate = await client.query<{ balance_after: string }>(
+          `SELECT balance_after FROM partner_transactions
+            WHERE partner_id = $1 AND type = 'korrektur' AND admin_note = $2
+            LIMIT 1`,
+          [input.partnerId, `request:${input.requestId}`],
+        );
+        if (duplicate.rows.length > 0) {
+          await client.query("COMMIT");
+          return { success: true, newBalance: Number(duplicate.rows[0].balance_after), alreadyApplied: true };
+        }
 
-      const currentBalance = parseFloat(partner.creditBalance);
-      const newBalance = currentBalance + input.amount;
+        const partnerResult = await client.query<{ name: string; credit_balance: string }>(
+          "SELECT name, credit_balance FROM partners WHERE id = $1 FOR UPDATE",
+          [input.partnerId],
+        );
+        if (partnerResult.rows.length !== 1) throw new Error("Partner nicht gefunden");
+        const partner = partnerResult.rows[0];
+        const currentBalance = Number(partner.credit_balance);
+        const newBalance = Math.round((currentBalance + input.amount + Number.EPSILON) * 100) / 100;
+        if (newBalance < -0.001) throw new Error("Eine manuelle Korrektur darf das Partnerguthaben nicht negativ machen");
 
-      // Update partner balance
-      await db.update(partners).set({
-        creditBalance: newBalance.toFixed(2),
-        updatedAt: new Date(),
-      }).where(eq(partners.id, input.partnerId));
-
-      // Record transaction
-      await db.insert(partnerTransactions).values({
-        partnerId: input.partnerId,
-        type: "korrektur",
-        amount: input.amount.toFixed(2),
-        balanceAfter: newBalance.toFixed(2),
-        description: input.description,
-      });
-
-      console.log(`[Partners] Credit adjustment for ${partner.name}: ${input.amount > 0 ? "+" : ""}${input.amount.toFixed(2)} EUR (${input.description})`);
-      return { success: true, newBalance };
+        await client.query(
+          "UPDATE partners SET credit_balance = $1, updated_at = NOW() WHERE id = $2",
+          [newBalance.toFixed(2), input.partnerId],
+        );
+        await client.query(
+          `INSERT INTO partner_transactions
+            (partner_id, type, amount, balance_after, description, admin_note, status)
+           VALUES ($1, 'korrektur', $2, $3, $4, $5, 'normal')`,
+          [input.partnerId, input.amount.toFixed(2), newBalance.toFixed(2), input.description, `request:${input.requestId}`],
+        );
+        await client.query("COMMIT");
+        console.log(`[Partners] Credit adjustment for ${partner.name}: ${input.amount > 0 ? "+" : ""}${input.amount.toFixed(2)} EUR (${input.description})`);
+        return { success: true, newBalance, alreadyApplied: false };
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
     }),
 
   // ─── ADMIN: REPORTING ──────────────────────────────────────────
@@ -342,6 +580,8 @@ export const partnerRouter = router({
 
       const [partner] = await db.select().from(partners).where(eq(partners.id, input.partnerId)).limit(1);
       if (!partner) throw new Error("Partner nicht gefunden");
+      const codeTerms = await listPartnerCodeTerms(partner.id);
+      const attributionCodes = await getPartnerAttributionCodes(partner.id, partner.code);
 
       // Get all transactions
       const transactions = await db.select().from(partnerTransactions)
@@ -350,7 +590,7 @@ export const partnerRouter = router({
 
       // Get all orders referred by this partner
       const referredOrders = await db.select().from(orders)
-        .where(eq(orders.partnerCode, partner.code))
+        .where(partnerAttributionWhere(partner.id, attributionCodes))
         .orderBy(desc(orders.orderDate));
 
       // Get order items for referred orders
@@ -361,18 +601,45 @@ export const partnerRouter = router({
         allItems = await db.select().from(orderItems).where(inArray(orderItems.orderId, orderIds));
       }
 
-      // Calculate totals
-      const totalCommissionEarned = transactions
-        .filter(t => t.type === "provision")
-        .reduce((sum, t) => sum + parseFloat(t.amount), 0);
-
-      const totalRedeemed = transactions
-        .filter(t => t.type === "einloesung")
-        .reduce((sum, t) => sum + Math.abs(parseFloat(t.amount)), 0);
-
-      const totalAdjustments = transactions
-        .filter(t => t.type === "korrektur")
-        .reduce((sum, t) => sum + parseFloat(t.amount), 0);
+      // The complete accounting view is calculated from this one, internally
+      // consistent ledger/order snapshot. The WaWi must not fan out further
+      // data requests while an admin is reviewing a partner's balance.
+      const report = buildPartnerSettlementReport({
+        currentBalance: parseFloat(partner.creditBalance),
+        orders: referredOrders.map(o => ({
+          orderId: o.orderId,
+          customerName: `${o.firstName} ${o.lastName}`.trim(),
+          orderDate: o.orderDate,
+          subtotal: parseFloat(o.subtotal),
+          discount: parseFloat(o.discount),
+          total: parseFloat(o.total),
+          status: o.status,
+          paidAt: o.paidAt,
+          appliedPartnerCode: o.partnerCode,
+          partnerCodeIdSnapshot: o.partnerCodeIdSnapshot,
+          partnerDiscount: parseFloat(o.partnerDiscount || "0"),
+          partnerCommission: parseFloat(o.partnerCommission || "0"),
+          partnerCommissionPercentSnapshot: o.partnerCommissionPercentSnapshot === null ? null : parseFloat(o.partnerCommissionPercentSnapshot),
+          partnerCustomerDiscountPercentSnapshot: o.partnerCustomerDiscountPercentSnapshot === null ? null : parseFloat(o.partnerCustomerDiscountPercentSnapshot),
+          partnerCommissionBaseSnapshot: o.partnerCommissionBaseSnapshot === null ? null : parseFloat(o.partnerCommissionBaseSnapshot),
+          items: allItems
+            .filter(i => i.orderId === o.orderId)
+            .map(i => ({ name: i.name, quantity: i.quantity, price: parseFloat(i.price) })),
+        })),
+        transactions: transactions.map(t => ({
+          id: t.id,
+          partnerId: t.partnerId,
+          type: t.type,
+          amount: parseFloat(t.amount),
+          balanceAfter: parseFloat(t.balanceAfter),
+          orderId: t.orderId,
+          customerName: t.customerName,
+          description: t.description,
+          status: t.status || "normal",
+          adminNote: t.adminNote || null,
+          createdAt: t.createdAt,
+        })),
+      });
 
       return {
         partner: {
@@ -380,43 +647,17 @@ export const partnerRouter = router({
           commissionPercent: parseFloat(partner.commissionPercent),
           customerDiscountPercent: parseFloat(partner.customerDiscountPercent),
           creditBalance: parseFloat(partner.creditBalance),
+          codeTerms,
           passwordHash: undefined,
         },
-        summary: {
-          totalOrders: referredOrders.length,
-          totalCommissionEarned,
-          totalRedeemed,
-          totalAdjustments,
-          currentBalance: parseFloat(partner.creditBalance),
-        },
-        orders: referredOrders.map(o => ({
-          orderId: o.orderId,
-          customerName: `${o.firstName} ${o.lastName}`,
-          orderDate: o.orderDate,
-          subtotal: parseFloat(o.subtotal),
-          discount: parseFloat(o.discount),
-          total: parseFloat(o.total),
-          status: o.status,
-          paidAt: o.paidAt,
-          partnerDiscount: parseFloat(o.partnerDiscount || "0"),
-          partnerCommission: parseFloat(o.partnerCommission || "0"),
-          items: allItems
-            .filter(i => i.orderId === o.orderId)
-            .map(i => ({ name: i.name, quantity: i.quantity, price: parseFloat(i.price) })),
-        })),
-        transactions: transactions.map(t => ({
-          ...t,
-          amount: parseFloat(t.amount),
-          balanceAfter: parseFloat(t.balanceAfter),
-          status: t.status || "normal",
-          adminNote: t.adminNote || null,
-        })),
+        ...report,
       };
     }),
 
   // ─── ADMIN: Partner-Zuordnung & Transaktions-Kontrolle ────────
 
-  // Assign a partner to a customer and retroactively calculate commissions
+  // Assign a partner to a customer. Historical orders are deliberately never
+  // credited here: attribution changes must not silently create past payouts.
   assignPartnerToCustomer: adminProcedure
     .input(z.object({
       customerId: z.number(),
@@ -429,8 +670,10 @@ export const partnerRouter = router({
       const [customer] = await db.select().from(customers).where(eq(customers.id, input.customerId)).limit(1);
       if (!customer) throw new Error("Kunde nicht gefunden");
 
-      const [partner] = await db.select().from(partners).where(eq(partners.id, input.partnerId)).limit(1);
-      if (!partner) throw new Error("Partner nicht gefunden");
+      const [partner] = await db.select().from(partners)
+        .where(and(eq(partners.id, input.partnerId), eq(partners.isActive, 1)))
+        .limit(1);
+      if (!partner) throw new Error("Aktiver Partner nicht gefunden");
 
       // Update customer with partner assignment
       await db.update(customers).set({
@@ -439,83 +682,12 @@ export const partnerRouter = router({
         updatedAt: new Date(),
       }).where(eq(customers.id, input.customerId));
 
-      // Retroactively calculate commissions for all existing paid orders of this customer
-            const { inArray } = await import("drizzle-orm");
-      const paidStatuses = ["bezahlt", "gepackt", "versendet", "zugestellt"] as const;
-      // Find all paid orders for this customer (by email or customerId)
-      const customerOrders = await db.select().from(orders)
-        .where(and(
-          eq(orders.email, customer.email || ""),
-          inArray(orders.status, paidStatuses)
-        ))
-        .orderBy(orders.orderDate);
-
-      let commissionsBooked = 0;
-      let totalCommission = 0;
-      let currentBalance = parseFloat(partner.creditBalance);
-
-      for (const order of customerOrders) {
-        // Check if commission was already booked for this order
-        const existingTx = await db.select().from(partnerTransactions)
-          .where(and(
-            eq(partnerTransactions.partnerId, partner.id),
-            eq(partnerTransactions.orderId, order.orderId),
-            eq(partnerTransactions.type, "provision")
-          ))
-          .limit(1);
-
-        if (existingTx.length > 0) continue; // Already booked
-
-        // For einmalig: only book for the first order
-        if (partner.commissionType === "einmalig" && commissionsBooked > 0) continue;
-
-        // Calculate commission on product subtotal after discount
-        const productSubtotal = parseFloat(order.subtotal) - parseFloat(order.discount);
-        const commissionRate = parseFloat(partner.commissionPercent) / 100;
-        const commissionAmount = Math.round(productSubtotal * commissionRate * 100) / 100;
-
-        if (commissionAmount <= 0) continue;
-
-        currentBalance += commissionAmount;
-
-        const description = partner.commissionType === "einmalig"
-          ? `R\u00fcckwirkende Provision f\u00fcr Bestellung ${order.orderId} (${order.firstName} ${order.lastName}) \u2013 Auszahlung`
-          : `R\u00fcckwirkende Provision f\u00fcr Bestellung ${order.orderId} (${order.firstName} ${order.lastName}) \u2013 Guthaben`;
-
-        await db.insert(partnerTransactions).values({
-          partnerId: partner.id,
-          type: "provision",
-          amount: commissionAmount.toFixed(2),
-          balanceAfter: currentBalance.toFixed(2),
-          orderId: order.orderId,
-          customerName: `${order.firstName} ${order.lastName}`,
-          description,
-        });
-
-        // Also update the order's partner fields
-        await db.update(orders).set({
-          partnerCode: partner.code,
-          partnerCommission: commissionAmount.toFixed(2),
-        }).where(eq(orders.id, order.id));
-
-        commissionsBooked++;
-        totalCommission += commissionAmount;
-      }
-
-      // Update partner balance
-      if (totalCommission > 0) {
-        await db.update(partners).set({
-          creditBalance: currentBalance.toFixed(2),
-          updatedAt: new Date(),
-        }).where(eq(partners.id, partner.id));
-      }
-
-      console.log(`[Partners] Assigned partner ${partner.name} to customer ${customer.name}. Retroactive commissions: ${commissionsBooked} orders, ${totalCommission.toFixed(2)} EUR`);
+      console.log(`[Partners] Assigned partner ${partner.name} to customer ${customer.name}; no historical commission was created.`);
       return {
         success: true,
-        commissionsBooked,
-        totalCommission,
-        newBalance: currentBalance,
+        commissionsBooked: 0,
+        totalCommission: 0,
+        newBalance: parseFloat(partner.creditBalance),
       };
     }),
 
@@ -622,114 +794,109 @@ export const partnerRouter = router({
       partnerId: z.number(),
       amount: z.number().positive(),
       description: z.string().optional(),
+      requestId: z.string().uuid(),
     }))
     .mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database not available");
+      const pool = await getPool();
+      if (!pool) throw new Error("Database not available");
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`partner-payout:${input.partnerId}`]);
+        const duplicate = await client.query<{ balance_after: string }>(
+          `SELECT balance_after FROM partner_transactions
+            WHERE partner_id = $1 AND type = 'auszahlung' AND admin_note = $2
+            LIMIT 1`,
+          [input.partnerId, `request:${input.requestId}`],
+        );
+        if (duplicate.rows.length > 0) {
+          await client.query("COMMIT");
+          return { success: true, newBalance: Number(duplicate.rows[0].balance_after), alreadyApplied: true };
+        }
 
-      const [partner] = await db.select().from(partners).where(eq(partners.id, input.partnerId)).limit(1);
-      if (!partner) throw new Error("Partner nicht gefunden");
-
-      const currentBalance = parseFloat(partner.creditBalance);
-      if (input.amount > currentBalance) {
-        throw new Error(`Nicht gen\u00fcgend Guthaben f\u00fcr Auszahlung. Verf\u00fcgbar: ${currentBalance.toFixed(2)} \u20ac`);
+        const partnerResult = await client.query<{ name: string; credit_balance: string }>(
+          "SELECT name, credit_balance FROM partners WHERE id = $1 FOR UPDATE",
+          [input.partnerId],
+        );
+        if (partnerResult.rows.length !== 1) throw new Error("Partner nicht gefunden");
+        const partner = partnerResult.rows[0];
+        const currentBalance = Number(partner.credit_balance);
+        if (input.amount > currentBalance + 0.001) {
+          throw new Error(`Nicht genügend Guthaben für Auszahlung. Verfügbar: ${currentBalance.toFixed(2)} €`);
+        }
+        const newBalance = Math.round((currentBalance - input.amount + Number.EPSILON) * 100) / 100;
+        await client.query(
+          "UPDATE partners SET credit_balance = $1, updated_at = NOW() WHERE id = $2",
+          [newBalance.toFixed(2), input.partnerId],
+        );
+        await client.query(
+          `INSERT INTO partner_transactions
+            (partner_id, type, amount, balance_after, description, admin_note, status)
+           VALUES ($1, 'auszahlung', $2, $3, $4, $5, 'normal')`,
+          [
+            input.partnerId,
+            (-input.amount).toFixed(2),
+            newBalance.toFixed(2),
+            input.description || `Monetäre Auszahlung: ${input.amount.toFixed(2)} €`,
+            `request:${input.requestId}`,
+          ],
+        );
+        await client.query("COMMIT");
+        console.log(`[Partners] Payout recorded: ${input.amount.toFixed(2)} EUR for ${partner.name}`);
+        return { success: true, newBalance, alreadyApplied: false };
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
       }
-
-      const newBalance = Math.round((currentBalance - input.amount) * 100) / 100;
-
-      // Update balance
-      await db.update(partners).set({
-        creditBalance: newBalance.toFixed(2),
-        updatedAt: new Date(),
-      }).where(eq(partners.id, input.partnerId));
-
-      // Record auszahlung transaction
-      await db.insert(partnerTransactions).values({
-        partnerId: input.partnerId,
-        type: "auszahlung",
-        amount: (-input.amount).toFixed(2),
-        balanceAfter: newBalance.toFixed(2),
-        description: input.description || `Monet\u00e4re Auszahlung: ${input.amount.toFixed(2)} \u20ac`,
-      });
-
-      console.log(`[Partners] Payout recorded: ${input.amount.toFixed(2)} EUR for ${partner.name}`);
-      return { success: true, newBalance };
     }),
 
   // ─── PUBLIC: Checkout integration ──────────────────────────────
 
   // Validate a partner code (public – called from checkout)
-  // Business rules:
-  // - "einmalig" (Creator): Customer gets discount ONLY on their FIRST order
-  // - "dauerhaft" (Partner): Customer gets discount ONLY on their FIRST order (partner earns commission on ALL orders)
+  // A Creator code grants its configured customer discount on every valid use.
+  // Historical Partner and Eigennutzer conditions remain separately configured.
   validateCode: publicProcedure
     .input(z.object({ code: z.string(), customerEmail: z.string().optional() }))
     .query(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
-      const [partner] = await db.select().from(partners)
-        .where(and(
-          eq(partners.code, input.code.toUpperCase()),
-          eq(partners.isActive, 1)
-        ))
-        .limit(1);
-
-      if (!partner) {
+      const resolved = await resolveActivePartnerCode(input.code);
+      if (!resolved) {
         return { valid: false, discountPercent: 0, partnerName: null, discountEligible: false, reason: "code_not_found" };
       }
 
-      // Check if customer is eligible for discount (first order only for both types)
-      let discountEligible = true;
+      let discountEligible = isDiscountAllowedForProgram(resolved.program, input.customerEmail, resolved.partnerEmail);
       let reason: string | null = null;
-      const isEigennutzer = (partner.notes || "").includes("[EIGENNUTZER]");
-
-      // Eigennutzer: Code ist auf die eigene E-Mail gesperrt
-      if (isEigennutzer && partner.email) {
-        if (!input.customerEmail) {
-          // Kein E-Mail angegeben – Code nicht zulässig (E-Mail muss eingegeben werden)
-          discountEligible = false;
-          reason = "eigennutzer_email_required";
-        } else {
-          const customerEmail = input.customerEmail.toLowerCase().trim();
-          const partnerEmail = partner.email.toLowerCase().trim();
-          if (customerEmail !== partnerEmail) {
-            // Fremde E-Mail – Code gesperrt
-            return {
-              valid: false,
-              discountPercent: 0,
-              partnerName: null,
-              commissionType: partner.commissionType,
-              discountEligible: false,
-              reason: "eigennutzer_locked",
-            };
-          }
-        }
+      if (!discountEligible) {
+        reason = resolved.program.customerDiscountPolicy === "own_email_only"
+          ? (input.customerEmail ? "eigennutzer_locked" : "eigennutzer_email_required")
+          : "program_inactive";
       }
 
-      if (input.customerEmail && discountEligible) {
+      // Creators explicitly allow unlimited valid code use. The legacy partner
+      // program retains its existing first-paid-code-order policy.
+      if (input.customerEmail && discountEligible && !isRepeatCodeUseAllowed(resolved.program)) {
         const customerEmail = input.customerEmail.toLowerCase().trim();
-        // Check for previous PAID orders from this customer using this partner code
-        const previousOrders = await db.select().from(orders)
-          .where(and(
-            eq(orders.partnerCode, partner.code),
-            eq(orders.email, customerEmail)
-          ));
-        const previousPaidOrders = previousOrders.filter(o =>
-          o.status === "bezahlt" || o.status === "gepackt" || o.status === "versendet" || o.status === "zugestellt"
-        );
-        if (previousPaidOrders.length > 0) {
+        const pool = await getPool();
+        if (!pool) throw new Error("Database not available");
+        if (await hasOtherPaidCodeOrder((text, values) => pool.query(text, values), resolved.partnerCode, customerEmail)) {
           discountEligible = false;
           reason = "already_used";
-          console.log(`[Partners] validateCode: Customer ${customerEmail} already has ${previousPaidOrders.length} paid orders with code ${partner.code} – discount not eligible`);
         }
       }
 
       return {
         valid: true,
-        discountPercent: discountEligible ? parseFloat(partner.customerDiscountPercent) : 0,
-        partnerName: partner.name,
-        commissionType: partner.commissionType,
+        codeId: resolved.codeId,
+        partnerCode: resolved.partnerCode,
+        discountPercent: discountEligible ? resolved.customerDiscountPercent : 0,
+        partnerName: resolved.partnerName,
+        commissionType: resolved.program.key === "creator" ? "einmalig" : "dauerhaft",
+        programKey: resolved.program.key,
+        settlementMethod: resolved.program.settlementMethod,
         discountEligible,
         reason,
       };
@@ -757,9 +924,9 @@ export const partnerRouter = router({
       return { valid: true };
     }),
 
-  // ─── INTERNAL: payment-bound commission booking ────────────────
+  // ─── INTERNAL: payment-and-dispatch-bound commission booking ────────────────
   // Compatibility endpoint: amount and customer data are deliberately ignored.
-  // The persisted paid order is the only source of truth.
+  // Persisted payment and dispatch confirmations are the only source of truth.
   bookCommission: adminProcedure
     .input(z.object({
       orderId: z.string(),
@@ -776,7 +943,7 @@ export const partnerRouter = router({
         newBalance: result.balance,
         reason: result.reason,
         message: result.booked
-          ? "Provision wurde nach bestätigtem Zahlungseingang gebucht"
+          ? "Provision wurde nach bestätigter Zahlung und Versand gebucht"
           : `Keine neue Provision gebucht: ${result.reason}`,
       };
     }),
@@ -813,6 +980,13 @@ export const partnerRouter = router({
       await db.update(partners).set({ lastLogin: new Date() }).where(eq(partners.id, partner.id));
 
       const token = createPartnerToken(partner.id);
+      const program = await getPartnerProgram(partner.id);
+      if (!program) throw new Error("Partnerprogramm nicht verfügbar");
+      const selfOrderDiscountPercent = calculateSelfOrderDiscountPercent(
+        program,
+        parseFloat(partner.customerDiscountPercent),
+        parseFloat(partner.commissionPercent),
+      );
 
       // Set cookie
       ctx.res.cookie(PARTNER_COOKIE_NAME, token, {
@@ -833,8 +1007,10 @@ export const partnerRouter = router({
           code: partner.code,
           partnerNumber: partner.partnerNumber,
           commissionType: partner.commissionType,
+          programKey: partner.programKey,
           creditBalance: parseFloat(partner.creditBalance),
           customerDiscountPercent: parseFloat(partner.customerDiscountPercent),
+          selfOrderDiscountPercent,
           address: {
             street: partner.street || "",
             houseNumber: partner.houseNumber || "",
@@ -864,6 +1040,7 @@ export const partnerRouter = router({
   portalMe: partnerProcedure
     .query(async ({ ctx }) => {
       const partner = (ctx as any).partner;
+      const program = await getPartnerProgram(partner.id);
       return {
         id: partner.id,
         name: partner.name,
@@ -875,7 +1052,15 @@ export const partnerRouter = router({
         commissionPercent: parseFloat(partner.commissionPercent),
         customerDiscountPercent: parseFloat(partner.customerDiscountPercent),
         commissionType: partner.commissionType,
+        programKey: partner.programKey,
         creditBalance: parseFloat(partner.creditBalance),
+        selfOrderDiscountPercent: program
+          ? calculateSelfOrderDiscountPercent(
+              program,
+              parseFloat(partner.customerDiscountPercent),
+              parseFloat(partner.commissionPercent),
+            )
+          : parseFloat(partner.customerDiscountPercent),
         address: {
           street: partner.street || "",
           houseNumber: partner.houseNumber || "",
@@ -883,6 +1068,200 @@ export const partnerRouter = router({
           city: partner.city || "",
           country: partner.country || "",
         },
+      };
+    }),
+
+  // Aktuellen offenen Adressantrag für die Partnerportal-Einstellungen anzeigen.
+  portalAddressRequestStatus: partnerProcedure
+    .query(async ({ ctx }) => {
+      const partner = (ctx as any).partner;
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+      const [request] = await db.select().from(partnerAddressRequests)
+        .where(and(eq(partnerAddressRequests.partnerId, partner.id), eq(partnerAddressRequests.status, "open")))
+        .orderBy(desc(partnerAddressRequests.updatedAt))
+        .limit(1);
+      if (!request) return null;
+      return {
+        id: request.id,
+        status: request.status,
+        requestedAddress: JSON.parse(request.requestedAddressJson),
+        createdAt: request.createdAt,
+        updatedAt: request.updatedAt,
+      };
+    }),
+
+  // An authenticated partner owns their own delivery address. Every direct
+  // change is validated first and retained as an immutable approved audit row;
+  // no other partner, customer or historic order can be altered through this route.
+  portalUpdateDeliveryAddress: partnerProcedure
+    .input(partnerAddressUpdateInput)
+    .mutation(async ({ ctx, input }) => {
+      const partner = (ctx as any).partner;
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      const requestedAddress = normalisePartnerAddress(input);
+      const currentAddress = {
+        street: partner.street || "",
+        houseNumber: partner.houseNumber || "",
+        zip: partner.zip || "",
+        city: partner.city || "",
+        country: partner.country || "",
+      };
+      if (addressFingerprint(requestedAddress) === addressFingerprint(currentAddress)) {
+        return { success: true, alreadyCurrent: true, message: "Diese Lieferadresse ist bereits hinterlegt." };
+      }
+
+      const validation = await validateGermanAddress({
+        ...requestedAddress,
+        deliveryType: "home",
+      });
+      const needsExplicitConfirmation = validation.applicable
+        && (validation.status === "warning" || validation.status === "unavailable");
+      if (needsExplicitConfirmation && input.addressValidationOverride?.confirmed !== true) {
+        throw partnerAddressValidationError(validation.warnings);
+      }
+
+      if (needsExplicitConfirmation) {
+        await persistAddressValidation({
+          input: { ...requestedAddress, deliveryType: "home" },
+          result: validation,
+          context: "partner_address_update",
+          overrideConfirmed: true,
+          confirmedBy: `Partner ${partner.partnerNumber}`,
+        });
+      }
+
+      await db.transaction(async (tx) => {
+        await tx.update(partners).set({
+          street: requestedAddress.street,
+          houseNumber: requestedAddress.houseNumber || null,
+          zip: requestedAddress.zip,
+          city: requestedAddress.city,
+          country: requestedAddress.country,
+          updatedAt: new Date(),
+        }).where(eq(partners.id, partner.id));
+
+        // Supersede any still-open request: the portal owner has now saved a
+        // newer verified address directly, so an older admin approval must not
+        // overwrite it later.
+        await tx.update(partnerAddressRequests).set({
+          status: "rejected",
+          reviewedAt: new Date(),
+          reviewedBy: `partner:${partner.partnerNumber}`,
+          reviewNote: "Durch die spätere direkte, validierte Partner-Adressänderung ersetzt.",
+          updatedAt: new Date(),
+        }).where(and(
+          eq(partnerAddressRequests.partnerId, partner.id),
+          eq(partnerAddressRequests.status, "open"),
+        ));
+
+        await tx.insert(partnerAddressRequests).values({
+          partnerId: partner.id,
+          partnerNameSnapshot: partner.name,
+          partnerNumberSnapshot: partner.partnerNumber,
+          partnerEmailSnapshot: partner.email || null,
+          currentAddressJson: serialisePartnerAddress(currentAddress),
+          requestedAddressJson: serialisePartnerAddress(requestedAddress),
+          requestFingerprint: addressFingerprint(requestedAddress),
+          status: "approved",
+          notificationStatus: "not_required",
+          reviewedAt: new Date(),
+          reviewedBy: `partner:${partner.partnerNumber}`,
+          reviewNote: "Direkte, durch den angemeldeten Partner bestätigte und validierte Lieferadressänderung.",
+        });
+      });
+
+      return {
+        success: true,
+        alreadyCurrent: false,
+        message: "Lieferadresse wurde geprüft und für zukünftige Partnerbestellungen gespeichert.",
+      };
+    }),
+
+  // A portal partner can request, never directly overwrite, the canonical delivery address.
+  portalRequestAddressChange: partnerProcedure
+    .input(partnerAddressInput)
+    .mutation(async ({ ctx, input }) => {
+      const partner = (ctx as any).partner;
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      const requestedAddress = normalisePartnerAddress(input);
+      const currentAddress = {
+        street: partner.street || "",
+        houseNumber: partner.houseNumber || "",
+        zip: partner.zip || "",
+        city: partner.city || "",
+        country: partner.country || "",
+      };
+      const fingerprint = addressFingerprint(requestedAddress);
+      if (fingerprint === addressFingerprint(currentAddress)) {
+        return { success: true, alreadyCurrent: true, message: "Diese Lieferadresse ist bereits hinterlegt." };
+      }
+
+      const [openRequest] = await db.select().from(partnerAddressRequests)
+        .where(and(eq(partnerAddressRequests.partnerId, partner.id), eq(partnerAddressRequests.status, "open")))
+        .orderBy(desc(partnerAddressRequests.updatedAt))
+        .limit(1);
+
+      let requestId: number;
+      let shouldNotify = true;
+      if (openRequest && openRequest.requestFingerprint === fingerprint) {
+        requestId = openRequest.id;
+        shouldNotify = false;
+      } else if (openRequest) {
+        const [updated] = await db.update(partnerAddressRequests).set({
+          currentAddressJson: serialisePartnerAddress(currentAddress),
+          requestedAddressJson: serialisePartnerAddress(requestedAddress),
+          requestFingerprint: fingerprint,
+          notificationStatus: "pending",
+          notificationError: null,
+          notificationSentAt: null,
+          updatedAt: new Date(),
+        }).where(eq(partnerAddressRequests.id, openRequest.id)).returning({ id: partnerAddressRequests.id });
+        requestId = updated.id;
+      } else {
+        const [created] = await db.insert(partnerAddressRequests).values({
+          partnerId: partner.id,
+          partnerNameSnapshot: partner.name,
+          partnerNumberSnapshot: partner.partnerNumber,
+          partnerEmailSnapshot: partner.email || null,
+          currentAddressJson: serialisePartnerAddress(currentAddress),
+          requestedAddressJson: serialisePartnerAddress(requestedAddress),
+          requestFingerprint: fingerprint,
+          status: "open",
+          notificationStatus: "pending",
+        }).returning({ id: partnerAddressRequests.id });
+        requestId = created.id;
+      }
+
+      let notification: { sent: boolean; error?: string } = { sent: false };
+      if (shouldNotify) {
+        notification = await sendPartnerAddressRequestNotification({
+          id: requestId,
+          partnerName: partner.name,
+          partnerNumber: partner.partnerNumber,
+          partnerEmail: partner.email || null,
+          currentAddress,
+          requestedAddress,
+        });
+        await db.update(partnerAddressRequests).set({
+          notificationStatus: notification.sent ? "sent" : "failed",
+          notificationError: notification.error || null,
+          notificationSentAt: notification.sent ? new Date() : null,
+          updatedAt: new Date(),
+        }).where(eq(partnerAddressRequests.id, requestId));
+      }
+
+      return {
+        success: true,
+        requestId,
+        notificationSent: notification.sent,
+        message: shouldNotify
+          ? "Adressänderung wurde gespeichert und zur Prüfung weitergeleitet."
+          : "Der gleiche Adressantrag ist bereits zur Prüfung gespeichert.",
       };
     }),
 
@@ -958,8 +1337,9 @@ export const partnerRouter = router({
 
       const limit = input?.limit || 50;
       const offset = input?.offset || 0;
+      const attributionCodes = await getPartnerAttributionCodes(partner.id, partner.code);
 
-            // Only show paid orders
+      // Only show paid orders
       const { inArray } = await import("drizzle-orm");
       const paidStatuses = ["bezahlt", "gepackt", "versendet", "zugestellt"] as const;
       const referredOrders = await db.select({
@@ -973,7 +1353,7 @@ export const partnerRouter = router({
         paidAt: orders.paidAt,
       }).from(orders)
         .where(and(
-          eq(orders.partnerCode, partner.code),
+          partnerAttributionWhere(partner.id, attributionCodes),
           inArray(orders.status, paidStatuses)
         ))
         .orderBy(desc(orders.orderDate))
@@ -1002,8 +1382,9 @@ export const partnerRouter = router({
       // Count total referred orders (paid only)
       const { inArray, ne } = await import("drizzle-orm");
       const paidStatuses = ["bezahlt", "gepackt", "versendet", "zugestellt"] as const;
+      const attributionCodes = await getPartnerAttributionCodes(partner.id, partner.code);
 
-       const referredOrders = await db.select({
+      const referredOrders = await db.select({
         total: orders.total,
         subtotal: orders.subtotal,
         discount: orders.discount,
@@ -1011,7 +1392,7 @@ export const partnerRouter = router({
         partnerCommission: orders.partnerCommission,
       }).from(orders)
         .where(and(
-          eq(orders.partnerCode, partner.code),
+          partnerAttributionWhere(partner.id, attributionCodes),
           inArray(orders.status, paidStatuses)
         ));
       const totalOrders = referredOrders.length;
@@ -1051,6 +1432,7 @@ export const partnerRouter = router({
         totalPaidOut,
         currentBalance: parseFloat(partner.creditBalance),
         commissionType: partner.commissionType,
+        programKey: partner.programKey,
         commissionPercent: parseFloat(partner.commissionPercent),
         customerDiscountPercent: parseFloat(partner.customerDiscountPercent),
       };
@@ -1062,11 +1444,14 @@ export const partnerRouter = router({
   portalMyCredit: partnerProcedure
     .query(async ({ ctx }) => {
       const partner = (ctx as any).partner;
+      const program = await getPartnerProgram(partner.id);
       return {
         creditBalance: parseFloat(partner.creditBalance),
         partnerName: partner.name,
         partnerNumber: partner.partnerNumber,
         commissionType: partner.commissionType,
+        programKey: program?.key || partner.programKey,
+        creditRedeemable: Boolean(program && canRedeemShopCredit(program)),
         address: {
           street: partner.street || "",
           houseNumber: partner.houseNumber || "",
@@ -1087,6 +1472,10 @@ export const partnerRouter = router({
       const partner = (ctx as any).partner;
       const db = await getDb();
       if (!db) throw new Error("Database not available");
+      const program = await getPartnerProgram(partner.id);
+      if (!program || !canRedeemShopCredit(program)) {
+        throw new Error("Dieses Programm führt Provisionen als Auszahlung und hat kein Shopguthaben zur Einlösung");
+      }
 
       const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1);
       if (!order || order.partnerNumber !== partner.partnerNumber) {
@@ -1123,6 +1512,10 @@ export const partnerRouter = router({
         .where(and(eq(partners.partnerNumber, input.partnerNumber), eq(partners.isActive, 1)))
         .limit(1);
       if (!partner) throw new Error("Partner nicht gefunden");
+      const program = await getPartnerProgram(partner.id);
+      if (!program || !canRedeemShopCredit(program)) {
+        throw new Error("Dieses Programm führt Provisionen als Auszahlung und hat kein Shopguthaben zur Einlösung");
+      }
 
       // Verify password
       if (!partner.passwordHash) {
@@ -1248,6 +1641,7 @@ export const partnerRouter = router({
         <p style="color:#64748b;font-size:12px;margin:16px 0 0;">Gueltig fuer 15 Minuten</p>
       </div>
       <p style="color:#64748b;font-size:13px;margin:0;">Falls du keinen Reset angefordert hast, ignoriere diese E-Mail.</p>
+      <p style="color:#64748b;font-size:12px;margin:16px 0 0;">Technische Hilfe: <a href="mailto:${PARTNER_TECHNICAL_CONTACT.email}" style="color:#60a5fa;">${PARTNER_TECHNICAL_CONTACT.email}</a></p>
     </div>
   </div>
 </body>
@@ -1262,7 +1656,8 @@ export const partnerRouter = router({
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            from: "369 Research <noreply@mail.369research.eu>",
+            from: PARTNER_TECHNICAL_CONTACT.from,
+            reply_to: PARTNER_TECHNICAL_CONTACT.replyTo,
             to: [partner.email],
             subject: "Passwort zuruecksetzen – 369 Research Partner Portal",
             html: emailHtml,
@@ -1432,7 +1827,8 @@ export const partnerRouter = router({
     <!-- Footer -->
     <div style="background:#0d1117;border:1px solid #1e3a5f;border-top:none;border-radius:0 0 12px 12px;padding:20px;text-align:center;">
       <p style="margin:0;font-size:12px;color:#475569;">369 Research \u00b7 Precision. Purity. Performance.</p>
-      <p style="margin:4px 0 0;font-size:12px;color:#475569;">Bei Fragen: WhatsApp +4915510063537</p>
+      <p style="margin:4px 0 0;font-size:12px;color:#475569;">Allgemeine Partnerfragen: <a href="mailto:${PARTNER_SUPPORT_CONTACT.email}" style="color:#93c5fd;">${PARTNER_SUPPORT_CONTACT.email}</a></p>
+      <p style="margin:4px 0 0;font-size:12px;color:#475569;">Technische Probleme im Partner-Portal: <a href="mailto:${PARTNER_TECHNICAL_CONTACT.email}" style="color:#93c5fd;">${PARTNER_TECHNICAL_CONTACT.email}</a></p>
     </div>
   </div>
 </body>
@@ -1449,7 +1845,8 @@ export const partnerRouter = router({
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          from: "369 Research <noreply@mail.369research.eu>",
+          from: PARTNER_SUPPORT_CONTACT.from,
+          reply_to: PARTNER_SUPPORT_CONTACT.replyTo,
           to: [partner.email],
           subject: `Deine Zugangsdaten – 369 Research Partner Portal`,
           html,
@@ -1467,76 +1864,15 @@ export const partnerRouter = router({
       return { success: true, message: `Zugangsdaten an ${partner.email} gesendet` };
     }),
 
-  // ─── ADMIN: Recalculate commissions for all partners ────────────────────────
+  // ─── ADMIN: Reconciliation gate ────────────────────────────────────────────
+  // Automatic rewriting of historical balances was removed. A reconciliation must
+  // produce an order-level report and receive an explicit booking decision.
   recalcCommissions: adminProcedure
     .mutation(async () => {
-      const db = await getDb();
-      if (!db) throw new Error("Database not available");
-      const { inArray } = await import("drizzle-orm");
-      const paidStatuses = ["bezahlt", "gepackt", "versendet", "zugestellt"] as const;
-
-      const allPartners = await db.select().from(partners);
-      let totalFixed = 0;
-      const log: string[] = [];
-
-      for (const partner of allPartners) {
-        const commissionRate = parseFloat(partner.commissionPercent) / 100;
-
-        const partnerOrders = await db.select({
-          orderId: orders.orderId,
-          subtotal: orders.subtotal,
-          discount: orders.discount,
-          partnerCommission: orders.partnerCommission,
-          status: orders.status,
-        }).from(orders)
-          .where(and(
-            eq(orders.partnerCode, partner.code),
-            inArray(orders.status, paidStatuses)
-          ));
-
-        let partnerBalanceCorrection = 0;
-
-        for (const order of partnerOrders) {
-          const sub = parseFloat(order.subtotal || "0");
-          const disc = parseFloat(order.discount || "0");
-          const netto = Math.max(0, sub - disc);
-          const expectedCommission = Math.round(netto * commissionRate * 100) / 100;
-          const actualCommission = parseFloat(order.partnerCommission || "0");
-          const diff = Math.round((expectedCommission - actualCommission) * 100) / 100;
-
-          if (Math.abs(diff) >= 0.01) {
-            await db.update(orders).set({
-              partnerCommission: expectedCommission.toFixed(2),
-            }).where(eq(orders.orderId, order.orderId));
-
-            await db.insert(partnerTransactions).values({
-              partnerId: partner.id,
-              type: "provision",
-              amount: diff.toFixed(2),
-              balanceAfter: "0",
-              orderId: order.orderId,
-              customerName: "Korrektur",
-              description: `Provisions-Korrektur für Bestellung ${order.orderId}: ${actualCommission.toFixed(2)} → ${expectedCommission.toFixed(2)} EUR`,
-            });
-
-            partnerBalanceCorrection += diff;
-            totalFixed++;
-            log.push(`${partner.code} | ${order.orderId}: ${actualCommission.toFixed(2)} → ${expectedCommission.toFixed(2)} (diff: +${diff.toFixed(2)})`);
-          }
-        }
-
-        if (Math.abs(partnerBalanceCorrection) >= 0.01) {
-          const currentBalance = parseFloat(partner.creditBalance || "0");
-          const newBalance = Math.round((currentBalance + partnerBalanceCorrection) * 100) / 100;
-          await db.update(partners).set({
-            creditBalance: newBalance.toFixed(2),
-            updatedAt: new Date(),
-          }).where(eq(partners.id, partner.id));
-          log.push(`${partner.code} | Guthaben: ${currentBalance.toFixed(2)} → ${newBalance.toFixed(2)} EUR`);
-        }
-      }
-
-      console.log(`[Partners] recalcCommissions: fixed ${totalFixed} orders`);
-      return { success: true, fixed: totalFixed, log };
+      return {
+        success: true,
+        fixed: 0,
+        log: ["Automatische historische Provisionskorrekturen sind gesperrt. Erst eine prüfbare Einzelabrechnung erstellen und dann ausdrücklich freigeben."],
+      };
     }),
 });

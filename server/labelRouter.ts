@@ -179,6 +179,8 @@ export const labelRouter = router({
         orderId: z.string(),
         imageBase64: z.string(),
         mimeType: z.string().default("image/png"),
+        trackingCarrier: z.string().trim().min(1).max(100).optional(),
+        trackingNumber: z.string().trim().min(1).max(100).optional(),
       })
     )
     .mutation(async ({ input }) => {
@@ -199,19 +201,28 @@ export const labelRouter = router({
         .set({ shippingLabelUrl: dataUrl })
         .where(eq(orders.orderId, input.orderId));
 
-      // Extract tracking number
-      const { trackingNumber, method } = await extractTrackingNumber(
-        input.imageBase64,
-        input.mimeType
-      );
+      // Für extern gebuchte Labels sind Carrier und Trackingnummer eine bewusste
+      // Benutzereingabe. Sie dürfen niemals als DHL fehlklassifiziert werden.
+      const manualCarrier = input.trackingCarrier?.trim() || null;
+      let trackingNumber = input.trackingNumber?.trim() || null;
+      let trackingCarrier = manualCarrier;
+      let method = manualCarrier ? "manual" : "none";
 
-      // If tracking found, save it immediately
-      if (trackingNumber) {
+      // Der bestehende automatische DHL-Extraktionsweg bleibt für Labels ohne
+      // expliziten externen Carrier vollständig erhalten.
+      if (!manualCarrier && !trackingNumber) {
+        const extracted = await extractTrackingNumber(input.imageBase64, input.mimeType);
+        trackingNumber = extracted.trackingNumber;
+        trackingCarrier = trackingNumber ? "DHL" : null;
+        method = extracted.method;
+      }
+
+      if (trackingNumber || trackingCarrier) {
         await db
           .update(orders)
           .set({
-            trackingNumber,
-            trackingCarrier: "DHL",
+            ...(trackingNumber ? { trackingNumber } : {}),
+            ...(trackingCarrier ? { trackingCarrier } : {}),
           })
           .where(eq(orders.orderId, input.orderId));
       }
@@ -219,8 +230,8 @@ export const labelRouter = router({
       return {
         success: true,
         url: dataUrl,
-        trackingNumber: trackingNumber || null,
-        trackingCarrier: trackingNumber ? "DHL" : null,
+        trackingNumber,
+        trackingCarrier,
         extractionMethod: method,
       };
     }),

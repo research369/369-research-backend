@@ -9,7 +9,7 @@ import { computeBalanceFromLedger, isKwkEnabled, KWK_DISCOUNT_PERCENT } from "./
 import { normalizeKwkPhone, resolveShippingRegion } from "./kwkCheckoutPricing.js";
 import { verifyKwkToken } from "./kwkAuth.js";
 import { createOrderForCheckoutV2 } from "./orderRouter.js";
-import { getPartnerFromRequest } from "./partnerRouter.js";
+import { getAuthenticatedPartnerFromRequest as getPartnerFromRequest } from "./partnerAuth.js";
 import type { Request } from "express";
 import {
   calculateCheckoutV2Quote,
@@ -412,6 +412,8 @@ export const checkoutV2Router = router({
 
     return createOrderForCheckoutV2({
       storeKey: "checkout-v2",
+      orderSource: "shop",
+      communicationLanguage: "de",
       checkoutIdempotencyKey: input.idempotencyKey,
       items: orderItems,
       customer,
