@@ -163,7 +163,7 @@ test("router snapshots use canonical earning and retain the final historical pay
   assert.equal([...source.matchAll(/await redeemPartnerCreditForOrder\(orderId\)/g)].length, 1, "only duplicate recovery uses the standalone wrapper");
   const ledger = readFileSync(new URL("./partnerCreditService.ts", import.meta.url), "utf8");
   assert.match(ledger, /FOR UPDATE/);
-  assert.match(ledger, /order.partner_settlement_method_snapshot === "payout"/);
+  assert.match(ledger, /if \(order.partner_settlement_method_snapshot !== "shop_credit"\) throw new Error\("PARTNER_CREDIT_POLICY_REVIEW"\)/);
   for (const filename of ["partnerRouter.ts", "operationsPartner.ts"]) {
     const response = readFileSync(new URL(filename, import.meta.url), "utf8");
     assert.match(response, /resolveSelfOrderTerms\(/);

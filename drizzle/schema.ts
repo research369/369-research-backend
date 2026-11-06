@@ -548,6 +548,8 @@ export const orders = pgTable("orders", {
   creditUsed: decimal("credit_used", { precision: 10, scale: 2 }).default("0"),
   kwkCreditUsed: decimal("kwk_credit_used", { precision: 10, scale: 2 }).default("0"),
   kwkCreditRequested: decimal("kwk_credit_requested", { precision: 10, scale: 2 }).default("0"),
+  // Verified session claim at checkout only; unknown legacy owners remain NULL for review.
+  kwkCreditOwnerId: integer("kwk_credit_owner_id"),
 
   // First-party marketing QR attribution. Product/serial QR codes under `/i/*`
   // use a separate namespace and are never written into these campaign fields.

@@ -38,6 +38,7 @@ import { ensureDiscountProvenanceSchema } from "./discountProvenanceSchema.js";
 import { ensureShipmentLabelOverrideConfig } from "./shipmentLabelOverrideConfig.js";
 import { ensurePartnerAddressRequestSchema } from "./partnerAddressRequestSchema.js";
 import { ensurePartnerProgramSchema } from "./partnerProgramSchema.js";
+import { ensurePartnerFinancialSchema, isPartnerFinancialSchemaReady } from "./partnerFinancialSchema.js";
 import { ensureFollowUpTermsSchema } from "./followUpTermsSchema.js";
 import { qrRedirectRouter } from "./qrRedirectRouter.js";
 import { ensurePeps4petsCheckoutSchema, isPeps4petsCheckoutSchemaReady } from "./peps4petsCheckoutSchema.js";
@@ -140,6 +141,7 @@ app.get("/health/ready", async (_req, res) => {
     orderIntegrityReady: isPriorityOrderIntegrityReady(),
     permissionsSchemaReady: isPermissionsSchemaReady(),
     accountSecurityReady: isAccountSecuritySchemaReady(),
+    partnerFinancialLedgerReady: isPartnerFinancialSchemaReady(),
     timestamp: new Date().toISOString(),
   });
 });
@@ -1316,6 +1318,9 @@ async function start() {
   // migration. KWK base tables have been created by the existing bootstrap.
   await ensureAccountSecuritySchema();
 
+  // Financial invariants are mandatory and run AFTER the existing KWK base tables.
+  // Duplicates fail readiness visibly; never repair historical balances automatically.
+  await ensurePartnerFinancialSchema();
 }
 
 const server = app.listen(port, "0.0.0.0", () => {

@@ -22,6 +22,7 @@ import { ENV } from "./env.js";
 import { getPool, getDb } from "./db.js";
 import { isKwkCreditReleaseEligible } from "./kwkCreditEligibility.js";
 import crypto from "crypto";
+import { calculateCommissionBase, parsePartnerMoney, withPartnerFinancialTransaction, type PartnerCreditQueryClient } from "./partnerCreditService.js";
 
 // ── Feature Flag ──────────────────────────────────────────────────────────
 
@@ -173,6 +174,10 @@ export async function bookPendingCredit(
   try {
     await client.query("BEGIN");
 
+    if (!Number.isFinite(amount) || amount <= 0) throw new Error("Ungültiger Guthabenbetrag");
+    const order = await client.query("SELECT status, cancelled_at FROM orders WHERE order_id=$1 FOR UPDATE", [orderId]);
+    if (order.rows.length !== 1 || order.rows[0].status === "storniert" || order.rows[0].cancelled_at) throw new Error("KWK_CANCELLED_OR_MISSING_ORDER");
+    await client.query("SELECT id FROM kwk_accounts WHERE id=$1 FOR UPDATE", [kwkId]);
     // Serialisiert parallele Requests derselben Bestellung. Der bisherige
     // SELECT-vor-INSERT-Check allein war bei zwei gleichzeitigen Requests
     // nicht ausreichend.
@@ -232,8 +237,6 @@ export async function releaseCredit(
 
     // Status-Webhooks und manuelle Klicks können gleichzeitig eintreffen.
     // Pro Bestellung darf Guthaben nur einmal freigegeben werden.
-    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`kwk-order:${orderId}`]);
-
     // The order is the payment source of truth. Status alone is not enough:
     // a paid fulfilment status must carry the persisted payment timestamp.
     const orderResult = await client.query<{
@@ -252,6 +255,7 @@ export async function releaseCredit(
       return { released: false, reason: "order_not_found" };
     }
     const order = orderResult.rows[0];
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`kwk-order:${orderId}`]);
     if (!isKwkCreditReleaseEligible({
       status: order.status,
       paidAt: order.paid_at,
@@ -279,6 +283,8 @@ export async function releaseCredit(
       return { released: false, reason: "ambiguous_pending_credit" };
     }
     const { id: pendingId, kwk_id: kwkId, amount } = pendingResult.rows[0];
+    if (!Number.isFinite(Number(amount)) || Number(amount) < 0) throw new Error("KWK_HISTORICAL_SIGN_REVIEW");
+    await client.query("SELECT id FROM kwk_accounts WHERE id=$1 FOR UPDATE", [kwkId]);
 
     // Pending-Eintrag als confirmed markieren
     await client.query(
@@ -331,67 +337,44 @@ export async function releaseCredit(
  * Guthaben entfernen bei Storno.
  * Gegenbuchung: neuer 'cancelled' Eintrag (Ledger bleibt unveränderlich).
  */
-export async function cancelCredit(orderId: string): Promise<void> {
-  const pool = await getPool();
-  if (!pool) throw new Error("Database not available");
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-
-    // Order-bound lock makes repeated status changes idempotent.
-    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`kwk-order:${orderId}`]);
-
-    // Alle Einträge für diese Bestellung finden
-    const entries = await client.query(
-      `SELECT id, kwk_id, amount, type, status FROM kwk_ledger
-       WHERE order_id = $1 AND status != 'cancelled'`,
-      [orderId]
-    );
-    if (entries.rows.length === 0) {
-      await client.query("ROLLBACK");
-      return;
-    }
-
-    // Pending credit was never available and is therefore cancelled without a counter-booking.
-    await client.query(
-      "UPDATE kwk_ledger SET status = 'cancelled' WHERE order_id = $1 AND type='pending_credit' AND status = 'pending'",
-      [orderId]
-    );
-
-    const kwkIds = [...new Set(entries.rows.map((row: any) => Number(row.kwk_id)))];
-    for (const kwkId of kwkIds) {
-      const rows = entries.rows.filter((row: any) => Number(row.kwk_id) === kwkId);
-      const alreadyCancelled = rows.some((row: any) => row.type === "cancelled" && row.status === "confirmed");
-      if (!alreadyCancelled) {
-        const released = rows.reduce((sum: number, row: any) =>
-          row.type === "credit_released" && row.status === "confirmed" ? sum + parseFloat(row.amount) : sum, 0);
-        const refunded = rows.reduce((sum: number, row: any) =>
-          row.type === "refund" && row.status === "confirmed" ? sum + Math.abs(parseFloat(row.amount)) : sum, 0);
-        const redeemed = rows.reduce((sum: number, row: any) =>
-          row.type === "redeemed" && row.status === "confirmed" ? sum + Math.abs(parseFloat(row.amount)) : sum, 0);
-        // A cancellation removes earned credit and restores credit spent on the cancelled order.
-        const counterAmount = redeemed - Math.max(0, released - refunded);
-        if (Math.abs(counterAmount) >= 0.005) {
-          await client.query(
-            `INSERT INTO kwk_ledger (kwk_id, order_id, amount, type, status, note, created_by)
-             VALUES ($1, $2, $3, 'cancelled', 'confirmed', $4, 'system')`,
-            [kwkId, orderId, counterAmount.toFixed(2), `Storno-Gegenbuchung für Bestellung ${orderId}`]
-          );
-        }
-      }
-      await syncKwkAccountCache(kwkId, client);
-    }
-
-    await client.query("UPDATE kwk_referrals SET status='cancelled' WHERE order_id=$1", [orderId]);
-
-    await client.query("COMMIT");
-    console.log(`[KWK] Credit cancellation completed for order ${orderId}`);
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
+export async function cancelCreditInTransaction(orderId: string, client: PartnerCreditQueryClient): Promise<void> {
+  const orders = await client.query("SELECT status, kwk_credit_owner_id FROM orders WHERE order_id=$1 FOR UPDATE", [orderId]);
+  if (orders.rows.length !== 1 || orders.rows[0].status !== "storniert") throw new Error("KWK_ORDER_NOT_CANCELLED");
+  await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`kwk-order:${orderId}`]);
+  const entries = await client.query("SELECT id, kwk_id, amount, type, status FROM kwk_ledger WHERE order_id=$1 ORDER BY id FOR UPDATE", [orderId]);
+  const referral = await client.query("SELECT kwk_id FROM kwk_referrals WHERE order_id=$1", [orderId]);
+  const earningsOwners = [...new Set(entries.rows.filter(e => ["pending_credit", "credit_released", "refund"].includes(e.type)).map(e => Number(e.kwk_id)))];
+  const redemptionOwners = [...new Set(entries.rows.filter(e => e.type === "redeemed").map(e => Number(e.kwk_id)))];
+  if (earningsOwners.length > 1 || redemptionOwners.length > 1
+    || (referral.rows.length && earningsOwners.some(id => id !== Number(referral.rows[0].kwk_id)))
+    || (orders.rows[0].kwk_credit_owner_id && redemptionOwners.some(id => id !== Number(orders.rows[0].kwk_credit_owner_id)))) throw new Error("KWK_OWNER_CONFLICT_REVIEW");
+  // Unknown legacy redemption owner is evidenced by its original ledger row, NEVER guessed by name.
+  for (const e of entries.rows) {
+    const amount = parsePartnerMoney(e.amount);
+    if ((["pending_credit", "credit_released"].includes(e.type) && amount < 0) || (["redeemed", "refund"].includes(e.type) && amount >= 0)) throw new Error("KWK_HISTORICAL_SIGN_REVIEW");
   }
+  const ownerIds = [...new Set(entries.rows.map(e => Number(e.kwk_id)))].sort((a,b) => a-b);
+  for (const id of ownerIds) {
+    const account = await client.query("SELECT id FROM kwk_accounts WHERE id=$1 FOR UPDATE", [id]);
+    if (account.rows.length !== 1) throw new Error("KWK_ORIGINAL_OWNER_MISSING_REVIEW");
+  }
+  await client.query("UPDATE kwk_ledger SET status='cancelled' WHERE order_id=$1 AND type='pending_credit' AND status='pending'", [orderId]);
+  for (const id of ownerIds) {
+    const rows = entries.rows.filter(e => Number(e.kwk_id) === id);
+    const cancellations = rows.filter(e => e.type === "cancelled" && e.status === "confirmed");
+    if (cancellations.length > 1) throw new Error("KWK_CANCELLATION_CONFLICT_REVIEW");
+    if (!cancellations.length) {
+      const net = rows.reduce((sum,e) => ["credit_released", "refund", "redeemed"].includes(e.type) && e.status === "confirmed" ? sum + parsePartnerMoney(e.amount) : sum, 0);
+      // Even zero net gets an immutable cancellation marker: replay cannot later restore credit.
+      await client.query(`INSERT INTO kwk_ledger(kwk_id,order_id,amount,type,status,note,created_by)
+        VALUES($1,$2,$3,'cancelled','confirmed',$4,'system')`, [id, orderId, (-net).toFixed(2), `Storno-Gegenbuchung für Bestellung ${orderId}`]);
+    }
+    await syncKwkAccountCache(id, client);
+  }
+  await client.query("UPDATE kwk_referrals SET status='cancelled' WHERE order_id=$1", [orderId]);
+}
+export async function cancelCredit(orderId: string, client?: PartnerCreditQueryClient): Promise<void> {
+  return withPartnerFinancialTransaction(c => cancelCreditInTransaction(orderId,c), client);
 }
 
 /**
@@ -406,7 +389,9 @@ export async function partialRefundCredit(
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-
+    if (!Number.isFinite(refundAmount) || refundAmount <= 0) throw new Error("Ungültiger Erstattungsbetrag");
+    const order = await client.query("SELECT status, cancelled_at FROM orders WHERE order_id=$1 FOR UPDATE", [orderId]);
+    if (order.rows.length !== 1 || order.rows[0].status === "storniert" || order.rows[0].cancelled_at) throw new Error("KWK_CANCELLED_OR_MISSING_ORDER");
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`kwk-order:${orderId}`]);
     const entries = await client.query(
       `SELECT kwk_id,
@@ -422,6 +407,7 @@ export async function partialRefundCredit(
     }
 
     const { kwk_id: kwkId, original_amount: originalAmount, refunded_amount: refundedAmount } = entries.rows[0];
+    await client.query("SELECT id FROM kwk_accounts WHERE id=$1 FOR UPDATE", [kwkId]);
     const originalAmountNum = parseFloat(originalAmount);
     const alreadyRefunded = parseFloat(refundedAmount) || 0;
 
@@ -456,76 +442,34 @@ export async function partialRefundCredit(
  * Nur verfügbares Guthaben (nicht pending).
  * Nur auf Produkte, nicht auf Versand.
  */
-export async function redeemCredit(
-  kwkId: number,
-  orderId: string,
-  amount: number
-): Promise<void> {
-  const pool = await getPool();
-  if (!pool) throw new Error("Database not available");
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-
-    if (!Number.isFinite(amount) || amount <= 0) throw new Error("Ungültiger Guthabenbetrag");
-    const account = await client.query(
-      "SELECT id FROM kwk_accounts WHERE id=$1 AND status='aktiv' AND deleted_at IS NULL FOR UPDATE",
-      [kwkId],
-    );
-    if (account.rows.length !== 1) throw new Error("KWK-Konto ist nicht aktiv");
-    const orderResult = await client.query(
-      "SELECT status, kwk_credit_requested FROM orders WHERE order_id=$1 FOR UPDATE",
-      [orderId],
-    );
-    if (orderResult.rows.length !== 1 || orderResult.rows[0].status !== "offen") {
-      throw new Error("Guthaben kann nur direkt für eine offene Bestellung eingelöst werden");
-    }
-    const requestedAmount = parseFloat(orderResult.rows[0].kwk_credit_requested || "0");
-    if (Math.abs(requestedAmount - amount) > 0.01) {
-      throw new Error("Guthabenbetrag stimmt nicht mit der Bestellung überein");
-    }
-    const existing = await client.query(
-      "SELECT amount FROM kwk_ledger WHERE kwk_id=$1 AND order_id=$2 AND type='redeemed' AND status='confirmed' LIMIT 1",
-      [kwkId, orderId],
-    );
-    if (existing.rows.length > 0) {
-      const existingAmount = Math.abs(parseFloat(existing.rows[0].amount));
-      if (Math.abs(existingAmount - amount) > 0.01) throw new Error("Für diese Bestellung wurde bereits ein anderer Guthabenbetrag eingelöst");
-      await client.query("COMMIT");
-      return;
-    }
-
-    const balanceResult = await client.query(
-      `SELECT COALESCE(SUM(CASE WHEN type IN ('credit_released','redeemed','cancelled','refund','manual_correction')
-        AND status='confirmed' THEN amount ELSE 0 END),0) available FROM kwk_ledger WHERE kwk_id=$1`,
-      [kwkId],
-    );
-    const available = parseFloat(balanceResult.rows[0].available) || 0;
-    if (available + 0.001 < amount) {
-      throw new Error(`Nicht genug Guthaben: verfügbar ${available.toFixed(2)}€, angefordert ${amount.toFixed(2)}€`);
-    }
-
-    // Ledger-Eintrag (negativ = Einlösung)
-    await client.query(
-      `INSERT INTO kwk_ledger (kwk_id, order_id, amount, type, status, note, created_by)
-       VALUES ($1, $2, $3, 'redeemed', 'confirmed', $4, 'system')`,
-      [kwkId, orderId, (-amount).toFixed(2), `Guthaben eingelöst bei Bestellung ${orderId}`]
-    );
-
-    // Persist only the actually booked amount. This makes order/ledger reconciliation explicit.
-    await client.query("UPDATE orders SET kwk_credit_used=$1, updated_at=NOW() WHERE order_id=$2", [amount.toFixed(2), orderId]);
-
-    // Cache synchronisieren
-    await syncKwkAccountCache(kwkId, client);
-
-    await client.query("COMMIT");
-    console.log(`[KWK] Credit redeemed: ${amount.toFixed(2)}€ by KWK-${kwkId} for order ${orderId}`);
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
+export async function redeemCreditInTransaction(kwkId: number, orderId: string, amount: number, client: PartnerCreditQueryClient): Promise<void> {
+  if (!Number.isFinite(amount) || amount <= 0 || parsePartnerMoney(amount) !== amount) throw new Error("Ungültiger Guthabenbetrag");
+  const orderResult = await client.query("SELECT status, paid_at, shipped_at, cancelled_at, kwk_credit_requested, kwk_credit_owner_id, subtotal, discount, credit_used, kwk_credit_used FROM orders WHERE order_id=$1 FOR UPDATE", [orderId]);
+  if (orderResult.rows.length !== 1) throw new Error("KWK_ORDER_NOT_FOUND");
+  const order = orderResult.rows[0];
+  if (Number(order.kwk_credit_owner_id) !== kwkId || !order.kwk_credit_owner_id) throw new Error("KWK_ORDER_CREDIT_OWNER_REQUIRED");
+  if (order.status === "storniert" || order.cancelled_at) throw new Error("KWK_CANCELLED_ORDER");
+  await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`kwk-order:${orderId}`]);
+  const account = await client.query("SELECT id FROM kwk_accounts WHERE id=$1 AND status='aktiv' AND deleted_at IS NULL FOR UPDATE", [kwkId]);
+  if (account.rows.length !== 1) throw new Error("KWK-Konto ist nicht aktiv");
+  if (parsePartnerMoney(order.kwk_credit_requested) !== amount) throw new Error("Guthabenbetrag stimmt nicht mit der Bestellung überein");
+  const goods = calculateCommissionBase({ subtotal: parsePartnerMoney(order.subtotal), totalProductDiscount: parsePartnerMoney(order.discount), creditUsed: parsePartnerMoney(order.credit_used) + parsePartnerMoney(order.kwk_credit_used) });
+  if (amount > goods - parsePartnerMoney(order.credit_used)) throw new Error("KWK_CREDIT_EXCEEDS_REMAINING_GOODS");
+  const existing = await client.query("SELECT kwk_id, amount, status FROM kwk_ledger WHERE order_id=$1 AND type='redeemed' FOR UPDATE", [orderId]);
+  if (existing.rows.length) {
+    if (existing.rows.length !== 1 || Number(existing.rows[0].kwk_id) !== kwkId || existing.rows[0].status !== "confirmed" || parsePartnerMoney(existing.rows[0].amount) !== -amount) throw new Error("KWK_REDEMPTION_CONFLICT_REVIEW");
+    return;
   }
+  if (order.status !== "offen" || order.paid_at || order.shipped_at) throw new Error("Guthaben kann nur direkt für eine offene unbezahlte Bestellung eingelöst werden");
+  const balance = await client.query(`SELECT COALESCE(SUM(amount) FILTER(WHERE type IN ('credit_released','redeemed','cancelled','refund','manual_correction') AND status='confirmed'),0) AS available FROM kwk_ledger WHERE kwk_id=$1`, [kwkId]);
+  const available = parsePartnerMoney(balance.rows[0].available);
+  if (available < amount) throw new Error("KWK_GUTHABEN_NICHT_AUSREICHEND");
+  await client.query(`INSERT INTO kwk_ledger(kwk_id,order_id,amount,type,status,note,created_by) VALUES($1,$2,$3,'redeemed','confirmed',$4,'system')`, [kwkId, orderId, (-amount).toFixed(2), `Guthaben eingelöst bei Bestellung ${orderId}`]);
+  await client.query("UPDATE orders SET kwk_credit_used=$1, updated_at=NOW() WHERE order_id=$2", [amount.toFixed(2), orderId]);
+  await syncKwkAccountCache(kwkId, client);
+}
+export async function redeemCredit(kwkId: number, orderId: string, amount: number, client?: PartnerCreditQueryClient): Promise<void> {
+  return withPartnerFinancialTransaction(c => redeemCreditInTransaction(kwkId,orderId,amount,c),client);
 }
 
 // ── Missbrauchsschutz ─────────────────────────────────────────────────────

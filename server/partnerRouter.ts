@@ -22,6 +22,7 @@ import { getDb, getPool } from "./db.js";
 import { partners, partnerAddressRequests, partnerTransactions, orders, orderItems, partnerCodeUsage, customers } from "../drizzle/schema.js";
 import { ENV } from "./env.js";
 import { bookPaidPartnerCommission, redeemPartnerCreditForOrder } from "./partnerCreditService.js";
+import { updatePartnerTransactionStatus, recordPartnerPayout, previewHistoricalPartnerClaim, bookHistoricalPartnerClaim } from "./partnerFinancialAdminService.js";
 import { buildPartnerSettlementReport } from "./partnerSettlementReport.js";
 import type { Request } from "express";
 import {
@@ -567,6 +568,18 @@ export const partnerRouter = router({
       }
     }),
 
+  previewHistoricalClaim: adminProcedure
+    .input(z.object({ partnerId: z.number().int().positive(), orderId: z.string().min(1) }))
+    .query(async ({ input }) => previewHistoricalPartnerClaim(input.partnerId,input.orderId)),
+  historicalClaim: adminProcedure
+    .input(z.object({
+      partnerId: z.number().int().positive(), orderId: z.string().min(1), amount: z.number().finite().positive(),
+      expectedBalance: z.number().finite(), requestId: z.string().uuid(), percent: z.literal(10),
+      mode: z.enum(["evidenced_ten_percent", "stored_order_amount"]), reason: z.string().trim().min(1).max(2000),
+      evidenceReference: z.string().trim().min(1).max(2000),
+    }))
+    .mutation(async ({ input, ctx }) => bookHistoricalPartnerClaim(input,ctx.user!.username)),
+
   // ─── ADMIN: REPORTING ──────────────────────────────────────────
 
   // Get partner settlement / accounting report
@@ -713,80 +726,7 @@ export const partnerRouter = router({
       status: z.enum(["normal", "storniert", "nicht_gewertet", "ausgeblendet"]),
       adminNote: z.string().optional(),
     }))
-    .mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database not available");
-
-      const [tx] = await db.select().from(partnerTransactions)
-        .where(eq(partnerTransactions.id, input.transactionId))
-        .limit(1);
-      if (!tx) throw new Error("Transaktion nicht gefunden");
-
-      const oldStatus = tx.status || "normal";
-      const txAmount = parseFloat(tx.amount);
-
-      // Get the partner
-      const [partner] = await db.select().from(partners)
-        .where(eq(partners.id, tx.partnerId))
-        .limit(1);
-      if (!partner) throw new Error("Partner nicht gefunden");
-
-      let currentBalance = parseFloat(partner.creditBalance);
-      let balanceAdjustment = 0;
-
-      // Calculate balance adjustment based on status change
-      // If going FROM normal TO storniert/nicht_gewertet: reverse the amount
-      // If going FROM storniert/nicht_gewertet TO normal: re-apply the amount
-      if (oldStatus === "normal" && (input.status === "storniert" || input.status === "nicht_gewertet")) {
-        // Reverse: subtract the positive provision or re-add the negative einloesung
-        balanceAdjustment = -txAmount;
-      } else if ((oldStatus === "storniert" || oldStatus === "nicht_gewertet") && input.status === "normal") {
-        // Restore: re-apply the original amount
-        balanceAdjustment = txAmount;
-      }
-      // ausgeblendet: same balance effect as storniert (reversed) but hidden from partner view
-      if (oldStatus === "normal" && input.status === "ausgeblendet") {
-        balanceAdjustment = -txAmount;
-      } else if (oldStatus === "ausgeblendet" && input.status === "normal") {
-        balanceAdjustment = txAmount;
-      }
-
-      // Apply balance adjustment
-      if (balanceAdjustment !== 0) {
-        currentBalance += balanceAdjustment;
-        await db.update(partners).set({
-          creditBalance: currentBalance.toFixed(2),
-          updatedAt: new Date(),
-        }).where(eq(partners.id, tx.partnerId));
-      }
-
-      // Update transaction status and admin note
-      await db.update(partnerTransactions).set({
-        status: input.status,
-        adminNote: input.adminNote || null,
-      }).where(eq(partnerTransactions.id, input.transactionId));
-
-      // If storniert: create a visible counter-booking for the partner's statement
-      if (input.status === "storniert" && txAmount > 0) {
-        await db.insert(partnerTransactions).values({
-          partnerId: tx.partnerId,
-          type: "korrektur",
-          amount: (-txAmount).toFixed(2),
-          balanceAfter: currentBalance.toFixed(2),
-          orderId: tx.orderId,
-          description: `Storno: ${input.adminNote || "Provision storniert"}`,
-          adminNote: `Storno von Transaktion #${tx.id}`,
-        });
-      }
-
-      console.log(`[Partners] Transaction #${tx.id} status changed: ${oldStatus} -> ${input.status} (Balance adj: ${balanceAdjustment.toFixed(2)})`);
-      return {
-        success: true,
-        balanceAdjustment,
-        newBalance: currentBalance,
-      };
-    }),
-
+    .mutation(async ({ input }) => updatePartnerTransactionStatus(input)),
   // Record a monetary payout for einmalig-partners (admin books cash payout)
   recordPayout: adminProcedure
     .input(z.object({
@@ -795,61 +735,7 @@ export const partnerRouter = router({
       description: z.string().optional(),
       requestId: z.string().uuid(),
     }))
-    .mutation(async ({ input }) => {
-      const pool = await getPool();
-      if (!pool) throw new Error("Database not available");
-      const client = await pool.connect();
-      try {
-        await client.query("BEGIN");
-        await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`partner-payout:${input.partnerId}`]);
-        const duplicate = await client.query<{ balance_after: string }>(
-          `SELECT balance_after FROM partner_transactions
-            WHERE partner_id = $1 AND type = 'auszahlung' AND admin_note = $2
-            LIMIT 1`,
-          [input.partnerId, `request:${input.requestId}`],
-        );
-        if (duplicate.rows.length > 0) {
-          await client.query("COMMIT");
-          return { success: true, newBalance: Number(duplicate.rows[0].balance_after), alreadyApplied: true };
-        }
-
-        const partnerResult = await client.query<{ name: string; credit_balance: string }>(
-          "SELECT name, credit_balance FROM partners WHERE id = $1 FOR UPDATE",
-          [input.partnerId],
-        );
-        if (partnerResult.rows.length !== 1) throw new Error("Partner nicht gefunden");
-        const partner = partnerResult.rows[0];
-        const currentBalance = Number(partner.credit_balance);
-        if (input.amount > currentBalance + 0.001) {
-          throw new Error(`Nicht genügend Guthaben für Auszahlung. Verfügbar: ${currentBalance.toFixed(2)} €`);
-        }
-        const newBalance = Math.round((currentBalance - input.amount + Number.EPSILON) * 100) / 100;
-        await client.query(
-          "UPDATE partners SET credit_balance = $1, updated_at = NOW() WHERE id = $2",
-          [newBalance.toFixed(2), input.partnerId],
-        );
-        await client.query(
-          `INSERT INTO partner_transactions
-            (partner_id, type, amount, balance_after, description, admin_note, status)
-           VALUES ($1, 'auszahlung', $2, $3, $4, $5, 'normal')`,
-          [
-            input.partnerId,
-            (-input.amount).toFixed(2),
-            newBalance.toFixed(2),
-            input.description || `Monetäre Auszahlung: ${input.amount.toFixed(2)} €`,
-            `request:${input.requestId}`,
-          ],
-        );
-        await client.query("COMMIT");
-        console.log(`[Partners] Payout recorded: ${input.amount.toFixed(2)} EUR for ${partner.name}`);
-        return { success: true, newBalance, alreadyApplied: false };
-      } catch (error) {
-        await client.query("ROLLBACK");
-        throw error;
-      } finally {
-        client.release();
-      }
-    }),
+    .mutation(async ({ input }) => recordPartnerPayout(input)),
 
   // ─── PUBLIC: Checkout integration ──────────────────────────────
 

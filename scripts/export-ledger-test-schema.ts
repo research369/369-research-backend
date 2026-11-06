@@ -1,0 +1,11 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { generateDrizzleJson, generateMigration } from "drizzle-kit/api";
+import * as schema from "../drizzle/schema.js";
+import * as kwkSchema from "../drizzle/kwkSchema.js";
+if (process.env.DATABASE_URL || process.env.DOTENV_CONFIG_PATH !== "/dev/null") throw Error("No database/secret environment permitted");
+const previous = generateDrizzleJson({});
+const current = generateDrizzleJson({ ...schema, ...kwkSchema });
+const statements = await generateMigration(previous, current);
+await mkdir(new URL("../tests/fixtures/", import.meta.url), { recursive: true });
+await writeFile(new URL("../tests/fixtures/ledger-current-schema.sql", import.meta.url), statements.join(";\n\n") + ";\n");
+console.log(`Actual Drizzle schema exported (${statements.length} statements)`);
