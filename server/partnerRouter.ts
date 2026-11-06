@@ -31,7 +31,7 @@ import {
 } from "./partnerAuth.js";
 import {
   buildLegacyPartnerCodeTerms,
-  calculateSelfOrderDiscountPercent,
+  resolveSelfOrderTerms,
   canRedeemShopCredit,
   getPartnerProgram,
   isDiscountAllowedForProgram,
@@ -982,11 +982,11 @@ export const partnerRouter = router({
       const token = createPartnerToken(partner.id);
       const program = await getPartnerProgram(partner.id);
       if (!program) throw new Error("Partnerprogramm nicht verfügbar");
-      const selfOrderDiscountPercent = calculateSelfOrderDiscountPercent(
+      const selfOrderDiscountPercent = resolveSelfOrderTerms(
         program,
         parseFloat(partner.customerDiscountPercent),
         parseFloat(partner.commissionPercent),
-      );
+      ).discountPercent;
 
       // Set cookie
       ctx.res.cookie(PARTNER_COOKIE_NAME, token, {
@@ -1054,13 +1054,11 @@ export const partnerRouter = router({
         commissionType: partner.commissionType,
         programKey: partner.programKey,
         creditBalance: parseFloat(partner.creditBalance),
-        selfOrderDiscountPercent: program
-          ? calculateSelfOrderDiscountPercent(
-              program,
-              parseFloat(partner.customerDiscountPercent),
-              parseFloat(partner.commissionPercent),
-            )
-          : parseFloat(partner.customerDiscountPercent),
+        selfOrderDiscountPercent: resolveSelfOrderTerms(
+          program,
+          parseFloat(partner.customerDiscountPercent),
+          parseFloat(partner.commissionPercent),
+        ).discountPercent,
         address: {
           street: partner.street || "",
           houseNumber: partner.houseNumber || "",

@@ -1,6 +1,11 @@
 import { hasOtherPaidCodeOrder } from "./partnerCodeHistory.js";
-import type { PoolClient } from "pg";
+import type { PoolClient, QueryResultRow } from "pg";
 import { getPool } from "./db.js";
+
+/** Only transaction-bound parameterized queries; the caller owns commit/rollback. */
+export type PartnerCreditQueryClient = {
+  query<Row extends QueryResultRow = QueryResultRow>(text: string, values?: unknown[]): Promise<{ rows: Row[] }>;
+};
 
 export const PAID_ORDER_STATUSES = new Set([
   "bezahlt",
@@ -140,7 +145,7 @@ type OrderCreditOverride = {
   reason: string;
 };
 
-async function lockOrder(client: PoolClient, orderId: string): Promise<OrderForCredit> {
+async function lockOrder(client: PartnerCreditQueryClient, orderId: string): Promise<OrderForCredit> {
   const result = await client.query<OrderForCredit>(
     `SELECT order_id, status, paid_at, shipped_at, partner_source_id, partner_code, partner_number,
             partner_program_snapshot, partner_settlement_method_snapshot,
@@ -156,7 +161,7 @@ async function lockOrder(client: PoolClient, orderId: string): Promise<OrderForC
   return result.rows[0];
 }
 
-async function lockPartnerForOrder(client: PoolClient, order: OrderForCredit): Promise<PartnerForCredit | null> {
+async function lockPartnerForOrder(client: PartnerCreditQueryClient, order: OrderForCredit): Promise<PartnerForCredit | null> {
   if (!order.partner_source_id && !order.partner_code && !order.partner_number) return null;
 
   const result = await client.query<PartnerForCredit>(
@@ -182,17 +187,13 @@ async function lockPartnerForOrder(client: PoolClient, order: OrderForCredit): P
 }
 
 /**
- * Books an already persisted order's specified credit use once and only once.
- * The order row is the source of truth; duplicate requests observe the existing ledger entry.
+ * Same locked ledger operation inside the caller's existing order transaction.
+ * Never commits, releases a connection or opens another transaction.
  */
-export async function redeemPartnerCreditForOrder(orderId: string): Promise<{ redeemed: number; balance: number; alreadyBooked: boolean }> {
-  const { client } = await beginLockedTransaction();
-  try {
+export async function redeemPartnerCreditInTransaction(orderId: string, client: PartnerCreditQueryClient): Promise<{ redeemed: number; balance: number; alreadyBooked: boolean }> {
     const order = await lockOrder(client, orderId);
     const creditUsed = parseMoney(order.credit_used);
     if (creditUsed === 0) {
-      await client.query("COMMIT");
-      client.release();
       return { redeemed: 0, balance: 0, alreadyBooked: true };
     }
 
@@ -210,8 +211,6 @@ export async function redeemPartnerCreditForOrder(orderId: string): Promise<{ re
     );
     const balance = parseMoney(partner.credit_balance);
     if (existing.rows.length > 0) {
-      await client.query("COMMIT");
-      client.release();
       return { redeemed: creditUsed, balance, alreadyBooked: true };
     }
 
@@ -238,9 +237,17 @@ export async function redeemPartnerCreditForOrder(orderId: string): Promise<{ re
       ],
     );
 
+    return { redeemed: creditUsed, balance: newBalance, alreadyBooked: false };
+}
+
+/** Books a persisted order once; existing external routes retain their own transaction. */
+export async function redeemPartnerCreditForOrder(orderId: string): Promise<{ redeemed: number; balance: number; alreadyBooked: boolean }> {
+  const { client } = await beginLockedTransaction();
+  try {
+    const result = await redeemPartnerCreditInTransaction(orderId, client);
     await client.query("COMMIT");
     client.release();
-    return { redeemed: creditUsed, balance: newBalance, alreadyBooked: false };
+    return result;
   } catch (error) {
     await rollbackAndRelease(client);
     throw error;

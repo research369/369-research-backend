@@ -6,6 +6,9 @@ import {
   calculateProgramDiscount,
   calculateSelfOrderDiscountPercent,
   canRedeemShopCredit,
+  assertNoMixedPartnerOrderInput,
+  assertPartnerShopCreditAvailable,
+  resolveSelfOrderTerms,
   isDiscountAllowedForProgram,
   isRepeatCodeUseAllowed,
   normalizePartnerCode,
@@ -126,4 +129,65 @@ test("converts a Creator's public discount plus payout into one self-order disco
   assert.equal(calculateSelfOrderDiscountPercent(creator, 5, 12.5), 17.5);
   // Historic partner/self-user programs retain their own configured product discount.
   assert.equal(calculateSelfOrderDiscountPercent(partner, 10, 20), 10);
+});
+
+test("explicit Creator-key shop-credit terms keep 10% discount and 10% earning separate", () => {
+  const shopCreditCreator = { ...creator, settlementMethod: "shop_credit" as const, allowSelfOrderCredit: true };
+  assert.deepEqual(resolveSelfOrderTerms(shopCreditCreator, 10, 10), {
+    discountPercent: 10, commissionPercent: 10, creditRedeemable: true, convertsPayoutCommission: false,
+  });
+  assert.equal(calculateSelfOrderDiscountPercent(shopCreditCreator, 10, 10), 10);
+  assert.equal(resolveSelfOrderTerms(partner, 10, 10).commissionPercent, 10);
+  assert.deepEqual(resolveSelfOrderTerms(creator, 10, 10), {
+    discountPercent: 20, commissionPercent: 0, creditRedeemable: false, convertsPayoutCommission: true,
+  });
+});
+
+test("commission-policy none and settlement none never create phantom converted commission", () => {
+  for (const program of [
+    { ...creator, commissionPolicy: "none" as const },
+    { ...creator, settlementMethod: "none" as const },
+    { ...partner, commissionPolicy: "none" as const },
+  ]) {
+    const terms = resolveSelfOrderTerms(program, 10, 10);
+    assert.equal(terms.discountPercent, 10);
+    assert.equal(terms.commissionPercent, 0);
+    assert.equal(terms.convertsPayoutCommission, false);
+  }
+  // Earning policy does not revoke redemption of previously earned shop credit.
+  assert.equal(resolveSelfOrderTerms({ ...partner, commissionPolicy: "none" }, 10, 10).creditRedeemable, true);
+});
+
+test("inactive/missing programs fail closed and disallowed self-credit does not earn shop credit", () => {
+  for (const program of [null, { ...creator, active: false }, { ...partner, active: false }]) {
+    assert.deepEqual(resolveSelfOrderTerms(program, 10, 10), {
+      discountPercent: 0, commissionPercent: 0, creditRedeemable: false, convertsPayoutCommission: false,
+    });
+  }
+  assert.equal(canRedeemShopCredit({ ...partner, active: false }), false);
+  const disabled = resolveSelfOrderTerms({ ...partner, allowSelfOrderCredit: false }, 10, 10);
+  assert.equal(disabled.discountPercent, 10);
+  assert.equal(disabled.commissionPercent, 0);
+  assert.equal(disabled.creditRedeemable, false);
+});
+
+test("positive-credit preflight requires current active explicit entitlement before checking balance", () => {
+  for (const program of [null, creator, { ...partner, active: false }, { ...partner, allowSelfOrderCredit: false }, { ...partner, settlementMethod: "none" as const }]) {
+    assert.throws(() => assertPartnerShopCreditAvailable(program, 12.06, 1000), /PARTNER_GUTHABEN_PROGRAMM_AUSGESCHLOSSEN/);
+  }
+  assert.throws(() => assertPartnerShopCreditAvailable(partner, 12.06, 12.05), /PARTNER_GUTHABEN_NICHT_AUSREICHEND/);
+  assert.throws(() => assertPartnerShopCreditAvailable(partner, 12.06, NaN), /PARTNER_GUTHABEN_NICHT_AUSREICHEND/);
+  assert.throws(() => assertPartnerShopCreditAvailable(partner, -1, 100), /Ungültiger/);
+  assert.doesNotThrow(() => assertPartnerShopCreditAvailable(partner, 12.06, 12.06));
+  assert.doesNotThrow(() => assertPartnerShopCreditAvailable(creator, 0, 100));
+});
+
+test("mixed public code plus self-order number or positive credit is rejected explicitly", () => {
+  for (const input of [
+    { partnerCode: "FOREIGN", partnerNumber: "OWN" },
+    { partnerCode: "FOREIGN", creditUsed: 12.06 },
+    { partnerCode: "OWNCODE", partnerNumber: "OWN", creditUsed: 12.06 },
+  ]) assert.throws(() => assertNoMixedPartnerOrderInput(input), /PARTNER_CODE_SELBSTBESTELLUNG_AUSGESCHLOSSEN/);
+  assert.doesNotThrow(() => assertNoMixedPartnerOrderInput({ partnerCode: "PUBLIC", creditUsed: 0 }));
+  assert.doesNotThrow(() => assertNoMixedPartnerOrderInput({ partnerCode: " ", partnerNumber: "OWN", creditUsed: 12.06 }));
 });

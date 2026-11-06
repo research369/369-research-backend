@@ -30,8 +30,10 @@ import { persistAddressValidation, validateGermanAddress } from "./addressValida
 import {
   bookPaidPartnerCommission,
   redeemPartnerCreditForOrder,
+  redeemPartnerCreditInTransaction,
   reversePartnerFinancialEntriesForCancelledOrder,
 } from "./partnerCreditService.js";
+import { createPartnerCreditTransactionQueryClient } from "./partnerCreditTransactionQuery.js";
 import { resolveQrAttribution } from "./qrCampaignService.js";
 import { withStoreSourceMarker } from "./storeSource.js";
 import {
@@ -60,8 +62,9 @@ import { isPromoCodeExpired } from "./promoCodeRouter.js";
 import {
   calculatePublicPartnerCustomerDiscount,
   calculateProgramDiscount,
-  canRedeemShopCredit,
-  calculateSelfOrderDiscountPercent,
+  assertNoMixedPartnerOrderInput,
+  assertPartnerShopCreditAvailable,
+  resolveSelfOrderTerms,
   getPartnerProgram,
   isDiscountAllowedForProgram,
   isRepeatCodeUseAllowed,
@@ -251,6 +254,8 @@ export const orderRouter = router({
   create: publicProcedure
     .input(createOrderSchema)
         .mutation(async ({ input, ctx }) => {
+      // Reject foreign public-code terms before lookup, pricing or any writes.
+      assertNoMixedPartnerOrderInput(input);
       const db = await getDb();
       if (!db) throw new Error("Database not available");
       await checkCustomerCreationMaintenance('order.create','mutation',await getPool());
@@ -367,6 +372,7 @@ export const orderRouter = router({
 
       let selfOrderDiscountPercent: number | null = null;
       let authenticatedSelfOrderProgram: PartnerProgram | null = null;
+      let authenticatedSelfOrderTerms: ReturnType<typeof resolveSelfOrderTerms> | null = null;
       if (authenticatedPartner) {
         const normalizedPartnerEmail = (authenticatedPartner.email || "").trim().toLowerCase();
         const normalizedOrderEmail = (input.customer.email || "").trim().toLowerCase();
@@ -389,12 +395,22 @@ export const orderRouter = router({
         }
         authenticatedSelfOrderProgram = await getPartnerProgram(authenticatedPartner.id);
         if (!authenticatedSelfOrderProgram?.active) throw new Error("PARTNER_PROGRAMM_NICHT_VERFUEGBAR");
-        selfOrderDiscountPercent = calculateSelfOrderDiscountPercent(
+        authenticatedSelfOrderTerms = resolveSelfOrderTerms(
           authenticatedSelfOrderProgram,
           Number(authenticatedPartner.customerDiscountPercent || 0),
           Number(authenticatedPartner.commissionPercent || 0),
         );
+        selfOrderDiscountPercent = authenticatedSelfOrderTerms.discountPercent;
       }
+
+      // Shared real/preview preflight, before pricing can clamp a requested
+      // amount and before order numbers, stock or customer writes. A balance
+      // alone never authorizes redemption; final locked ledger checks remain.
+      assertPartnerShopCreditAvailable(
+        authenticatedSelfOrderProgram,
+        input.creditUsed || 0,
+        Number(authenticatedPartner?.creditBalance || 0),
+      );
 
       // Im öffentlichen Shop werden Preise für KWK und den aktiven Dauerrabatt
       // zwingend aus dem aktuellen Katalog rekonstruiert. Eine WaWi-Anlage ist
@@ -851,10 +867,6 @@ export const orderRouter = router({
         if(await findActiveCheckoutBlock(input.customer))throw Error(CUSTOMER_ORDER_BLOCKED_CODE);
         if(kwkReferralAccount)await assertKwkNewCustomer(db,input.customer);
         if((input.kwkCreditUsed||0)>0&&kwkCreditAccountId)await assertKwkCreditAvailable(db,kwkCreditAccountId,input.kwkCreditUsed||0);
-        if(authenticatedPartner&&(input.creditUsed||0)>0){
-          if(!authenticatedSelfOrderProgram||!canRedeemShopCredit(authenticatedSelfOrderProgram))throw Error('PARTNER_GUTHABEN_PROGRAMM_AUSGESCHLOSSEN');
-          if(Number(authenticatedPartner.creditBalance||0)+0.001<(input.creditUsed||0))throw Error('PARTNER_GUTHABEN_NICHT_AUSREICHEND');
-        }
         let partnerCustomerCheck;
         if (resolvedPublicPartnerCode) {
           const pool = await getPool();
@@ -1067,15 +1079,13 @@ export const orderRouter = router({
       }
 
       // Case 2: authenticated partner self-order. The session-owned partner is
-      // the only authority for the direct discount and its zero Creator payout.
+      // the only authority for both direct discount and commission snapshots.
       if (partnerNumber && authenticatedPartner) {
         await resolvePartnerForOrder({ id: authenticatedPartner.id, code: null }, "Eigenbestellung");
         partnerProgram = authenticatedSelfOrderProgram;
-        // For Creators, the code discount plus the normal payout becomes a single
-        // direct self-order discount. No later payout/ledger commission may arise.
-        partnerCommissionPercentSnapshot = partnerProgram?.key === "creator"
-          ? 0
-          : Number(authenticatedPartner.commissionPercent || 0);
+        // Actual payout Creator conversion earns zero; explicit shop-credit
+        // programs retain their separate commission, even with a Creator key.
+        partnerCommissionPercentSnapshot = authenticatedSelfOrderTerms?.commissionPercent ?? 0;
       }
 
       if (partnerProgram) {
@@ -1790,6 +1800,15 @@ export const orderRouter = router({
       // NOTE: Communication log is written AFTER successful email send (see below)
       // Do NOT log here to avoid false-positive idempotency check
 
+      // Final locked entitlement/balance check and redemption share the order,
+      // stock and customer transaction. Any rejection rolls all of them back.
+      if (creditUsed > 0) {
+        await redeemPartnerCreditInTransaction(
+          orderId,
+          createPartnerCreditTransactionQueryClient(query => tx.execute(query)),
+        );
+      }
+
       });
 
       // This must run after the persistence transaction commits. Derived CRM
@@ -1807,12 +1826,6 @@ export const orderRouter = router({
         } catch (error) {
           console.error(`[AddressValidation] Kundenverknüpfung für Nachweis ${orderId} konnte nicht ergänzt werden:`, error);
         }
-      }
-
-      // Der Guthabeneinsatz wird erst nach vollständiger Bestellpersistenz gebucht.
-      // Der zentrale Service sperrt den Partnerdatensatz und verhindert Doppelbuchungen.
-      if (creditUsed > 0) {
-        await redeemPartnerCreditForOrder(orderId);
       }
 
       // Log new order
