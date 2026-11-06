@@ -26,6 +26,7 @@
  *     kwk.adminManualCredit – Manuelle Gutschrift/Korrektur
  */
 
+import { confirmAccountReset, enforceAuthRateLimit, findKwkResetAccount, invalidateAccountReset, issueAccountReset } from "./accountSecurityService.js";
 import { z } from "zod";
 import bcrypt from "bcryptjs";
 import { router, publicProcedure, adminProcedure, middleware } from "./trpc.js";
@@ -47,7 +48,7 @@ import {
   syncKwkAccountCache,
 } from "./kwkService.js";
 import type { Request } from "express";
-import { createKwkDemoToken, createKwkToken, verifyKwkDemoToken, verifyKwkToken } from "./kwkAuth.js";
+import { createKwkDemoToken, createKwkToken, verifyKwkDemoToken, getAuthenticatedKwkFromToken } from "./kwkAuth.js";
 import {
   getKwkDemoAccountByEmail,
   getKwkDemoAccountById,
@@ -60,14 +61,14 @@ import {
 
 // ── KWK Auth Helpers ──────────────────────────────────────────────────────
 
-async function getKwkFromRequest(req: Request): Promise<{ kwkId: number } | null> {
+async function getKwkFromRequest(req: Request): Promise<{ kwkId: number; sessionVersion: number } | null> {
   const authHeader = req.headers.authorization;
   let token: string | undefined;
   if (authHeader?.startsWith("Bearer ")) {
     token = authHeader.slice(7);
   }
   if (!token) return null;
-  return verifyKwkToken(token);
+  return getAuthenticatedKwkFromToken(token);
 }
 
 // Middleware: KWK-Auth prüfen
@@ -76,16 +77,7 @@ const kwkAuthMiddleware = middleware(async ({ ctx, next }) => {
   if (!kwkAuth) {
     throw new Error("KWK-Authentifizierung erforderlich");
   }
-  const pool = await getPool();
-  if (!pool) throw new Error("Database not available");
-  const account = await pool.query(
-    "SELECT id FROM kwk_accounts WHERE id = $1 AND status = 'aktiv' AND deleted_at IS NULL LIMIT 1",
-    [kwkAuth.kwkId],
-  );
-  if (account.rows.length !== 1) {
-    throw new Error("KWK-Konto ist nicht aktiv");
-  }
-  return next({ ctx: { ...ctx, kwkId: kwkAuth.kwkId } });
+  return next({ ctx: { ...ctx, kwkId: kwkAuth.kwkId, kwkSessionVersion: kwkAuth.sessionVersion } });
 });
 
 const kwkProcedure = publicProcedure.use(kwkAuthMiddleware);
@@ -278,7 +270,7 @@ export const kwkRouter = router({
       } finally {
         client.release();
       }
-      const token = createKwkToken(account.id);
+      const token = createKwkToken(account.id, 0);
 
       console.log(`[KWK] New account registered: ${account.kwk_number} (${input.email})`);
 
@@ -295,10 +287,11 @@ export const kwkRouter = router({
   // ── PUBLIC: Login ──────────────────────────────────────────────────────
   login: kwkPublicProcedure
     .input(z.object({
-      emailOrKwkNumber: z.string(),
-      password: z.string(),
+      emailOrKwkNumber: z.string().trim().min(1).max(255),
+      password: z.string().max(100),
     }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
+      await enforceAuthRateLimit(ctx.req, "kwk.login", input.emailOrKwkNumber);
       const pool = await getPool();
       if (!pool) throw new Error("Database not available");
 
@@ -324,7 +317,7 @@ export const kwkRouter = router({
       }
 
       // Status prüfen
-      if (account.status === "gesperrt" || account.status === "deaktiviert") {
+      if (account.status !== "aktiv") {
         throw new Error("Dieser Account ist nicht aktiv. Bitte kontaktiere den Support.");
       }
 
@@ -338,7 +331,7 @@ export const kwkRouter = router({
       // Login erfolgreich
       await resetLoginAttempts(account.id);
 
-      const token = createKwkToken(account.id);
+      const token = createKwkToken(account.id, Number(account.session_version || 0));
       const balance = await computeBalanceFromLedger(account.id);
 
       return {
@@ -715,43 +708,34 @@ export const kwkRouter = router({
   // Sendet eine Reset-E-Mail mit einem 1-Stunde gültigen Token
   requestPasswordReset: publicProcedure
     .input(z.object({ email: z.string().email() }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
+      await enforceAuthRateLimit(ctx.req, "kwk.reset.request", input.email);
+      const RESEND_KEY = process.env.RESEND_API_KEY;
+      if (!RESEND_KEY) return { success: false, message: "E-Mail-Service nicht verfügbar. Bitte später erneut versuchen." };
       const pool = await getPool();
       if (!pool) throw new Error("Database not available");
 
       // Prüfen ob E-Mail existiert (kein Fehler wenn nicht – Security)
       const { rows } = await pool.query(
-        "SELECT id, name FROM kwk_accounts WHERE email = $1 AND status NOT IN ('gesperrt', 'deaktiviert') LIMIT 1",
+        "SELECT id, name FROM kwk_accounts WHERE email = $1 AND status = 'aktiv' AND deleted_at IS NULL LIMIT 1",
         [input.email.toLowerCase()]
       );
 
       if (rows.length > 0) {
         const account = rows[0];
-        // Token generieren (64 Zeichen hex)
-        const crypto = await import("crypto");
-        const token = crypto.randomBytes(32).toString("hex");
-        const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 Stunde
-
-        // Alte Tokens für diese E-Mail löschen
-        await pool.query("DELETE FROM kwk_password_resets WHERE email = $1", [input.email.toLowerCase()]);
-
-        // Neuen Token speichern
-        await pool.query(
-          "INSERT INTO kwk_password_resets (email, token, expires_at) VALUES ($1, $2, $3)",
-          [input.email.toLowerCase(), token, expiresAt]
-        );
+        const token = await issueAccountReset("kwk", account.id);
+        if (!token) return { success: true, message: "Falls diese E-Mail registriert ist, erhältst du in Kürze eine Nachricht." };
 
         // Reset-E-Mail senden via Resend
         const resetUrl = `https://www.369research.eu/kwk/reset-password?token=${token}`;
-        const RESEND_KEY = process.env.RESEND_API_KEY;
-        if (RESEND_KEY) {
-          await fetch("https://api.resend.com/emails", {
+        try {
+          const response = await fetch("https://api.resend.com/emails", {
             method: "POST",
+            signal: AbortSignal.timeout(15_000),
             headers: { "Authorization": `Bearer ${RESEND_KEY}`, "Content-Type": "application/json" },
             body: JSON.stringify({
               from: "369 Research <noreply@mail.369research.eu>",
               to: [input.email.toLowerCase()],
-              bcc: ["369rebackup@gmail.com"],
               subject: "Dein KWK-Passwort zurücksetzen – 369 Research",
               html: `
                 <div style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;background:#f9fafb;padding:24px;border-radius:12px;">
@@ -768,7 +752,14 @@ export const kwkRouter = router({
                 </div>
               `,
             }),
-          }).catch(() => {}); // Silent fail
+          });
+          if (!response.ok) {
+            await invalidateAccountReset("kwk", account.id, token);
+            return { success: false, message: "E-Mail-Service hat den Resetversand abgelehnt." };
+          }
+        } catch {
+          await invalidateAccountReset("kwk", account.id, token);
+          return { success: false, message: "Resetversand konnte nicht bestätigt werden. Bitte später erneut versuchen." };
         }
       }
 
@@ -780,37 +771,17 @@ export const kwkRouter = router({
   // Setzt das Passwort mit einem gültigen Token zurück
   confirmPasswordReset: publicProcedure
     .input(z.object({
-      token: z.string().min(1),
+      token: z.string().regex(/^[a-f0-9]{64}$/),
       newPassword: z.string().min(8).max(100),
     }))
-    .mutation(async ({ input }) => {
-      const pool = await getPool();
-      if (!pool) throw new Error("Database not available");
-
-      // Token prüfen
-      const { rows } = await pool.query(
-        "SELECT email, expires_at, used_at FROM kwk_password_resets WHERE token = $1 LIMIT 1",
-        [input.token]
-      );
-
-      if (rows.length === 0) throw new Error("Ungültiger oder abgelaufener Reset-Link.");
-      const reset = rows[0];
-      if (reset.used_at) throw new Error("Dieser Reset-Link wurde bereits verwendet.");
-      if (new Date(reset.expires_at) < new Date()) throw new Error("Dieser Reset-Link ist abgelaufen. Bitte fordere einen neuen an.");
-
-      // Neues Passwort setzen
+    .mutation(async ({ input, ctx }) => {
+      await enforceAuthRateLimit(ctx.req, "kwk.reset.confirm", input.token);
+      const id = await findKwkResetAccount(input.token);
+      if (!id) throw new Error("Ungültiger oder abgelaufener Reset-Link.");
       const passwordHash = await bcrypt.hash(input.newPassword, 12);
-      await pool.query(
-        "UPDATE kwk_accounts SET password_hash = $1, updated_at = NOW() WHERE email = $2",
-        [passwordHash, reset.email]
-      );
-
-      // Token als verwendet markieren
-      await pool.query(
-        "UPDATE kwk_password_resets SET used_at = NOW() WHERE token = $1",
-        [input.token]
-      );
-
+      if (!await confirmAccountReset("kwk", id, input.token, passwordHash)) {
+        throw new Error("Ungültiger oder bereits verwendeter Reset-Link.");
+      }
       return { success: true, message: "Passwort erfolgreich zurückgesetzt. Du kannst dich jetzt einloggen." };
     }),
 

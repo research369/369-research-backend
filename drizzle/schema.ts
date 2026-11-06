@@ -674,6 +674,7 @@ export const partners = pgTable("partners", {
 
   // Partner login credentials
   passwordHash: text("password_hash"),
+  sessionVersion: integer("session_version").notNull().default(0),
   lastLogin: timestamp("last_login"),
 
   // Active flag

@@ -1,4 +1,5 @@
 import {ensurePriorityOrderIntegritySchema,isPriorityOrderIntegrityReady} from './priorityOrderIntegrity.js';
+import { ensureAccountSecuritySchema, isAccountSecuritySchemaReady } from "./accountSecuritySchema.js";
 import {customerCreationActivity} from './customerCreationMaintenance.js';
 // Zeitzone auf Deutschland setzen (muss vor allen anderen Imports stehen)
 process.env.TZ = "Europe/Berlin";
@@ -61,6 +62,9 @@ import {pepgptOffersRouter} from './pepgptOffersRouter.js';
 import {operationsRouter} from './operationsRouter.js';
 
 const app = express();
+// Trust only private reverse-proxy peers, not client-supplied first XFF values.
+// Express walks the chain from the socket and stops at the first untrusted peer.
+app.set("trust proxy", "loopback, linklocal, uniquelocal");
 app.get('/_internal/customer-creation-activity',(req,res)=>{
  if(!['127.0.0.1','::1','::ffff:127.0.0.1'].includes(req.socket.remoteAddress||'')){res.sendStatus(404);return;}
  res.set('Cache-Control','no-store').json(customerCreationActivity());
@@ -135,6 +139,7 @@ app.get("/health/ready", async (_req, res) => {
     dhlLabelLedgerReady: isDhlRelabelSchemaReady(),
     orderIntegrityReady: isPriorityOrderIntegrityReady(),
     permissionsSchemaReady: isPermissionsSchemaReady(),
+    accountSecurityReady: isAccountSecuritySchemaReady(),
     timestamp: new Date().toISOString(),
   });
 });
@@ -181,37 +186,17 @@ app.post("/api/backup/trigger", async (req: any, res: any) => {
 
 
 // ── Rate Limiting ──────────────────────────────────────────────────
-// Helper: detect Railway-internal / server-side requests (skip rate limiting)
-const isInternalRequest = (req: any): boolean => {
-  const forwarded = (req.headers["x-forwarded-for"] as string) || "";
-  const ip = req.ip || "";
-  const userAgent = (req.headers["user-agent"] as string) || "";
-  // Skip for localhost, Railway internal network (10.x, 172.x) and Python requests (server-side scripts)
-  return (
-    ip.startsWith("127.") ||
-    ip.startsWith("::1") ||
-    ip.startsWith("10.") ||
-    ip.startsWith("172.") ||
-    forwarded.startsWith("10.") ||
-    forwarded.startsWith("172.") ||
-    userAgent.includes("python-requests") ||
-    userAgent.includes("node-fetch") ||
-    req.headers["x-internal-token"] === ENV.jwtSecret
-  );
-};
-
-// Strict limiter for login: max 10 attempts per 15 minutes per IP (external only)
+// Strict limiter for login: max 10 attempts per 15 minutes per trusted socket/IP (no bypass)
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: isInternalRequest,
   message: {
     error: "Zu viele Anmeldeversuche. Bitte versuchen Sie es in 15 Minuten erneut.",
   },
   keyGenerator: (req) => {
-    return (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.ip || "unknown";
+    return req.ip || req.socket.remoteAddress || "unknown";
   },
 });
 
@@ -221,12 +206,11 @@ const apiLimiter = rateLimit({
   max: 300,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: isInternalRequest,
   message: {
     error: "Zu viele Anfragen. Bitte versuchen Sie es später erneut.",
   },
   keyGenerator: (req) => {
-    return (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.ip || "unknown";
+    return req.ip || req.socket.remoteAddress || "unknown";
   },
 });
 
@@ -1327,6 +1311,10 @@ async function start() {
   }
   // Required additive schema, no stats/backfill autorun. Failure keeps ready closed.
   await ensurePermissionsSchema();
+
+  // Login/reset schema is required; never mark routes ready after a failed
+  // migration. KWK base tables have been created by the existing bootstrap.
+  await ensureAccountSecuritySchema();
 
 }
 

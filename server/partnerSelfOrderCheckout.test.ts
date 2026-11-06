@@ -17,7 +17,7 @@ const calls: string[] = [];
 const partnerRow: Record<string, unknown> = {
   id: 9, name: "Synthetic owner", partnerNumber: "OWN-9", email: "owner@example.test",
   commissionPercent: "10.00", customerDiscountPercent: "10.00", creditBalance: "12.06",
-  isActive: 1, programKey: "creator", country: "Deutschland",
+  isActive: 1, sessionVersion: 0, programKey: "creator", country: "Deutschland",
 };
 let program: PartnerProgram;
 let writes = 0;

@@ -7,49 +7,37 @@ import { partners } from "../drizzle/schema.js";
 
 export const PARTNER_TOKEN_EXPIRY = "30d";
 export const PARTNER_COOKIE_NAME = "369_partner_session";
-
-export function createPartnerToken(partnerId: number): string {
-  return jwt.sign({ partnerId, type: "partner" }, ENV.jwtSecret, { expiresIn: PARTNER_TOKEN_EXPIRY });
+export function createPartnerToken(partnerId: number, sessionVersion = 0): string {
+  return jwt.sign({ partnerId, type: "partner", sessionVersion }, ENV.jwtSecret, { expiresIn: PARTNER_TOKEN_EXPIRY });
 }
-
-export function verifyPartnerToken(token: string): { partnerId: number } | null {
+export function verifyPartnerToken(token: string): { partnerId: number; sessionVersion: number } | null {
   try {
-    const payload = jwt.verify(token, ENV.jwtSecret) as { partnerId?: unknown; type?: unknown };
-    if (payload.type !== "partner" || typeof payload.partnerId !== "number") return null;
-    return { partnerId: payload.partnerId };
-  } catch {
-    return null;
-  }
+    const payload = jwt.verify(token, ENV.jwtSecret) as { partnerId?: unknown; type?: unknown; sessionVersion?: unknown };
+    if (payload.type !== "partner" || !Number.isInteger(payload.partnerId) || Number(payload.partnerId) < 1) return null;
+    // Rolling transition: only pre-version tokens on unchanged version-0 accounts.
+    const version = payload.sessionVersion === undefined ? 0 : payload.sessionVersion;
+    if (!Number.isInteger(version) || Number(version) < 0) return null;
+    return { partnerId: payload.partnerId as number, sessionVersion: version as number };
+  } catch { return null; }
 }
-
-/**
- * Resolves a partner identity exclusively from a valid first-party session.
- * A public partner code or number is an attribution value, never authorization
- * for financial actions such as credit redemption.
- */
+/** Attribution codes/numbers are never authorization. Every session reads DB. */
 export async function getAuthenticatedPartnerFromRequest(req: Request) {
   const authorization = req.headers.authorization;
   let token = authorization?.startsWith("Bearer ") ? authorization.slice(7) : undefined;
-
   if (!token) {
-    const cookieHeader = req.headers.cookie || "";
-    const cookies = Object.fromEntries(
-      cookieHeader.split(";").filter(Boolean).map((entry) => {
-        const [key, ...value] = entry.trim().split("=");
-        return [key, value.join("=")];
-      }),
-    );
+    const cookies = Object.fromEntries((req.headers.cookie || "").split(";").filter(Boolean).map((entry) => {
+      const [key, ...value] = entry.trim().split("=");
+      return [key, value.join("=")];
+    }));
     token = cookies[PARTNER_COOKIE_NAME];
   }
-
   if (!token) return null;
   const payload = verifyPartnerToken(token);
   if (!payload) return null;
-
   const db = await getDb();
   if (!db) return null;
   const [partner] = await db.select().from(partners)
-    .where(and(eq(partners.id, payload.partnerId), eq(partners.isActive, 1)))
+    .where(and(eq(partners.id, payload.partnerId), eq(partners.isActive, 1), eq(partners.sessionVersion, payload.sessionVersion)))
     .limit(1);
   return partner || null;
 }
