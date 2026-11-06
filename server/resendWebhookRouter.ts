@@ -83,7 +83,7 @@ resendWebhookRouter.post("/api/webhooks/resend", async (req, res) => {
     }
 
     const comm = communication[0];
-    const customer = await db.select({ id: customers.id })
+    const customer = comm.customerId === null ? [] : await db.select({ id: customers.id })
       .from(customers)
       .where(eq(customers.id, comm.customerId))
       .limit(1);

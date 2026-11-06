@@ -21,6 +21,7 @@ import {
 } from "./customerOrderBlockService.js";
 import { getPersonalPromoAssignmentsForCustomerIds } from "./customerPromoAssignmentService.js";
 
+import { resolveCheckoutCustomerDataChange, normalizeCustomerMatchEmail, normalizeCustomerMatchPhone } from "./customerDataChangeService.js";
 const RESEND_API_URL = "https://api.resend.com/emails";
 
 const customerSchema = z.object({
@@ -318,6 +319,7 @@ export const customerRouter = router({
         zip: input.zip || null,
         city: input.city || null,
         country: input.country || null,
+        dhlPostNumber: input.dhlPostNumber || null,
         tags: input.tags || null,
         source: input.source || "manual",
         notes: input.notes || null,
@@ -841,80 +843,30 @@ export const customerRouter = router({
 
     if(!input?.dryRun)await checkCustomerCreationMaintenance('customer.backfillFromOrders','mutation',await getPool());
 
-    const PLACEHOLDER_EMAILS = new Set([
-      'keine@angabe.de', 'noemail@noemail.de', 'no@email.de', 'noreply@noreply.de',
-      'placeholder@placeholder.de', 'test@test.de', 'info@info.de', 'otc@369research.eu',
-    ]);
-    const normalizePhone = (p: string) => (p || '').replace(/[\s\-\.\(\)]/g, '');
-
     const allOrders = await db.select().from(orders).orderBy(orders.orderDate);
     const existingCustomers = await db.select().from(customers);
-
-    // Build lookup maps from existing customers (ignore placeholder emails)
-    const emailToCustomer: Record<string, typeof existingCustomers[0]> = {};
-    const phoneToCustomer: Record<string, typeof existingCustomers[0]> = {};
-    const emailMatchCounts: Record<string, number> = {};
-    const phoneMatchCounts: Record<string, number> = {};
-    for (const c of existingCustomers) {
-      if (c.email) {
-        const k = c.email.toLowerCase().trim();
-        if (!PLACEHOLDER_EMAILS.has(k)) {
-          emailToCustomer[k] = c;
-          emailMatchCounts[k] = (emailMatchCounts[k] || 0) + 1;
-        }
-      }
-      if (c.phone) {
-        const k = normalizePhone(c.phone);
-        if (k.length >= 7) {
-          phoneToCustomer[k] = c;
-          phoneMatchCounts[k] = (phoneMatchCounts[k] || 0) + 1;
-        }
-      }
-    }
-    // A shared e-mail address or phone number is not evidence of identity. It
-    // must be reviewed manually rather than silently attributing an order to
-    // the last profile that happened to be inserted into a lookup map.
-    for (const [key, count] of Object.entries(emailMatchCounts)) {
-      if (count !== 1) delete emailToCustomer[key];
-    }
-    for (const [key, count] of Object.entries(phoneMatchCounts)) {
-      if (count !== 1) delete phoneToCustomer[key];
-    }
-
-    // Group orders by identity (email preferred, then phone, then single order)
+    // Include unlinked order snapshots as candidates to detect mixed contact
+    // ambiguity between historical orders as well as existing profiles.
+    const candidates = [
+      ...existingCustomers,
+      ...allOrders.filter(order => !order.customerId).map(order => ({ ...order, id: -order.id })),
+    ];
     const groups: Record<string, typeof allOrders> = {};
-    for (const order of allOrders) {
-      const emailKey = (order.email || '').toLowerCase().trim();
-      const phoneKey = normalizePhone(order.phone || '');
-      const emailUsable = emailKey && !PLACEHOLDER_EMAILS.has(emailKey);
-      const phoneUsable = phoneKey.length >= 7;
-
-      // Already has a customer linked? Skip for new-customer creation but still link
-      if (order.customerId) continue;
-
-      // Existing customer match by email
-      if (emailUsable && emailToCustomer[emailKey]) continue;
-      // Existing customer match by phone (only if no usable email)
-      if (!emailUsable && phoneUsable && phoneToCustomer[phoneKey]) continue;
-
-      const gk = emailUsable ? `e:${emailKey}` : (phoneUsable ? `p:${phoneKey}` : `o:${order.orderId}`);
-      if (!groups[gk]) groups[gk] = [];
-      groups[gk].push(order);
-    }
-
-    // Also collect orders that need linking to existing customers
     const toLink: Array<{ orderId: number; customerId: number }> = [];
+    let reviewOrders = 0;
     for (const order of allOrders) {
       if (order.customerId) continue;
-      const emailKey = (order.email || '').toLowerCase().trim();
-      const phoneKey = normalizePhone(order.phone || '');
-      const emailUsable = emailKey && !PLACEHOLDER_EMAILS.has(emailKey);
-      const phoneUsable = phoneKey.length >= 7;
-      const matchedCustomer = (emailUsable && emailToCustomer[emailKey]) ||
-        (!emailUsable && phoneUsable && phoneToCustomer[phoneKey]);
-      if (matchedCustomer) {
-        toLink.push({ orderId: order.id, customerId: matchedCustomer.id });
+      const resolution = resolveCheckoutCustomerDataChange(existingCustomers, order);
+      if (resolution.kind === "matched") {
+        toLink.push({ orderId: order.id, customerId: resolution.customer.id });
+        continue;
       }
+      if (resolution.kind === "conflict" || resolution.reason === "ambiguous") { reviewOrders++; continue; }
+      // Creating one customer from multiple historical contact snapshots is a
+      // merge decision. Keep those orders in review instead of guessing ownership.
+      const acrossOrders = resolveCheckoutCustomerDataChange(candidates, order);
+      if (acrossOrders.kind !== "matched" || acrossOrders.customer.id !== -order.id) { reviewOrders++; continue; }
+      groups[`o:${order.orderId}`] = [order];
     }
 
     // Build preview
@@ -923,7 +875,7 @@ export const customerRouter = router({
       return {
         groupKey: gk,
         name: `${o.firstName} ${o.lastName}`.trim(),
-        email: (o.email && !PLACEHOLDER_EMAILS.has(o.email.toLowerCase().trim())) ? o.email : null,
+        email: (o.email && !!normalizeCustomerMatchEmail(o.email)) ? o.email : null,
         phone: o.phone || null,
         orderCount: grpOrders.length,
         totalSpent: grpOrders.filter(isCompletedCommercialOrder).reduce((s, x) => s + parseFloat(x.total || '0'), 0).toFixed(2),
@@ -939,6 +891,7 @@ export const customerRouter = router({
         dryRun: true,
         wouldCreate: preview.length,
         wouldLink: toLink.length,
+        reviewOrders,
         preview,
         totalOrders: allOrders.length,
         created: 0,
@@ -960,7 +913,7 @@ export const customerRouter = router({
       if (!name) continue;
 
       const emailKey = (o.email || '').toLowerCase().trim();
-      const emailUsable = emailKey && !PLACEHOLDER_EMAILS.has(emailKey);
+      const emailUsable = !!normalizeCustomerMatchEmail(o.email);
       const metrics = calculateCustomerOrderMetrics(grpOrders);
 
       try {
@@ -990,22 +943,25 @@ export const customerRouter = router({
           linked++;
         }
 
-        // Update lookup maps
-        if (emailUsable) emailToCustomer[emailKey] = newCustomer;
-        const pk = normalizePhone(o.phone || '');
-        if (pk.length >= 7) phoneToCustomer[pk] = newCustomer;
-
         created++;
       } catch (_e) { /* skip on duplicate */ }
     }
 
     // Link unlinked orders to existing customers
     for (const { orderId, customerId } of toLink) {
-      await db.update(orders).set({ customerId }).where(eq(orders.id, orderId));
-      linked++;
+      const didLink = await db.transaction(async tx => {
+        const [freshOrder] = await tx.select().from(orders).where(eq(orders.id, orderId)).limit(1).for("update");
+        if (!freshOrder || freshOrder.customerId) return false;
+        await tx.execute(sql`LOCK TABLE customers IN SHARE MODE`);
+        const fresh = resolveCheckoutCustomerDataChange(await tx.select().from(customers), freshOrder);
+        if (fresh.kind !== "matched" || fresh.customer.id !== customerId) return false;
+        await tx.update(orders).set({ customerId }).where(eq(orders.id, orderId));
+        return true;
+      });
+      if (didLink) linked++; else reviewOrders++;
     }
 
-    return { success: true, dryRun: false, created, linked, totalOrders: allOrders.length, preview: [] };
+    return { success: true, dryRun: false, created, linked, reviewOrders, totalOrders: allOrders.length, preview: [] };
   }),
 
   // Rebuild customer stats (totalOrders, totalSpent, firstOrderDate, lastOrderDate) from actual orders

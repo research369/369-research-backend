@@ -1,8 +1,9 @@
 import { nanoid } from "nanoid";
-import { eq, ilike } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { getDb } from "./db.js";
 import { ENV } from "./env.js";
-import { customerCommunications, customers, orders } from "../drizzle/schema.js";
+import { customerCommunications } from "../drizzle/schema.js";
+import { readCrmOrderContext } from "./crmOrderCustomerService.js";
 
 export const CRM_EMAIL_FROM = "369 Research <noreply@coreversand.de>";
 export const CRM_EMAIL_FROM_ADDRESS = "noreply@coreversand.de";
@@ -12,7 +13,7 @@ const RESEND_EMAILS_URL = "https://api.resend.com/emails";
 export type CrmEmailSource = "manual" | "automatic";
 
 export interface SendCrmEmailInput {
-  customerId: number;
+  customerId: number | null;
   recipientEmail: string;
   subject: string;
   htmlBody: string;
@@ -35,36 +36,10 @@ export interface SendCrmEmailResult {
   error?: string;
 }
 
-async function resolveOrCreateOrderCustomer(orderId: string, email: string): Promise<number> {
+async function resolveOrderCustomer(orderId: string): Promise<number | null> {
   const db = await getDb();
   if (!db) throw new Error("Datenbank nicht verfügbar");
-  const [order] = await db.select().from(orders).where(eq(orders.orderId, orderId)).limit(1);
-  if (!order) throw new Error(`Bestellung ${orderId} nicht gefunden`);
-
-  if (order.customerId) return order.customerId;
-  const [existingCustomer] = await db.select().from(customers).where(ilike(customers.email, email)).limit(1);
-  if (existingCustomer) {
-    await db.update(orders).set({ customerId: existingCustomer.id, updatedAt: new Date() }).where(eq(orders.id, order.id));
-    return existingCustomer.id;
-  }
-
-  const [createdCustomer] = await db.insert(customers).values({
-    name: `${order.firstName} ${order.lastName}`.trim(),
-    firstName: order.firstName,
-    lastName: order.lastName,
-    phone: order.phone,
-    email: order.email,
-    company: order.company,
-    street: order.street,
-    houseNumber: order.houseNumber,
-    zip: order.zip,
-    city: order.city,
-    country: order.country,
-    source: "order_crm",
-    notes: "Automatisch für die CRM-Kommunikationsakte aus bestehender Bestellung verknüpft.",
-  }).returning();
-  await db.update(orders).set({ customerId: createdCustomer.id, updatedAt: new Date() }).where(eq(orders.id, order.id));
-  return createdCustomer.id;
+  return (await readCrmOrderContext(db, orderId)).customerId;
 }
 
 export function isValidCustomerEmail(email: string | null | undefined): boolean {
@@ -88,7 +63,7 @@ export async function sendAndArchiveAutomaticOrderEmail(input: {
   from?: string;
   replyTo?: string;
 }): Promise<SendCrmEmailResult> {
-  const customerId = await resolveOrCreateOrderCustomer(input.orderId, input.recipientEmail);
+  const customerId = await resolveOrderCustomer(input.orderId);
   return sendAndArchiveCrmEmail({
     customerId,
     recipientEmail: input.recipientEmail,
@@ -132,6 +107,7 @@ export function htmlToPlainText(html: string): string {
 export async function sendAndArchiveCrmEmail(input: SendCrmEmailInput): Promise<SendCrmEmailResult> {
   const db = await getDb();
   if (!db) throw new Error("Datenbank nicht verfügbar");
+  if (!input.customerId && !input.orderId) throw new Error("Kunde oder Bestellung muss angegeben werden");
   if (!ENV.resendApiKey) throw new Error("RESEND_API_KEY nicht konfiguriert");
   if (!isValidCustomerEmail(input.recipientEmail)) {
     throw new Error("Keine gültige Kunden-E-Mail-Adresse hinterlegt");
@@ -171,6 +147,7 @@ export async function sendAndArchiveCrmEmail(input: SendCrmEmailInput): Promise<
     direction: "outbound",
     source: input.source,
     deliveryStatus: "prepared",
+    customerLinkReview: input.customerId === null ? 1 : 0,
   }).returning();
 
   const payload: Record<string, unknown> = {
@@ -182,7 +159,7 @@ export async function sendAndArchiveCrmEmail(input: SendCrmEmailInput): Promise<
     text: input.plainText || htmlToPlainText(input.htmlBody),
     tags: [
       { name: "crm_communication_id", value: String(communication.id) },
-      { name: "customer_id", value: String(input.customerId) },
+      ...(input.customerId ? [{ name: "customer_id", value: String(input.customerId) }] : []),
       ...(input.orderId ? [{ name: "order_id", value: input.orderId }] : []),
     ],
   };

@@ -175,6 +175,9 @@ export function resolveCheckoutCustomerDataChange(
   const phoneCandidates = phone
     ? allCustomers.filter((customer) => normalizeCustomerMatchPhone(customer.phone) === phone)
     : [];
+  if (emailCandidates.length > 1 || phoneCandidates.length > 1) {
+    return { kind: "no_unique_match", reason: "ambiguous", requiresConfirmation: false };
+  }
   const emailCustomer = emailCandidates.length === 1 ? emailCandidates[0] : null;
   const phoneCustomer = phoneCandidates.length === 1 ? phoneCandidates[0] : null;
 
@@ -339,7 +342,7 @@ export async function consumeCustomerDataChangeConfirmation(
   if ((consumed.rowCount ?? 0) !== 1) throwReconfirmationRequired();
 }
 
-/** Writes the immutable event after the order exists and updates only the matched customer. */
+/** Records consent to the new order snapshot, not authorization to write a profile. */
 export async function persistConfirmedCustomerDataChange(
   db: any,
   input: {

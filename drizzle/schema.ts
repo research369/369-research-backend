@@ -316,7 +316,8 @@ export type DuplicateFinding = typeof duplicateFindings.$inferSelect;
  */
 export const customerCommunications = pgTable("customer_communications", {
   id: serial("id").primaryKey(),
-  customerId: integer("customer_id").notNull(),
+  customerId: integer("customer_id"),
+  customerLinkReview: integer("customer_link_review").notNull().default(0),
 
   type: communicationTypeEnum("type").notNull(),
   status: communicationStatusEnum("status").notNull().default("logged"),

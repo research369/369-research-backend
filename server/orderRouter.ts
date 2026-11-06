@@ -13,6 +13,8 @@ import { hasOtherPaidCodeOrder } from "./partnerCodeHistory.js";
 
 import {assertKwkNewCustomer,assertKwkCreditAvailable} from './kwkCheckoutEligibility.js';
 import { z } from "zod";
+import { assertManualSaleRole } from "./manualSaleAuthorization.js";
+import { reassignOrderCustomer } from "./orderCustomerAssignmentService.js";
 import {applyStockMovement} from "./stockMovementService.js";
 import {orderHash} from "./jarvyOrderContract.js";
 import { eq, desc, inArray, and, or, getTableColumns } from "drizzle-orm";
@@ -96,7 +98,6 @@ import {
   resolveCheckoutCustomerDataChange,
   resolveAddressBoundOptionalFields,
   toCustomerDataSnapshot,
-  toCustomerUpdateFromSnapshot,
   type CheckoutCustomerDataChangeResolution,
 } from "./customerDataChangeService.js";
 import { normalizeCommunicationLanguage } from "./communicationLanguageService.js";
@@ -259,6 +260,7 @@ export const orderRouter = router({
         .mutation(async ({ input, ctx }) => {
       // Reject foreign public-code terms before lookup, pricing or any writes.
       assertNoMixedPartnerOrderInput(input);
+      assertManualSaleRole(input.orderSource, ctx.user);
       const db = await getDb();
       if (!db) throw new Error("Database not available");
       const normalCheckoutKey = input.storeKey === '369research' && !ctx.jarvyOrder ? input.checkoutIdempotencyKey : undefined;
@@ -272,9 +274,6 @@ export const orderRouter = router({
       const communicationLanguage = normalizeCommunicationLanguage(input.communicationLanguage);
 
       const isRequestedWawiManualSale = input.orderSource === "wawi_manual";
-      if (isRequestedWawiManualSale && !ctx.user) {
-        throw new Error("WAWI_ANMELDUNG_ERFORDERLICH: Bitte erneut anmelden, bevor ein manueller Verkauf angelegt wird.");
-      }
       const isAuthenticatedWawiManualSale = isRequestedWawiManualSale && Boolean(ctx.user);
       // The manual workflow records discounts in discountBreakdown; labels such
       // as "25%" or "Kostenloser Versand" must never enter promo-code lookup.
@@ -1164,6 +1163,7 @@ export const orderRouter = router({
       // row. A token cannot be replayed for a changed record or used to update
       // a different customer after a concurrent profile edit.
       if (transactionCustomerDataChangeResolution?.kind === "matched") {
+        await db.execute(sql`LOCK TABLE customers IN SHARE MODE`);
         await db.execute(sql`
           SELECT id FROM customers
           WHERE id = ${transactionCustomerDataChangeResolution.customer.id}
@@ -1173,7 +1173,7 @@ export const orderRouter = router({
           .where(eq(customers.id, transactionCustomerDataChangeResolution.customer.id))
           .limit(1);
         const freshResolution = currentCustomer
-          ? resolveCheckoutCustomerDataChange([currentCustomer], {
+          ? resolveCheckoutCustomerDataChange(await db.select().from(customers), {
             ...input.customer,
             dhlPostNumber: input.customer.dhlPostNumber || null,
           })
@@ -1710,6 +1710,7 @@ export const orderRouter = router({
 
       if (isAuthenticatedWawiManualSale && input.existingCustomerId) {
         const [found] = await db.select().from(customers).where(eq(customers.id, input.existingCustomerId));
+        if (!found) throw new Error("Kunde nicht gefunden");
         if (found) {
           existingCustomer = found;
           console.log(`[Customers] Using manually matched customer ID=${input.existingCustomerId} (${found.name})`);
@@ -1737,12 +1738,8 @@ export const orderRouter = router({
           ? transactionCustomerDataChangeResolution
           : null;
         if (confirmedPublicChange) {
-          await db.update(customers)
-            .set({
-              ...toCustomerUpdateFromSnapshot(confirmedPublicChange.submittedSnapshot),
-              communicationLanguage,
-            })
-            .where(eq(customers.id, existingCustomer.id));
+          // A guest confirmation proves only consent to this order snapshot.
+          // Knowledge of an email/phone is never profile-write authorization.
           await persistConfirmedCustomerDataChange(db, {
             customerId: existingCustomer.id,
             orderId,
@@ -1751,8 +1748,7 @@ export const orderRouter = router({
             submittedSnapshot: confirmedPublicChange.submittedSnapshot,
             changedFields: confirmedPublicChange.changedFields,
           });
-          customerIntegrityTrigger = "order_customer_changed";
-          console.log(`[CustomerDataChange] Confirmed checkout update for customer #${existingCustomer.customerNumber} in order ${orderId}`);
+          console.log(`[CustomerDataChange] Confirmed order snapshot recorded in order ${orderId}; profile unchanged`);
         } else if (isAuthenticatedWawiManualSale && !ctx.jarvyOrder) {
           // The established authenticated WaWi workflow remains unchanged. The
           // public shop path above is deliberately the only changed behavior.
@@ -1780,10 +1776,8 @@ export const orderRouter = router({
           }).where(eq(customers.id, existingCustomer.id));
           customerIntegrityTrigger = manuallyChanged ? "order_customer_changed" : null;
         } else {
-          // A shop customer can choose the communication language independently
-          // from address/contact changes. It is never inferred from the URL later.
-          await db.update(customers).set({ communicationLanguage, updatedAt: new Date() })
-            .where(eq(customers.id, existingCustomer.id));
+          // Guest language/address preferences belong to the new order only.
+          // Even a no-change checkout cannot alter an existing profile.
         }
         console.log(`[Customers] Linked order ${orderId} to existing customer #${existingCustomer.customerNumber} (${fullName})`);
       } else {
@@ -2622,22 +2616,11 @@ export const orderRouter = router({
   reassignCustomer: adminProcedure
     .input(z.object({
       orderId: z.string(),
-      newCustomerId: z.number(),
+      newCustomerId: z.number().int().positive(),
     }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
-      const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1);
-      if (!order) throw new Error("Bestellung nicht gefunden");
-      const oldCustomerId = order.customerId;
-      await db.update(orders)
-        .set({ customerId: input.newCustomerId, updatedAt: new Date() })
-        .where(eq(orders.orderId, input.orderId));
-      // Rebuild exact direct-order statistics for both affected profiles.
-      for (const cid of new Set([oldCustomerId, input.newCustomerId])) {
-        if (cid) await refreshCustomerOrderMetrics(cid);
-      }
-      console.log(`[Orders] Reassigned order ${input.orderId} from customer ${oldCustomerId} to ${input.newCustomerId}`);
-      return { success: true, oldCustomerId, newCustomerId: input.newCustomerId };
+      return reassignOrderCustomer(db, input, ctx.user.id);
     }),
 });

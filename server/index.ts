@@ -9,6 +9,7 @@ process.env.TZ = "Europe/Berlin";
  */
 import express from "express";
 import cors from "cors";
+import { allowedBrowserOrigins, guardCookieOrigin, retiredMailRelay } from "./requestSecurity.js";
 import rateLimit from "express-rate-limit";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { ENV } from "./env.js";
@@ -51,6 +52,7 @@ import { ensureDhlRelabelSchema, isDhlRelabelSchemaReady } from "./dhlRelabelSch
 import { ensureOrderCommunicationPhoneSchema } from "./orderCommunicationPhoneService.js";
 import { ensureKwkDemoSchema } from "./kwkDemoService.js";
 import { ensureAdminChangeLogSchema } from "./adminChangeLogService.js";
+import { ensurePermissionsSchema, isPermissionsSchemaReady } from "./permissionsSchema.js";
 
 import {jarvyOrderRouter} from "./jarvyOrderRouter.js";
 import { jarvyReadRouter } from "./jarvyReadRouter.js";
@@ -71,20 +73,15 @@ let startupState: "initializing" | "ready" | "failed" = "initializing";
 const startupStartedAt = Date.now();
 
 // CORS – allow frontend domains
-const allowedOrigins = [
-  ENV.frontendUrl,
-  "https://369research.eu",
-  "https://www.369research.eu",
-  "http://localhost:3000",
-  "http://localhost:5173",
-].filter(Boolean);
+const allowedOrigins = allowedBrowserOrigins();
 
 app.use(cors({
-  origin: true, // Allow all origins (auth is via JWT Bearer token, not cookies)
+  origin: (origin, callback) => callback(null, !!origin && allowedOrigins.has(origin)),
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
 }));
+app.use(guardCookieOrigin);
 
 // Resend signs the original raw request body. The webhook must therefore be mounted
 // before the global JSON parser, otherwise its signature could not be verified safely.
@@ -137,6 +134,7 @@ app.get("/health/ready", async (_req, res) => {
     database: "ready",
     dhlLabelLedgerReady: isDhlRelabelSchemaReady(),
     orderIntegrityReady: isPriorityOrderIntegrityReady(),
+    permissionsSchemaReady: isPermissionsSchemaReady(),
     timestamp: new Date().toISOString(),
   });
 });
@@ -267,20 +265,7 @@ app.use(checkoutErrorRouter);
 
 
 // ─── TEST: Versandmail senden (nur für interne Tests) ────────────────────────
-app.post("/api/test-send-email", async (req: any, res: any) => {
-  const { to, subject, html } = req.body || {};
-  if (!to || !html) { res.status(400).json({ error: "to und html erforderlich" }); return; }
-  const { ENV } = await import("./env.js");
-  const apiKey = ENV.resendApiKey;
-  if (!apiKey) { res.status(500).json({ error: "RESEND_API_KEY nicht konfiguriert" }); return; }
-  const resp = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ from: "noreply@coreversand.de", reply_to: "support@369research.eu", to: [to], subject: subject || "Test", html })
-  });
-  const result = await resp.json();
-  res.json({ status: resp.status, result });
-});
+app.post("/api/test-send-email", retiredMailRelay);
 
 // ─── Packing-Foto Router (additiv, Pflichtfoto beim Packvorgang) ──────────
 app.use(packingPhotoRouter);
@@ -1340,6 +1325,8 @@ async function start() {
   } catch (err) {
     console.warn('[Server] KWK-Migration fehlgeschlagen (non-fatal):', err);
   }
+  // Required additive schema, no stats/backfill autorun. Failure keeps ready closed.
+  await ensurePermissionsSchema();
 
 }
 
