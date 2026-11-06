@@ -93,6 +93,7 @@ export const kwkAccounts = pgTable(
     loginAttempts: integer("login_attempts").notNull().default(0),
     loginLockedUntil: timestamp("login_locked_until"),
     lastLogin: timestamp("last_login"),
+    sessionVersion: integer("session_version").notNull().default(0),
 
     // Passwort-Reset
     resetToken: varchar("reset_token", { length: 128 }),

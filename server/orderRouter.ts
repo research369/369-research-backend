@@ -4,7 +4,7 @@ import { reverseOrderFinancesInTransaction } from './priorityOrderFinancialAdapt
 import {nextCustomerNumber} from './customerNumberService.js';
 import {checkCustomerCreationMaintenance} from './customerCreationMaintenance.js';
 import { publicCodeCommissionPreview } from "./partnerCommissionPreview.js";
-import { hasOtherPaidCodeOrder } from "./partnerCodeHistory.js";
+import { hasOtherPaidCodeOrder, partnerPaidCodeContactKey } from "./partnerCodeHistory.js";
 /**
  * Order Router – tRPC routes for order management (WaWi)
  * Public: createOrder (from checkout)
@@ -26,7 +26,7 @@ import { sendOrderConfirmationEmail, sendShippingNotificationEmail, sendAdminOrd
 import { getReleasedBankTransferInstructions } from "./paymentInstructionsConfig.js";
 import { isSubstitutionEnabled, resolveSubstitution, extractDosageMg, isSubstitutionEligible } from "./substitutionService.js";
 // KWK-Modul: statischer Import (sicherer als dynamischer Import)
-import { isKwkEnabled, hashAddress, calculateKwkCommission, calculateKwkCommissionBase } from "./kwkService.js";
+import { isKwkEnabled, hashAddress, calculateKwkCommission, calculateKwkCommissionBase, redeemCreditInTransaction } from "./kwkService.js";
 import { partners } from "../drizzle/schema.js";
 import { sql } from "drizzle-orm";
 import { queueCustomerDuplicateReview } from "./customerIntegrityService.js";
@@ -52,7 +52,7 @@ import {
   resolveShippingRegion,
   type PromoDefinition,
 } from "./kwkCheckoutPricing.js";
-import { verifyKwkToken } from "./kwkAuth.js";
+import { getAuthenticatedKwkFromToken } from "./kwkAuth.js";
 import {
   getActiveGlobalAutomaticDiscountFromDb,
   resolveGlobalAutomaticDiscountBenefits,
@@ -317,6 +317,10 @@ export const orderRouter = router({
           resolvedPublicPartnerCode.partnerEmail,
         );
         const normalizedCustomerEmail = input.customer.email?.trim().toLowerCase() || "";
+        if (resolvedPublicPartnerCode.program.customerDiscountPolicy === 'first_paid_code_use'
+          || resolvedPublicPartnerCode.program.commissionPolicy === 'first_paid_code_order') {
+          partnerPaidCodeContactKey(resolvedPublicPartnerCode.partnerCode, normalizedCustomerEmail);
+        }
         if (publicPartnerDiscountEligible && normalizedCustomerEmail && !isRepeatCodeUseAllowed(resolvedPublicPartnerCode.program)) {
           const pool = await getPool();
           if (!pool) throw new Error("Database not available");
@@ -624,6 +628,7 @@ export const orderRouter = router({
       // Partnerzuordnung (Code, Nummer, Rabatt oder Guthaben) schließt KWK dagegen aus.
       let kwkReferralAccount: { id: number; email: string; phone: string } | null = null;
       let kwkCreditAccountId: number | null = null;
+      let kwkSessionVersion: number | null = null;
       if (hasKwkRequest) {
         const normalizedDiscountCode = input.discountCode?.trim().toUpperCase() || "";
         let discountCodeIsPartnerCode = false;
@@ -645,11 +650,15 @@ export const orderRouter = router({
           throw new Error("KWK_NEUKUNDENRABATT_UND_GUTHABEN_NICHT_KOMBINIERBAR");
         }
         if (requestedKwkCredit > 0) {
-          const authenticatedKwk = ctx.operationsPreview?.kwkCreditAccountId?{kwkId:ctx.operationsPreview.kwkCreditAccountId}:input.kwkCreditToken ? verifyKwkToken(input.kwkCreditToken) : null;
+          // Trusted synthetic preview returns before every real write below.
+          const authenticatedKwk = ctx.operationsPreview?.kwkCreditAccountId
+            ? { kwkId: ctx.operationsPreview.kwkCreditAccountId, sessionVersion: null }
+            : input.kwkCreditToken ? await getAuthenticatedKwkFromToken(input.kwkCreditToken) : null;
           if (!authenticatedKwk) {
             throw new Error("KWK_GUTHABEN_AUTHENTIFIZIERUNG_ERFORDERLICH");
           }
           kwkCreditAccountId = authenticatedKwk.kwkId;
+          kwkSessionVersion = authenticatedKwk.sessionVersion;
         }
 
         let promoDefinition: PromoDefinition | null = null;
@@ -1194,6 +1203,14 @@ export const orderRouter = router({
       // entstehen und die vom Browser gesendete Account-ID wird nicht vertraut.
       if (authoritativeKwkCredit > 0 && kwkCreditAccountId) {
         await assertKwkCreditAvailable(db,kwkCreditAccountId,authoritativeKwkCredit,true);
+        // Re-run the exact shared auth query AFTER the owner lock: reset/logout
+        // may have revoked the session since preflight. Never trust client IDs.
+        const lockedAuth = input.kwkCreditToken
+          ? await getAuthenticatedKwkFromToken(input.kwkCreditToken, createPartnerCreditTransactionQueryClient(query => tx.execute(query)))
+          : null;
+        if (!lockedAuth || lockedAuth.kwkId !== kwkCreditAccountId || lockedAuth.sessionVersion !== kwkSessionVersion) {
+          throw new Error("KWK_GUTHABEN_SESSION_WIDERRUFEN");
+        }
       }
 
       // KWK gilt ausschließlich für die erste Bestellung eines echten Neukunden.
@@ -1476,6 +1493,7 @@ export const orderRouter = router({
         creditUsed: creditUsed.toFixed(2),
         kwkCreditUsed: (input.kwkCreditUsed || 0).toFixed(2),
         kwkCreditRequested: (input.kwkCreditUsed || 0).toFixed(2),
+        kwkCreditOwnerId: authoritativeKwkCredit > 0 ? kwkCreditAccountId : null,
         qrCampaignId: qrAttribution?.campaignId ?? null,
         qrAttributionToken: qrAttribution?.attributionToken ?? null,
         qrCode: qrAttribution?.shortCode ?? null,
@@ -1515,26 +1533,10 @@ export const orderRouter = router({
       }
 
       if (authoritativeKwkCredit > 0 && kwkCreditAccountId) {
-        await db.execute(sql`
-          INSERT INTO kwk_ledger (kwk_id, order_id, amount, type, status, note, created_by)
-          VALUES (${kwkCreditAccountId}, ${orderId}, ${(-authoritativeKwkCredit).toFixed(2)},
-                  'redeemed', 'confirmed', ${`Guthaben eingelöst bei Bestellung ${orderId}`}, 'system')
-        `);
-        await db.execute(sql`
-          UPDATE kwk_accounts
-          SET credit_available = (
-                SELECT COALESCE(SUM(CASE
-                  WHEN type IN ('credit_released','redeemed','cancelled','refund','manual_correction')
-                   AND status='confirmed' THEN amount ELSE 0 END), 0)
-                FROM kwk_ledger WHERE kwk_id=${kwkCreditAccountId}
-              ),
-              credit_redeemed = (
-                SELECT COALESCE(SUM(ABS(amount)), 0) FROM kwk_ledger
-                WHERE kwk_id=${kwkCreditAccountId} AND type='redeemed' AND status='confirmed'
-              ),
-              updated_at=NOW()
-          WHERE id=${kwkCreditAccountId}
-        `);
+        await redeemCreditInTransaction(
+          kwkCreditAccountId, orderId, authoritativeKwkCredit,
+          createPartnerCreditTransactionQueryClient(query => tx.execute(query)),
+        );
       }
 
       // Insert order items. If a client omitted the selected dosage, recover it first

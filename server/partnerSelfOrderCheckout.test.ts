@@ -159,7 +159,9 @@ test("router snapshots use canonical earning and retain the final historical pay
   assert.match(source, /if \(creditUsed > 0\) \{\s*await redeemPartnerCreditInTransaction\(\s*orderId,\s*createPartnerCreditTransactionQueryClient\(query => tx.execute\(query\)\)/);
   const finalLedgerCheck = source.indexOf("await redeemPartnerCreditInTransaction(");
   assert.ok(finalLedgerCheck > source.indexOf("await db.transaction("));
-  assert.ok(finalLedgerCheck < source.indexOf("// This must run after the persistence transaction commits."));
+  const receipt = source.indexOf('await persistCheckoutReceipt(tx,normalCheckoutKey,normalFingerprint!,response)');
+  const postCommit = source.indexOf('if (transactionResponse.orderId !== orderId) return transactionResponse');
+  assert.ok(receipt > finalLedgerCheck && postCommit > receipt, 'redemption precedes durable receipt and post-commit work');
   assert.equal([...source.matchAll(/await redeemPartnerCreditForOrder\(orderId\)/g)].length, 1, "only duplicate recovery uses the standalone wrapper");
   const ledger = readFileSync(new URL("./partnerCreditService.ts", import.meta.url), "utf8");
   assert.match(ledger, /FOR UPDATE/);

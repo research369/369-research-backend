@@ -1,6 +1,7 @@
 import {ensurePriorityOrderIntegritySchema,isPriorityOrderIntegrityReady} from './priorityOrderIntegrity.js';
 import { ensureAccountSecuritySchema, isAccountSecuritySchemaReady } from "./accountSecuritySchema.js";
 import {customerCreationActivity} from './customerCreationMaintenance.js';
+import { allHardeningSchemasReady, releaseHardeningReadiness } from './releaseHardeningReadiness.js';
 // Zeitzone auf Deutschland setzen (muss vor allen anderen Imports stehen)
 process.env.TZ = "Europe/Berlin";
 
@@ -124,7 +125,8 @@ app.get("/health/ready", async (_req, res) => {
     });
   }
 
-  if (!isPriorityOrderIntegrityReady()) return res.status(503).json({status:"unavailable",orderIntegrityReady:false});
+  const hardening = releaseHardeningReadiness();
+  if (!allHardeningSchemasReady(hardening)) return res.status(503).json({status:"unavailable", ...hardening});
   const database = await checkDatabaseReadiness();
   if (!database.ready) {
     return res.status(503).json({
@@ -149,7 +151,7 @@ app.get("/health/ready", async (_req, res) => {
 // All business routes remain unavailable until initialization completes. The
 // liveness and readiness routes above deliberately stay reachable for Railway.
 app.use((_req, res, next) => {
-  if (startupState === "ready") {
+  if (startupState === "ready" && allHardeningSchemasReady(releaseHardeningReadiness())) {
     next();
     return;
   }
@@ -266,8 +268,6 @@ async function start() {
   console.log(`[Server] Database: ${ENV.databaseUrl ? "configured" : "NOT configured"}`);
   console.log(`[Server] Bunq API: ${ENV.bunqApiKey ? "configured" : "NOT configured"}`);
   console.log(`[Server] Resend API: ${ENV.resendApiKey ? "configured" : "NOT configured"}`);
-
-  await ensurePriorityOrderIntegritySchema();
 
   // Additive CRM migration: communication archive + immutable provider event journal
   try {
@@ -1317,6 +1317,8 @@ async function start() {
   // Login/reset schema is required; never mark routes ready after a failed
   // migration. KWK base tables have been created by the existing bootstrap.
   await ensureAccountSecuritySchema();
+  // Priority references stock_history; base startup is now complete.
+  await ensurePriorityOrderIntegritySchema();
 
   // Financial invariants are mandatory and run AFTER the existing KWK base tables.
   // Duplicates fail readiness visibly; never repair historical balances automatically.

@@ -1,4 +1,3 @@
-import type { Pool } from "pg";
 import jwt from "jsonwebtoken";
 import { createHmac } from "node:crypto";
 import { getPool } from "./db.js";
@@ -32,7 +31,9 @@ export function verifyKwkToken(token: string): { kwkId: number; sessionVersion: 
 }
 
 /** Use this, not signature-only verification, for productive authorization. */
-export async function getAuthenticatedKwkFromToken(token: string, executor?: Pick<Pool, "query">): Promise<{ kwkId: number; sessionVersion: number } | null> {
+export async function getAuthenticatedKwkFromToken(token: string, executor?: {
+  query(text: string, values?: unknown[]): Promise<{ rows: unknown[] }>;
+}): Promise<{ kwkId: number; sessionVersion: number } | null> {
   const payload = verifyKwkToken(token);
   if (!payload) return null;
   const pool = executor || await getPool();

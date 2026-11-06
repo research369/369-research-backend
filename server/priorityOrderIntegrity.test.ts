@@ -13,6 +13,12 @@ import {ensurePriorityOrderIntegritySchema,checkoutFingerprint,runOrderTask,queu
 import {lockOrder,returnOrderStock,deleteOrderAtomically} from './orderStockReturnService.js';
 import {orders,articles,stockHistory,orderItems} from '../drizzle/schema.js';
 import {eq} from 'drizzle-orm';
+import { createKwkToken, createKwkDemoToken } from './kwkAuth.js';
+import { syncKwkAccountCache, redeemCredit } from './kwkService.js';
+import { ensureAccountSecuritySchema } from './accountSecuritySchema.js';
+import { ensurePermissionsSchema } from './permissionsSchema.js';
+import { ensurePartnerFinancialSchema } from './partnerFinancialSchema.js';
+import { ensureCustomerDataChangeSchema, resolveCheckoutCustomerDataChange, createCustomerDataChangeConfirmation } from './customerDataChangeService.js';
 // ONLY dedicated reserved local PostgreSQL; no env URL, HTTP or provider keys.
 const local = 'postgresql://priority_local@127.0.0.1:56439/postgres';
 let pool:any, db:any, external=0;
@@ -28,26 +34,30 @@ before(async()=>{
   mock.method(globalThis,'fetch',async()=>{external++;throw Error('NETWORK_FORBIDDEN');});
   await closeDb(); ENV.databaseUrl=local; ENV.resendApiKey='';ENV.bunqApiKey='';ENV.dhlApiKey='';ENV.dhlTrackingApiKey='';ENV.forgeApiKey='';
   pool=await getPool();db=await getDb();
-  await pool.query(`CREATE TABLE IF NOT EXISTS kwk_ledger(id serial primary key,kwk_id integer,order_id varchar(32),amount numeric,type text,status text,note text,created_by text);
-    CREATE TABLE IF NOT EXISTS kwk_referrals(id serial primary key,order_id varchar(32),status text);
-    CREATE TABLE IF NOT EXISTS substitution_config(id integer primary key,enabled boolean);
+  await pool.query(`CREATE TABLE IF NOT EXISTS substitution_config(id integer primary key,enabled boolean);
     INSERT INTO substitution_config VALUES(1,false) ON CONFLICT DO NOTHING;
     CREATE SEQUENCE IF NOT EXISTS priority_test_order_seq;
     CREATE OR REPLACE FUNCTION next_order_id() RETURNS text LANGUAGE sql AS $$ SELECT 'TEST-' || nextval('priority_test_order_seq')::text $$;`);
   await ensureCustomerOrderBlockSchema();await ensureGoodieSchema();await ensureAdminChangeLogSchema();await ensurePriorityOrderIntegritySchema();
+  await ensurePermissionsSchema();await ensureAccountSecuritySchema();await ensurePartnerFinancialSchema();
+  await ensureCustomerDataChangeSchema();
   await ensurePriorityOrderIntegritySchema(); // idempotent migration repeat
 });
 beforeEach(async()=>{
  external=0;
  await pool.query(`DROP TRIGGER IF EXISTS priority_fail_item ON order_items;
    DROP TRIGGER IF EXISTS priority_fail_delete ON orders;
-   TRUNCATE goodie_assignments,priority_stock_returns,priority_order_actions,priority_order_tasks,priority_checkout_receipts,stock_history,order_items,orders,customers,articles,partner_transactions,kwk_ledger,kwk_referrals,invoices,shop_settings CASCADE;
+   DROP TRIGGER IF EXISTS priority_fail_kwk_cancel ON kwk_ledger;
+   DROP TRIGGER IF EXISTS priority_fail_cache ON kwk_accounts;
+   TRUNCATE customer_data_change_confirmations,customer_data_change_events,goodie_assignments,priority_stock_returns,priority_order_actions,priority_order_tasks,priority_checkout_receipts,stock_history,order_items,orders,customers,articles,partners,partner_programs,kwk_accounts,partner_transactions,kwk_ledger,kwk_referrals,invoices,shop_settings CASCADE;
    INSERT INTO articles(id,sku,name,shop_product_id,stock,is_active,shop_visible,category,selling_price,sale_price,variants)
    VALUES(9001,'SYNTHETIC-10MG','Synthetic (10 mg)','synthetic',10,1,1,'Peptide',20,0,'[]'),
    (9002,'SUBSTITUTED-5MG','Actual replacement (5 mg)','replacement',4,1,1,'Peptide',10,0,'[]'),
    (9003,'BAC-10ML','Actual BAC','bac-wasser',10,1,1,'Zubehör',5,0,'[]');
    INSERT INTO customers(id,customer_number,name,first_name,last_name,email,phone,street,house_number,zip,city,country)
    VALUES(9001,'999001','Synthetic Owner','Synthetic','Owner','synthetic@example.test','+41790000000','Local','1','8000','Local','CH');
+   INSERT INTO kwk_accounts(id,kwk_number,referral_code,name,email,phone,password_hash)
+   VALUES(1,'KWK-1','KWK-1','Synthetic KWK','kwk1@example.test','1','unused'),(2,'KWK-2','KWK-2','Synthetic KWK 2','kwk2@example.test','2','unused');
    INSERT INTO shop_settings(key,value) VALUES('address_validation_enabled','false');`);
 });
 after(async()=>{await closeDb();ENV.databaseUrl='';mock.restoreAll();});
@@ -118,10 +128,10 @@ test('actual router: cancellation returns exact replacement and BAC movements on
  const [x,y]=await Promise.all([caller().cancel({orderId:'RETURN',restock:true,reason:'Local explicit cancellation'}),caller().cancel({orderId:'RETURN',restock:true,reason:'Local explicit cancellation'})]);
  assert.equal(x.restoredStock+y.restoredStock,3);assert.equal(await stock(9002),4);assert.equal(await stock(9003),10);assert.equal(await stock(),7);
  assert.equal(await count('priority_stock_returns'),2);assert.deepEqual((await pool.query('SELECT original_movement_id FROM priority_stock_returns ORDER BY original_movement_id')).rows.map((r:any)=>r.original_movement_id),[a,b]);
- assert.equal(x.financialRepairRequired,true);assert.equal((await pool.query("SELECT state FROM priority_order_tasks WHERE order_id='RETURN' AND task='financial_cancellation'")).rows[0].state,'repair_required');
+ assert.equal(x.financialRepairRequired,false);assert.equal(y.financialRepairRequired,false);assert.equal(await count('priority_order_tasks'),0);
 });
 test('actual service: later error rolls status/stock/return mappings back together',async()=>{
- await seedOrder();await movement('RETURN',9002,-2);
+  await seedOrder();await movement('RETURN',9002,-2);
  await assert.rejects(db.transaction(async(tx:any)=>{const o=await lockOrder(tx,'RETURN');await returnOrderStock(tx,o,'Local rollback','Admin');await tx.update(orders).set({status:'storniert'}).where(eq(orders.orderId,'RETURN'));throw Error('LOCAL_LATE_ERROR');}),/LOCAL_LATE_ERROR/);
  assert.equal(await stock(9002),2);assert.equal(await count('priority_stock_returns'),0);assert.equal((await pool.query("SELECT status FROM orders WHERE order_id='RETURN'")).rows[0].status,'offen');
 });
@@ -167,12 +177,12 @@ test('actual router: positive local correction never becomes an automatic second
  await assert.rejects(caller().cancel({orderId:'RETURN',restock:true,reason:'Local explicit cancellation'}),/ORDER_STOCK_HISTORY_REVIEW_REQUIRED/);assert.equal(await count('priority_stock_returns'),0);
 });
 test('actual router: status-only cancellation does not silently restock and persists financial repair',async()=>{
- await seedOrder();await movement('RETURN',9002,-2);
- const r=await caller().updateStatus({orderId:'RETURN',status:'storniert'});
- assert.equal(r.success,true);assert.equal(r.financialRepairRequired,true);assert.equal(await stock(9002),2);assert.equal(await count('priority_stock_returns'),0);
+  await seedOrder();await movement('RETURN',9002,-2);
+  const r=await caller().updateStatus({orderId:'RETURN',status:'storniert'});
+  assert.equal(r.success,true);assert.equal(r.financialRepairRequired,false);assert.equal(await count('priority_order_tasks'),0);assert.equal(await stock(9002),2);assert.equal(await count('priority_stock_returns'),0);
 });
 test('actual router: successful explicit article edit includes removed positions in same-tx stock plan',async()=>{
- await seedOrder();await db.update(orderItems).set({articleId:9002}).where(eq(orderItems.orderId,'RETURN'));
+  await seedOrder();await db.update(orderItems).set({articleId:9002}).where(eq(orderItems.orderId,'RETURN'));
  await movement('RETURN',9002,-1);
  const id=(await pool.query("SELECT id FROM order_items WHERE order_id='RETURN'")).rows[0].id;
  await caller().update({orderId:'RETURN',items:[{name:'New explicit inventory item',type:'peptide',price:20,quantity:2,articleId:9001}],subtotal:40,discount:0,shipping:18,total:58});
@@ -213,4 +223,123 @@ test('actual finance adapter: shared adapter writes and order status commit toge
    kwk:async(_id,client)=>{await client.query("INSERT INTO priority_order_tasks(order_id,task,state) VALUES($1,'fake_kwk','done')",['FINANCE']);},
   });
  });assert.equal(r.repairRequired,false);assert.equal(await count('priority_order_tasks'),2);assert.equal((await pool.query("SELECT status FROM orders WHERE order_id='FINANCE'")).rows[0].status,'storniert');
+});
+
+async function seedFinancialCancellation() {
+  await seedOrder('INTEGRATED',{partnerSourceId:9,partnerNumber:'OWN9',creditUsed:'10',kwkCreditOwnerId:1});
+  await movement('INTEGRATED',9002,-2);
+  await pool.query(`INSERT INTO partners(id,name,email,code,partner_number,credit_balance) VALUES(9,'Synthetic partner','partner@example.test','TEST','OWN9',90);
+    INSERT INTO partner_transactions(partner_id,order_id,type,amount,balance_after,status) VALUES(9,'INTEGRATED','einloesung',-10,90,'normal');
+    INSERT INTO kwk_ledger(kwk_id,order_id,type,amount,status) VALUES
+      (1,NULL,'manual_correction',50,'confirmed'),(1,'INTEGRATED','redeemed',-12,'confirmed'),
+      (2,NULL,'manual_correction',50,'confirmed'),(2,'INTEGRATED','credit_released',9,'confirmed');
+    INSERT INTO kwk_referrals(kwk_id,order_id) VALUES(2,'INTEGRATED');`);
+  await syncKwkAccountCache(1,pool);await syncKwkAccountCache(2,pool);
+}
+async function integratedState() {
+  return {
+    order:(await pool.query("SELECT status,cancelled_at FROM orders WHERE order_id='INTEGRATED'")).rows[0],
+    partner:(await pool.query('SELECT credit_balance FROM partners WHERE id=9')).rows[0],
+    entries:(await pool.query('SELECT id,status,amount FROM partner_transactions ORDER BY id')).rows,
+    ledger:(await pool.query('SELECT id,kwk_id,type,status,amount FROM kwk_ledger ORDER BY id')).rows,
+    caches:(await pool.query('SELECT id,credit_available,credit_pending,credit_redeemed FROM kwk_accounts ORDER BY id')).rows,
+    referral:(await pool.query('SELECT status FROM kwk_referrals')).rows,
+    stock:await stock(9002),history:await count('stock_history'),returns:await count('priority_stock_returns'),actions:await count('priority_order_actions'),
+  };
+}
+test('ACTUAL Order.cancel: second real KWK ledger failure rolls Partner, order, stock and caches back; positive retry/racing replay commits once',async()=>{
+  await seedFinancialCancellation();const before=await integratedState();
+  await pool.query(`CREATE OR REPLACE FUNCTION priority_cancel_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.type='cancelled' THEN RAISE EXCEPTION 'LOCAL_REAL_KWK_FAILURE'; END IF; RETURN NEW; END $$;
+    CREATE TRIGGER priority_fail_kwk_cancel BEFORE INSERT ON kwk_ledger FOR EACH ROW EXECUTE FUNCTION priority_cancel_fail();`);
+  await assert.rejects(caller().cancel({orderId:'INTEGRATED',restock:true,reason:'Local integrated rollback'}),e=>/LOCAL_REAL_KWK_FAILURE|Failed query/.test(String(e)));
+  assert.deepEqual(await integratedState(),before);assert.equal(external,0);
+  await pool.query('DROP TRIGGER priority_fail_kwk_cancel ON kwk_ledger');
+  const results=await Promise.all([caller().cancel({orderId:'INTEGRATED',restock:true,reason:'Local integrated retry'}),caller().cancel({orderId:'INTEGRATED',restock:true,reason:'Local integrated retry'})]);
+  assert.equal(results.reduce((s,r)=>s+r.restoredStock,0),2);assert(results.every(r=>r.financialRepairRequired===false));
+  const committed=await integratedState();assert.equal(committed.order.status,'storniert');assert(committed.order.cancelled_at);
+  assert.equal(committed.partner.credit_balance,'100.00');assert.deepEqual(committed.entries.map((r:any)=>r.status),['storniert']);
+  assert.deepEqual(committed.caches.map((r:any)=>r.credit_available),['50.00','50.00']);
+  assert.equal(committed.ledger.filter((r:any)=>r.type==='cancelled').length,2);assert.equal(committed.stock,4);assert.equal(committed.returns,1);
+  await caller().cancel({orderId:'INTEGRATED',restock:true,reason:'Local integrated replay'});
+  assert.deepEqual(await integratedState(),committed);assert.equal(external,0);
+});
+test('ACTUAL Order.cancel: cache failure after Partner and KWK writes rolls all state back',async()=>{
+  await seedFinancialCancellation();const before=await integratedState();
+  await pool.query(`CREATE OR REPLACE FUNCTION priority_cache_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'LOCAL_REAL_CACHE_FAILURE'; END $$;
+    CREATE TRIGGER priority_fail_cache BEFORE UPDATE ON kwk_accounts FOR EACH ROW EXECUTE FUNCTION priority_cache_fail();`);
+  await assert.rejects(caller().cancel({orderId:'INTEGRATED',restock:true,reason:'Local integrated cache rollback'}),e=>/LOCAL_REAL_CACHE_FAILURE|Failed query/.test(String(e)));
+  assert.deepEqual(await integratedState(),before);assert.equal(external,0);
+});
+async function seedCheckoutCredit() {
+  await pool.query("INSERT INTO kwk_ledger(kwk_id,type,amount,status) VALUES(1,'manual_correction',50,'confirmed')");
+  await syncKwkAccountCache(1,pool);
+}
+const kwkInput=(extra:any={})=>input({kwkCreditUsed:10,kwkCreditKwkId:2,kwkCreditToken:createKwkToken(1),...extra});
+test('ACTUAL checkout: productive auth ignores browser owner; owner/debit/cache commit together and receipt replay no double debit',async()=>{
+  await seedCheckoutCredit();const [a,b]=await Promise.all([caller().create(kwkInput()),caller().create(kwkInput())]);
+  assert.equal(a.orderId,b.orderId);assert.equal(await count('orders'),1);
+  const o=(await pool.query('SELECT kwk_credit_owner_id,kwk_credit_requested,kwk_credit_used FROM orders')).rows[0];
+  assert.deepEqual(o,{kwk_credit_owner_id:1,kwk_credit_requested:'10.00',kwk_credit_used:'10.00'});
+  assert.equal((await pool.query("SELECT count(*)::int n FROM kwk_ledger WHERE type='redeemed'")).rows[0].n,1);
+  assert.equal((await pool.query('SELECT credit_available FROM kwk_accounts WHERE id=1')).rows[0].credit_available,'40.00');
+  assert.equal(await stock(),9);await caller().create(kwkInput());assert.equal(await stock(),9);assert.equal(external,0);
+});
+test('ACTUAL checkout: post-debit item failure rolls owner/order/receipt/debit/cache and stock back',async()=>{
+  await seedCheckoutCredit();
+  await pool.query('CREATE TRIGGER priority_fail_item BEFORE INSERT ON order_items FOR EACH ROW EXECUTE FUNCTION priority_fail()');
+  await assert.rejects(caller().create(kwkInput()),/Failed query|LOCAL_INJECTED/);
+  assert.equal(await count('orders'),0);assert.equal(await count('priority_checkout_receipts'),0);assert.equal(await stock(),10);assert.equal(await count('stock_history'),0);
+  assert.equal((await pool.query("SELECT count(*)::int n FROM kwk_ledger WHERE type='redeemed'")).rows[0].n,0);
+  assert.equal((await pool.query('SELECT credit_available FROM kwk_accounts WHERE id=1')).rows[0].credit_available,'50.00');
+});
+test('ACTUAL checkout: demo/revoked/deactivated sessions denied before any order or stock writes',async()=>{
+  await seedCheckoutCredit();
+  await assert.rejects(caller().create(kwkInput({kwkCreditToken:createKwkDemoToken(1)})),/AUTHENTIFIZIERUNG/);
+  await pool.query('UPDATE kwk_accounts SET session_version=1 WHERE id=1');
+  await assert.rejects(caller().create(kwkInput()),/AUTHENTIFIZIERUNG/);
+  await pool.query("UPDATE kwk_accounts SET session_version=0,status='deaktiviert' WHERE id=1");
+  await assert.rejects(caller().create(kwkInput()),/AUTHENTIFIZIERUNG/);
+  assert.equal(await count('orders'),0);assert.equal(await stock(),10);assert.equal(await count('stock_history'),0);assert.equal(external,0);
+});
+test('ACTUAL checkout: revocation after initial auth is rechecked after owner lock and rolls transaction back',async()=>{
+  await seedCheckoutCredit();const original=db.transaction.bind(db);let revoked=false;
+  const intercept=mock.method(db,'transaction',async(...args:any[])=>{
+    if(!revoked){revoked=true;await pool.query('UPDATE kwk_accounts SET session_version=session_version+1 WHERE id=1');}
+    return original(...args);
+  });
+  try {await assert.rejects(caller().create(kwkInput()),/SESSION_WIDERRUFEN/);} finally {intercept.mock.restore();}
+  assert(revoked);assert.equal(await count('orders'),0);assert.equal(await stock(),10);assert.equal(await count('stock_history'),0);
+  assert.equal((await pool.query('SELECT credit_available FROM kwk_accounts WHERE id=1')).rows[0].credit_available,'50.00');
+});
+test('ACTUAL preview: trusted synthetic KWK preview cannot write owner/order/ledger/stock',async()=>{
+  await seedCheckoutCredit();const preview=orderRouter.createCaller({req:{headers:{}},res:{},user:null,operationsPreview:{kwkCreditAccountId:1}} as any);
+  const r=await preview.create(input({kwkCreditUsed:10}));assert('operationsPreview' in r);
+  assert.equal(await count('orders'),0);assert.equal(await count('stock_history'),0);assert.equal(await stock(),10);
+  assert.equal((await pool.query('SELECT credit_available FROM kwk_accounts WHERE id=1')).rows[0].credit_available,'50.00');
+  assert.equal((await pool.query("SELECT count(*)::int n FROM kwk_ledger WHERE type='redeemed'")).rows[0].n,0);assert.equal(external,0);
+});
+test('ACTUAL legacy redeem wrapper: NULL owner fails closed without retroclaim or debit',async()=>{
+  await seedCheckoutCredit();await seedOrder('LEGACY',{kwkCreditRequested:'10',kwkCreditUsed:'10',discount:'10'});
+  await assert.rejects(redeemCredit(1,'LEGACY',10),/OWNER_REQUIRED/);
+  assert.equal((await pool.query("SELECT kwk_credit_owner_id FROM orders WHERE order_id='LEGACY'")).rows[0].kwk_credit_owner_id,null);
+  assert.equal((await pool.query("SELECT count(*)::int n FROM kwk_ledger WHERE type='redeemed'")).rows[0].n,0);
+});
+
+test('ACTUAL checkout retry: renewed customer confirmation returns existing receipt once; changed address still conflicts',async()=>{
+  const customer={...input().customer,street:'New Local'};
+  async function confirmation() {
+    const rows=(await pool.query('SELECT id,name,first_name AS "firstName",last_name AS "lastName",email,phone,street,house_number AS "houseNumber",zip,city,country FROM customers WHERE id=9001')).rows;
+    const resolution=resolveCheckoutCustomerDataChange(rows,customer);assert.equal(resolution.kind,'matched');
+    if(resolution.kind!=='matched')throw Error('LOCAL_RESOLUTION_REQUIRED');assert(resolution.requiresConfirmation);
+    return (await createCustomerDataChangeConfirmation(db,resolution)).confirmationToken;
+  }
+  await assert.rejects(caller().create(input({customer})),/CUSTOMER_DATA_CHANGE_RECONFIRMATION_REQUIRED/);
+  assert.equal(await count('orders'),0);assert.equal(await stock(),10);
+  const first=await confirmation();const a=await caller().create(input({customer,customerDataChangeConfirmationToken:first}));
+  assert.equal((await pool.query('SELECT street FROM customers WHERE id=9001')).rows[0].street,'Local');
+  const second=await confirmation();assert.notEqual(second,first);
+  const b=await caller().create(input({customer,customerDataChangeConfirmationToken:second}));assert.equal(b.orderId,a.orderId);
+  assert.equal(await count('orders'),1);assert.equal(await count('priority_checkout_receipts'),1);assert.equal(await count('stock_history'),1);assert.equal(await count('customer_data_change_events'),1);assert.equal(await stock(),9);
+  await assert.rejects(caller().create(input({customer:{...customer,street:'Another Local'},customerDataChangeConfirmationToken:second})),/CHECKOUT_INTENT_CONFLICT/);
+  assert.equal(await count('orders'),1);assert.equal(await stock(),9);assert.equal(external,0);
 });

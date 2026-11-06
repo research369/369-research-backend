@@ -7,5 +7,5 @@ const previous = generateDrizzleJson({});
 const current = generateDrizzleJson({ ...schema, ...kwkSchema });
 const statements = await generateMigration(previous, current);
 await mkdir(new URL("../tests/fixtures/", import.meta.url), { recursive: true });
-await writeFile(new URL("../tests/fixtures/ledger-current-schema.sql", import.meta.url), statements.join(";\n\n") + ";\n");
+await writeFile(process.argv[2] || new URL("../tests/fixtures/ledger-current-schema.sql", import.meta.url), statements.join(";\n\n") + ";\n");
 console.log(`Actual Drizzle schema exported (${statements.length} statements)`);

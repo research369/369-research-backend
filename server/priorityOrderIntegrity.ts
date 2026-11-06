@@ -19,7 +19,9 @@ export function canonicalIntent(value: any): string {
 }
 /** Bind parsed request BEFORE repricing/mutation; only transport-generated references excluded. */
 export function checkoutFingerprint(input: any) {
-  const { checkoutIdempotencyKey, orderId, date, ...intent } = input;
+  // Renewed auth/confirmation credentials do not constitute a second purchase.
+  // All business/contact/credit fields remain bound; first execution still authenticates.
+  const { checkoutIdempotencyKey, orderId, date, customerDataChangeConfirmationToken, kwkCreditToken, ...intent } = input;
   return createHash('sha256').update(canonicalIntent(intent)).digest('hex');
 }
 export const resultRows = (r: any): any[] => Array.isArray(r) ? r : r?.rows ?? [];

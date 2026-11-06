@@ -11,6 +11,6 @@ trap cleanup EXIT
 # Fixed port is reserved for this module. Start MUST fail if occupied; never reuse another cluster.
 "$PG_BIN/initdb" -D "$TEST_ROOT/data" -A trust -U priority_local >/dev/null
 "$PG_BIN/pg_ctl" -D "$TEST_ROOT/data" -l "$TEST_ROOT/postgres.log" -o "-k $TEST_ROOT/socket -h 127.0.0.1 -p 56439" start >/dev/null
-./node_modules/.bin/drizzle-kit export --schema ./drizzle/schema.ts --dialect postgresql > "$TEST_ROOT/schema.sql"
+./node_modules/.bin/tsx scripts/export-ledger-test-schema.ts "$TEST_ROOT/schema.sql"
 "$PG_BIN/psql" -h "$TEST_ROOT/socket" -p 56439 -U priority_local -d postgres -v ON_ERROR_STOP=1 -f "$TEST_ROOT/schema.sql" >/dev/null
 ./node_modules/.bin/tsx --test server/priorityOrderIntegrity.test.ts

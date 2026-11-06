@@ -357,7 +357,8 @@ CREATE TABLE "communication_templates" (
 
 CREATE TABLE "customer_communications" (
 	"id" serial PRIMARY KEY NOT NULL,
-	"customer_id" integer NOT NULL,
+	"customer_id" integer,
+	"customer_link_review" integer DEFAULT 0 NOT NULL,
 	"type" "communication_type" NOT NULL,
 	"status" "communication_status" DEFAULT 'logged' NOT NULL,
 	"subject" varchar(500),
@@ -778,6 +779,7 @@ CREATE TABLE "partners" (
 	"commission_type" "commission_type" DEFAULT 'dauerhaft' NOT NULL,
 	"program_key" varchar(32) DEFAULT 'partner' NOT NULL,
 	"password_hash" text,
+	"session_version" integer DEFAULT 0 NOT NULL,
 	"last_login" timestamp,
 	"is_active" integer DEFAULT 1 NOT NULL,
 	"street" varchar(300),
@@ -1025,6 +1027,7 @@ CREATE TABLE "kwk_accounts" (
 	"login_attempts" integer DEFAULT 0 NOT NULL,
 	"login_locked_until" timestamp,
 	"last_login" timestamp,
+	"session_version" integer DEFAULT 0 NOT NULL,
 	"reset_token" varchar(128),
 	"reset_token_expires_at" timestamp,
 	"deleted_at" timestamp,
