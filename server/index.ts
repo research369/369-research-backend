@@ -1,3 +1,4 @@
+import {ensurePriorityOrderIntegritySchema,isPriorityOrderIntegrityReady} from './priorityOrderIntegrity.js';
 import {customerCreationActivity} from './customerCreationMaintenance.js';
 // Zeitzone auf Deutschland setzen (muss vor allen anderen Imports stehen)
 process.env.TZ = "Europe/Berlin";
@@ -121,6 +122,7 @@ app.get("/health/ready", async (_req, res) => {
     });
   }
 
+  if (!isPriorityOrderIntegrityReady()) return res.status(503).json({status:"unavailable",orderIntegrityReady:false});
   const database = await checkDatabaseReadiness();
   if (!database.ready) {
     return res.status(503).json({
@@ -134,6 +136,7 @@ app.get("/health/ready", async (_req, res) => {
     status: "ok",
     database: "ready",
     dhlLabelLedgerReady: isDhlRelabelSchemaReady(),
+    orderIntegrityReady: isPriorityOrderIntegrityReady(),
     timestamp: new Date().toISOString(),
   });
 });
@@ -292,6 +295,8 @@ async function start() {
   console.log(`[Server] Database: ${ENV.databaseUrl ? "configured" : "NOT configured"}`);
   console.log(`[Server] Bunq API: ${ENV.bunqApiKey ? "configured" : "NOT configured"}`);
   console.log(`[Server] Resend API: ${ENV.resendApiKey ? "configured" : "NOT configured"}`);
+
+  await ensurePriorityOrderIntegritySchema();
 
   // Additive CRM migration: communication archive + immutable provider event journal
   try {

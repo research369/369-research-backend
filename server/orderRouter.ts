@@ -1,3 +1,6 @@
+import { checkoutFingerprint, readCheckoutReceipt, lockCheckoutIntent, persistCheckoutReceipt, queueOrderTask, runOrderTask, resultRows, getOrderIntegrityIssues } from './priorityOrderIntegrity.js';
+import { lockOrder, returnOrderStock, recordOrderAction, deleteOrderAtomically, assertOrderFinanciallyEditable } from './orderStockReturnService.js';
+import { reverseOrderFinancesInTransaction } from './priorityOrderFinancialAdapter.js';
 import {nextCustomerNumber} from './customerNumberService.js';
 import {checkCustomerCreationMaintenance} from './customerCreationMaintenance.js';
 import { publicCodeCommissionPreview } from "./partnerCommissionPreview.js";
@@ -164,7 +167,7 @@ const createOrderSchema = z.object({
   sendOrderConfirmation: z.boolean().optional(),
   // Zusätzliche Shopquelle. Ohne Angabe bleibt die bestehende 369-Research-Logik unverändert.
   storeKey: z.enum(["369research", "peps4pets"]).optional().default("369research"),
-  // Nur Peps4pets verwendet diesen evidenzgebundenen Schlüssel. Die kanonische
+  // Additive stable intent key; legacy callers may omit it. The canonical
   // WaWi-Nummer bleibt unabhängig davon weiterhin der interne Primärvertrag.
   checkoutIdempotencyKey: z.string().trim().min(12).max(128).optional(),
   items: z.array(z.object({
@@ -172,7 +175,7 @@ const createOrderSchema = z.object({
     dosage: z.string().optional(),
     variant: z.string().optional(),
     price: z.number(),
-    quantity: z.number(),
+    quantity: z.number().int().positive(),
     type: z.string(),
     shopProductId: z.string().optional(), // product id from shop (e.g. '3g-triple-g')
     isNasalSpray: z.boolean().optional(), // Legacy: fertig gemischtes Nasenspray
@@ -258,6 +261,13 @@ export const orderRouter = router({
       assertNoMixedPartnerOrderInput(input);
       const db = await getDb();
       if (!db) throw new Error("Database not available");
+      const normalCheckoutKey = input.storeKey === '369research' && !ctx.jarvyOrder ? input.checkoutIdempotencyKey : undefined;
+      if (normalCheckoutKey && !/^[a-f0-9]{64}$/.test(normalCheckoutKey)) throw Error('CHECKOUT_INTENT_KEY_INVALID');
+      const normalFingerprint = normalCheckoutKey ? checkoutFingerprint(input) : undefined;
+      if (normalCheckoutKey) {
+        const receipt = await readCheckoutReceipt(db,normalCheckoutKey,normalFingerprint!);
+        if (receipt) return receipt;
+      }
       await checkCustomerCreationMaintenance('order.create','mutation',await getPool());
       const communicationLanguage = normalizeCommunicationLanguage(input.communicationLanguage);
 
@@ -1113,6 +1123,7 @@ export const orderRouter = router({
         ? await db.select().from(orders).where(eq(orders.checkoutIdempotencyKey, checkoutIdempotencyKey)).limit(1)
         : await db.select().from(orders).where(eq(orders.orderId, orderId)).limit(1);
       if (existingOrder.length > 0) {
+        if (normalCheckoutKey) throw Error('ORDER_REFERENCE_CONFLICT');
         console.warn(`[Orders] Duplicate request for order ${orderId} – completing only idempotent ledger steps`);
         if (parseFloat(existingOrder[0].creditUsed || "0") > 0) {
           await redeemPartnerCreditForOrder(orderId);
@@ -1124,8 +1135,13 @@ export const orderRouter = router({
       // form one transaction. A failure in this section cannot leave a partial P4P order.
       let customerId: number | null = null;
       let customerIntegrityTrigger: "order_customer_created" | "order_customer_changed" | null = null;
-      await db.transaction(async (tx) => {
+      const transactionResponse = await db.transaction(async (tx) => {
       const db = tx;
+      if (normalCheckoutKey) {
+        await lockCheckoutIntent(tx,normalCheckoutKey);
+        const receipt = await readCheckoutReceipt(tx,normalCheckoutKey,normalFingerprint!);
+        if (receipt) return receipt;
+      }
       if(ctx.jarvyOrder?.mode==='execute') {
         const actor=await db.execute(sql`SELECT id FROM users WHERE id=${ctx.user!.id} AND role='admin' FOR SHARE`);
         if(!actor.rows.length)throw new Error('JARVY_ACTOR_REVOKED');
@@ -1202,6 +1218,14 @@ export const orderRouter = router({
             // ── Stock check: verify all peptide items are in stock before creating order ──
       if(ctx.jarvyOrder)await db.select({id:articles.id}).from(articles).where(inArray(articles.sku,input.items.map(i=>i.shopProductId!))).orderBy(articles.id).for('update');
       const allArticlesForCheck = await db.select().from(articles).where(eq(articles.isActive, 1));
+      if (!isAuthenticatedWawiManualSale) {
+        for (const item of input.items) {
+          const family = allArticlesForCheck.filter(a => a.sku.toLowerCase() === item.shopProductId?.toLowerCase() || a.shopProductId?.toLowerCase() === item.shopProductId?.toLowerCase());
+          const categories = family.flatMap(a => [a.category || '',...(Array.isArray(a.categories) ? a.categories : [])]);
+          // Existing vial families are stock-led, regardless of the client type.
+          if (categories.some(c => /^(peptide|peptide.*|vials)$/i.test(c.trim()))) item.type = 'peptide';
+        }
+      }
       const outOfStockItems: string[] = [];
       const ambiguousVariantItems: string[] = [];
 
@@ -1345,6 +1369,21 @@ export const orderRouter = router({
         externalOrderReference = `P4P-${String(referenceNumber)}`;
       }
 
+      // Lock only the actual inventory plan, consistently by article id, including
+      // substitution and already catalogued BAC/DIY components. No whole-shop lock.
+      const plannedIds=new Set<number>();
+      input.items.forEach((item,index) => {
+        if (item.type === 'peptide') {
+          const sub=substitutionMap.get(index);
+          if(sub?.possible)sub.components.forEach(c => plannedIds.add(c.articleId));
+          else findMatchingArticles(item,allArticlesForCheck).forEach(a => plannedIds.add(a.id));
+        }
+        if(item.isNasalSpray || item.isNasalDiySet) {
+          allArticlesForCheck.filter(a => a.shopProductId === 'bac-wasser' || NASAL_DIY_SET_COMPONENTS.some(c => c.inventoryTracked && a.shopProductId === c.articleShopProductId)).forEach(a => plannedIds.add(a.id));
+        }
+      });
+      const lockedInventory=plannedIds.size ? await db.select().from(articles).where(inArray(articles.id,[...plannedIds].sort((a,b)=>a-b))).orderBy(articles.id).for('update') : [];
+      lockedInventory.forEach(fresh => {const a=allArticlesForCheck.find(a=>a.id===fresh.id);if(a)a.stock=fresh.stock;});
       // ── Stock deduction: reduce stock for all ordered peptide items ──
       // Bei Substitution: Bestand der Ersatz-Varianten abziehen, nicht der bestellten Variante
       for (let itemIdx = 0; itemIdx < input.items.length; itemIdx++) {
@@ -1356,7 +1395,7 @@ export const orderRouter = router({
           // Substitution: Bestand der Ersatz-Varianten abziehen
           for (const comp of sub.components) {
             const article = allArticlesForCheck.find(a => a.id === comp.articleId);
-            if (!article) continue;
+            if (!article) throw Error('ORDER_STOCK_COMPONENT_MISSING');
             const newStock = (article.stock ?? 0) - comp.quantity;
             await applyStockMovement(db,{articleId:article.id,sku:article.sku,expectedStock:article.stock??0,change:-comp.quantity,type:'verkauf',reason:`Smart Substitution für Bestellung ${orderId}: ${sub.internalNote}`,orderId,actor:'system'});
 
@@ -1377,6 +1416,7 @@ export const orderRouter = router({
               console.log(`[Orders] Stock deducted: ${article.name} ${newStock+deduct} → ${newStock} (order ${orderId})`);
             }
           }
+          if (remainingToDeduct > 0 && !stockOverrideAuthorized) throw Error('ORDER_STOCK_DEMAND_NOT_COVERED');
         }
       }
 
@@ -1551,7 +1591,7 @@ export const orderRouter = router({
           i.name.toLowerCase().includes('[nasenspray]') ||
           i.name.toLowerCase().includes('nasenspray')
         )
-      ).length;
+      ).reduce((sum,i) => sum+i.quantity,0);
       if (nasalSprayCount > 0) {
         const [bacWasser10ml] = await db.select().from(articles)
           .where(eq(articles.shopProductId, 'bac-wasser'))
@@ -1568,7 +1608,8 @@ export const orderRouter = router({
           quantity: nasalSprayCount,
           articleId: bacArticleId,
         });
-        // Bestand abziehen
+        // Full stock demand or rollback; never silently commit partial component demand.
+        if ((!bacWasser10ml || (bacWasser10ml.stock ?? 0) < nasalSprayCount) && !stockOverrideAuthorized) throw Error('ORDER_STOCK_DEMAND_NOT_COVERED');
         if (bacWasser10ml && (bacWasser10ml.stock ?? 0) > 0) {
           const deduct = Math.min(nasalSprayCount, bacWasser10ml.stock ?? 0);
           const newStock = (bacWasser10ml.stock ?? 0) - deduct;
@@ -1603,6 +1644,7 @@ export const orderRouter = router({
             isNasalDiySet: true,
           });
 
+          if (component.inventoryTracked && (!componentArticle || (componentArticle.stock ?? 0) < item.quantity) && !stockOverrideAuthorized) throw Error('ORDER_STOCK_DEMAND_NOT_COVERED');
           if (componentArticle && (componentArticle.stock ?? 0) > 0) {
             const deduct = Math.min(item.quantity, componentArticle.stock ?? 0);
             const newStock = (componentArticle.stock ?? 0) - deduct;
@@ -1788,13 +1830,7 @@ export const orderRouter = router({
       // Link order to customer
       if (customerId) {
         await db.update(orders).set({ customerId }).where(eq(orders.orderId, orderId));
-        if (customerIntegrityTrigger) {
-          try {
-            await queueCustomerDuplicateReview(customerId, customerIntegrityTrigger, "order.create");
-          } catch (error) {
-            console.warn("[Customer Integrity] Prüfung nach Bestell-Kundenabgleich fehlgeschlagen (nicht blockierend):", error);
-          }
-        }
+
       }
 
       // NOTE: Communication log is written AFTER successful email send (see below)
@@ -1809,13 +1845,26 @@ export const orderRouter = router({
         );
       }
 
+      const response = {
+        success:true,orderId,paymentInstructions:null,externalOrderReference:externalOrderReference || undefined,
+        subtotal:input.subtotal,discount:input.discount,kwkDiscount:input.kwkDiscount || 0,
+        kwkCreditUsed:input.kwkCreditUsed || 0,shipping:input.shipping,total:input.total,
+      };
+      if (normalCheckoutKey) await persistCheckoutReceipt(tx,normalCheckoutKey,normalFingerprint!,response);
+      await queueOrderTask(tx,orderId,'customer_metrics');
+      if (customerIntegrityTrigger) await queueOrderTask(tx,orderId,'customer_duplicate_review');
+      await queueOrderTask(tx,orderId,'payment_instructions');
+      if (shouldSendConfirmation) await queueOrderTask(tx,orderId,'order_confirmation');
+      return response;
       });
-
-      // This must run after the persistence transaction commits. Derived CRM
-      // fields are recalculated only from directly assigned, active orders.
-      if (customerId) {
-        await refreshCustomerOrderMetrics(customerId);
-      }
+      // Another concurrent attempt committed the receipt: no second communication.
+      if (transactionResponse.orderId !== orderId) return transactionResponse;
+      await runOrderTask(db,orderId,'customer_metrics',async () => {
+        if (customerId) await refreshCustomerOrderMetrics(customerId);
+      });
+      await runOrderTask(db,orderId,'customer_duplicate_review',async () => {
+        if (customerId && customerIntegrityTrigger) await queueCustomerDuplicateReview(customerId,customerIntegrityTrigger,'order.create');
+      });
 
       // Nach Kundenverknüpfung wird der bereits gesicherte Nachweis zusätzlich der
       // Kundenakte zugeordnet, ohne seinen Inhalt oder seine Bestätigung zu verändern.
@@ -1828,38 +1877,16 @@ export const orderRouter = router({
         }
       }
 
-      // Log new order
-      const { generateSKUFromName: _logSku } = await import("./articleCodes.js");
-      const itemList = input.items.map(i => `${i.quantity}x ${_logSku(i.name, i.dosage || i.variant)}`).join(", ");
-      console.log(`[Orders] New order: ${orderId} – ${input.total.toFixed(2)} EUR – ${input.customer.firstName} ${input.customer.lastName} – ${itemList}`);
-
-      // The shared CRM service sends, archives and protects the confirmation with
-      // a Resend idempotency key. Do not add a second order-router log entry here.
-      if (shouldSendConfirmation) {
-        try {
-          const emailSent = await sendOrderConfirmationEmail({
-            orderId: orderId,
-            communicationLanguage,
-            storeKey: input.storeKey,
-            externalOrderReference,
-            customer: input.customer,
-            items: input.items.map(i => ({ ...i, dosage: i.dosage || null, variant: i.variant || null })),
-            subtotal: input.subtotal,
-            discount: input.discount,
-            discountCode: input.discountCode,
-            shipping: input.shipping,
-            total: input.total,
-            paymentMethod: input.paymentMethod,
-          });
-          if (!emailSent) {
-            console.warn(`[Orders] Confirmation email was not accepted for ${orderId}; failure is stored in the CRM communication record`);
-          }
-        } catch (err) {
-          console.warn("[Orders] Failed to send confirmation email:", err);
-        }
-      } else {
-        console.info(`[Orders] Manual order confirmation intentionally not sent for ${orderId}`);
-      }
+      // Only the durable claim holder invokes the normal automatic shop confirmation.
+      if (shouldSendConfirmation) await runOrderTask(db,orderId,'order_confirmation',async () => {
+        const accepted = await sendOrderConfirmationEmail({
+          orderId,communicationLanguage,storeKey:input.storeKey,externalOrderReference,
+          customer:input.customer,items:input.items.map(i => ({...i,dosage:i.dosage || null,variant:i.variant || null})),
+          subtotal:input.subtotal,discount:input.discount,discountCode:input.discountCode,
+          shipping:input.shipping,total:input.total,paymentMethod:input.paymentMethod,
+        });
+        if (!accepted) throw Error('ORDER_CONFIRMATION_NOT_ACCEPTED');
+      },true);
 
       // Admin-Benachrichtigung deaktiviert:
       // Pakko erhält bereits eine BCC-Kopie der Bestellbestätigung (mit IBAN/Zahlungsinfos).
@@ -1869,20 +1896,8 @@ export const orderRouter = router({
       // Bank transfer is always returned after a successful order, including
       // optional direct/card payments. It is the reliable fallback if a payment
       // link or card transaction cannot be processed.
-      const paymentInstructions = await getReleasedBankTransferInstructions();
-
-      return {
-        success: true,
-        orderId,
-        paymentInstructions,
-        externalOrderReference: externalOrderReference || undefined,
-        subtotal: input.subtotal,
-        discount: input.discount,
-        kwkDiscount: input.kwkDiscount || 0,
-        kwkCreditUsed: input.kwkCreditUsed || 0,
-        shipping: input.shipping,
-        total: input.total,
-      };
+      const paymentInstructions = await runOrderTask(db,orderId,'payment_instructions',getReleasedBankTransferInstructions);
+      return { ...transactionResponse, paymentInstructions };
       } finally {
         if (p4pLockClient) {
           try {
@@ -1938,8 +1953,10 @@ export const orderRouter = router({
 
       // Combine. Die Datenbankabfrage schließt große Labeldaten vollständig aus.
       // Für vorhandene DHL-Labels wird nur eine kurze, geschützte Abrufroute geliefert.
+      const integrityIssues = await getOrderIntegrityIssues(db, orderIds);
       const result = filteredOrders.map(o => ({
         ...o,
+        integrityIssues: integrityIssues.get(o.orderId) ?? [],
         dhlLabelLifecycle: dhlLabelLifecycle.get(o.orderId) ?? null,
         // Labels werden ausschließlich über eine kurze, geschützte Abrufroute
         // geliefert. Das gilt für DHL-PDFs und extern hochgeladene Labels gleich.
@@ -1993,6 +2010,7 @@ export const orderRouter = router({
 
       return {
         ...order,
+        integrityIssues: (await getOrderIntegrityIssues(db, [order.orderId])).get(order.orderId) ?? [],
         dhlLabelLifecycle: dhlLabelLifecycle.get(order.orderId) ?? null,
         subtotal: parseFloat(order.subtotal),
         discount: parseFloat(order.discount),
@@ -2010,6 +2028,27 @@ export const orderRouter = router({
         personalPromoCodes: personalPromoAssignments.get(order.orderId) ?? [],
         items: items.map(i => ({ ...i, price: parseFloat(i.price) })),
       };
+    }),
+
+  checkoutStatus: publicProcedure.input(z.object({
+    checkoutIdempotencyKey:z.string().regex(/^[a-f0-9]{64}$/),
+    payloadFingerprint:z.string().regex(/^[a-f0-9]{64}$/),
+  })).query(async ({input}) => {
+    const db=await getDb(); if(!db) throw Error('Database not available');
+    const [receipt]=resultRows(await db.execute(sql`SELECT order_id FROM priority_checkout_receipts WHERE intent_key=${input.checkoutIdempotencyKey} AND payload_fingerprint=${input.payloadFingerprint}`));
+    return receipt ? {state:'committed' as const,orderId:receipt.order_id} : {state:'not_found' as const};
+  }),
+  cancel: adminProcedure.input(z.object({orderId:z.string(),restock:z.boolean(),reason:z.string().trim().min(5).max(500)}))
+    .mutation(async ({input,ctx}) => {
+      const db=await getDb(); if(!db) throw Error('Database not available');
+      return db.transaction(async tx => {
+        const order=await lockOrder(tx,input.orderId);
+        const units=input.restock ? await returnOrderStock(tx,order,input.reason,ctx.user?.username || 'Admin') : 0;
+        await tx.update(orders).set({status:'storniert',cancelledAt:order.cancelledAt || new Date(),updatedAt:new Date()}).where(eq(orders.orderId,input.orderId));
+        const finances=await reverseOrderFinancesInTransaction(tx,input.orderId);
+        await recordOrderAction(tx,input.orderId,input.restock ? 'cancel_restock' : 'cancel_no_restock',input.reason,ctx.user?.username || 'Admin',units);
+        return {success:true,restoredStock:units,financialRepairRequired:finances.repairRequired};
+      });
     }),
 
   // ADMIN: Update order status
@@ -2037,31 +2076,37 @@ export const orderRouter = router({
       if (input.status === "storniert") updateData.cancelledAt = now;
       if (input.internalNote !== undefined) updateData.internalNote = input.internalNote;
 
-      await db.update(orders).set(updateData).where(eq(orders.orderId, input.orderId));
+      let financialRepairRequired = await db.transaction(async tx => {
+        const previous=await lockOrder(tx,input.orderId);
+        if (previous.status === 'storniert' && input.status !== 'storniert') {
+          const [obligation]=resultRows(await tx.execute(sql`SELECT EXISTS(SELECT 1 FROM priority_stock_returns WHERE order_id=${input.orderId}) OR EXISTS(SELECT 1 FROM priority_order_tasks WHERE order_id=${input.orderId} AND task='financial_cancellation') OR EXISTS(SELECT 1 FROM partner_transactions WHERE order_id=${input.orderId}) OR EXISTS(SELECT 1 FROM kwk_ledger WHERE order_id=${input.orderId}) AS blocked`));
+          if(obligation?.blocked) throw Error('ORDER_CANCELLED_REOPEN_REVIEW_REQUIRED');
+        }
+        // Preserve immutable event timestamps on repeated status confirmation.
+        if (previous.paidAt && input.status === 'bezahlt') updateData.paidAt=previous.paidAt;
+        if (previous.shippedAt && input.status === 'versendet') updateData.shippedAt=previous.shippedAt;
+        if (previous.cancelledAt && input.status === 'storniert') updateData.cancelledAt=previous.cancelledAt;
+        await tx.update(orders).set(updateData).where(eq(orders.orderId,input.orderId));
+        if (input.status === 'storniert') return (await reverseOrderFinancesInTransaction(tx,input.orderId)).repairRequired;
+        if (isFinanciallyPaidStatus(input.status)) await queueOrderTask(tx,input.orderId,`financial_status_${input.status}`);
+        return false;
+      });
 
       // Partnerprovision benötigt bestätigte Zahlung UND Versand; KWK bleibt zahlungsgebunden.
       // Jeder spätere Versand-/Zustellstatus wiederholt die idempotente Prüfung.
-      const [updatedFinancialOrder] = isFinanciallyPaidStatus(input.status)
-        ? await db.select({ paidAt: orders.paidAt }).from(orders).where(eq(orders.orderId, input.orderId)).limit(1)
-        : [null];
-      if (updatedFinancialOrder?.paidAt) {
-        const creditResult = await bookPaidPartnerCommission(input.orderId);
-        console.log(`[Partners] Prüfung Zahlung und Versand ${input.orderId}: ${creditResult.reason} (${creditResult.amount.toFixed(2)} €)`);
-        await releaseKwkCreditForPaidOrder(input.orderId);
-      }
-
-      if (input.status === "storniert") {
-        const reversal = await reversePartnerFinancialEntriesForCancelledOrder(input.orderId);
-        console.log(`[Partners] Stornogegenbuchung ${input.orderId}: ${reversal.reason} (${reversal.reversed.toFixed(2)} €)`);
-      }
-
-      // KWK-Guthaben entfernen bei Storno
-      if (input.status === "storniert") {
-        try {
-          const { cancelCredit } = await import('./kwkService.js');
-          await cancelCredit(input.orderId);
-        } catch (kwkErr) {
-          console.warn('[KWK] cancelCredit failed (non-fatal):', kwkErr);
+      if (isFinanciallyPaidStatus(input.status)) {
+        const completed = await runOrderTask(db,input.orderId,`financial_status_${input.status}`,async () => {
+          const [order] = await db.select({paidAt:orders.paidAt}).from(orders).where(eq(orders.orderId,input.orderId));
+          if (order?.paidAt) {
+            await bookPaidPartnerCommission(input.orderId);
+            await releaseKwkCreditForPaidOrder(input.orderId);
+          }
+          return true;
+        });
+        // Receipt remains truthful even if post-commit financial work fails.
+        if (completed !== true) {
+          const [task] = resultRows(await db.execute(sql`SELECT state FROM priority_order_tasks WHERE order_id=${input.orderId} AND task=${`financial_status_${input.status}`}`));
+          financialRepairRequired = task?.state !== 'done';
         }
       }
 
@@ -2088,6 +2133,7 @@ export const orderRouter = router({
 
       return {
         success: true,
+        financialRepairRequired,
         emailSent: emailResult.sent,
         emailError: emailResult.error,
       };
@@ -2361,59 +2407,15 @@ export const orderRouter = router({
       return { success: true, results };
     }),
 
-  // ADMIN: Delete order WITHOUT stock restoration (items vanish, no restock)
-  deleteNoRestock: adminProcedure
-    .input(z.object({ orderId: z.string() }))
-    .mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database not available");
-      const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1);
-      if (!order) throw new Error("Bestellung nicht gefunden");
-      await db.delete(orderItems).where(eq(orderItems.orderId, input.orderId));
-      await db.delete(orders).where(eq(orders.orderId, input.orderId));
-      console.log(`[Orders] Deleted order ${input.orderId} WITHOUT stock restoration`);
-      return { success: true };
-    }),
-
-  // ADMIN: Delete order with stock restoration
-  delete: adminProcedure
-    .input(z.object({ orderId: z.string() }))
-    .mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database not available");
-
-      return db.transaction(async tx=>{
-      const db=tx;
-      // Get the order
-      const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1).for("update");
-      if (!order) throw new Error("Bestellung nicht gefunden");
-
-      // Get order items
-      const items = await db.select().from(orderItems).where(eq(orderItems.orderId, input.orderId));
-
-      // Restore stock for each item that has an articleId
-      for (const item of items) {
-        if (item.articleId) {
-          const [article] = await db.select().from(articles).where(eq(articles.id, item.articleId)).limit(1);
-          if (article) {
-            const newStock = article.stock + item.quantity;
-            await applyStockMovement(db,{articleId:article.id,sku:article.sku,expectedStock:article.stock,change:item.quantity,type:'retoure',reason:`Bestellung ${input.orderId} gelöscht`,orderId:input.orderId,actor:ctx.user?.name||'Admin'});
-
-          }
-        }
-      }
-
-      // Delete order items first
-      await db.delete(orderItems).where(eq(orderItems.orderId, input.orderId));
-
-      // Delete the order
-      await db.delete(orders).where(eq(orders.orderId, input.orderId));
-
-      console.log(`[Orders] Deleted order ${input.orderId} with stock restoration`);
-
-      return { success: true, restoredItems: items.length };
-      });
-    }),
+  // Both deletion paths preserve audit and are atomic; financial/shipping links require review.
+  deleteNoRestock: adminProcedure.input(z.object({orderId:z.string()})).mutation(async ({input,ctx}) => {
+    const db=await getDb(); if(!db) throw Error('Database not available');
+    return deleteOrderAtomically(db,input.orderId,false,ctx.user?.username || 'Admin');
+  }),
+  delete: adminProcedure.input(z.object({orderId:z.string()})).mutation(async ({input,ctx}) => {
+    const db=await getDb(); if(!db) throw Error('Database not available');
+    return deleteOrderAtomically(db,input.orderId,true,ctx.user?.username || 'Admin');
+  }),
 
   // ADMIN: Add internal note
   addNote: adminProcedure
@@ -2437,11 +2439,12 @@ export const orderRouter = router({
     .input(z.object({
       orderId: z.string(),
       items: z.array(z.object({
+        id: z.number().int().positive().optional(),
         name: z.string(),
         dosage: z.string().optional(),
         variant: z.string().optional(),
         price: z.number(),
-        quantity: z.number(),
+        quantity: z.number().int().positive(),
         type: z.string(),
         articleId: z.number().optional(),
       })),
@@ -2456,9 +2459,41 @@ export const orderRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
-      // Check order exists
-      const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1);
-      if (!order) throw new Error("Bestellung nicht gefunden");
+      return db.transaction(async tx => {
+      const db=tx;
+      const order=await lockOrder(tx,input.orderId);
+      await assertOrderFinanciallyEditable(tx,order);
+      if (order.status === 'storniert') throw Error('ORDER_CANCELLED_EDIT_REVIEW_REQUIRED');
+      const oldItems=await tx.select().from(orderItems).where(eq(orderItems.orderId,input.orderId));
+      const history=await tx.select().from(stockHistory).where(eq(stockHistory.orderId,input.orderId));
+      if (input.items.some(i => i.id && !oldItems.some(old => old.id === i.id))) throw Error('ORDER_ITEM_ID_CONFLICT');
+      const returns=resultRows(await tx.execute(sql`SELECT original_movement_id,return_movement_id FROM priority_stock_returns WHERE order_id=${input.orderId}`));
+      const reversedOriginals=new Set(returns.map(r=>r.original_movement_id));
+      const returnMovements=new Set(returns.map(r=>r.return_movement_id));
+      const activeSales=history.filter(h=>h.quantityChange<0 && h.changeType==='verkauf' && !reversedOriginals.has(h.id));
+      const unresolvedHistory=history.filter(h=>!reversedOriginals.has(h.id) && !returnMovements.has(h.id));
+      const stockShape=(items:any[]) => JSON.stringify(items.map(i => ({name:i.name,dosage:i.dosage || '',variant:i.variant || '',type:i.type,quantity:i.quantity,articleId:i.articleId || null})).sort((a,b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
+      // Unproven historical positions are not reconstructed from names. Monetary-only
+      // unpaid/unlinked edits remain available; item changes require explicit article IDs.
+      if (stockShape(oldItems) !== stockShape(input.items)) {
+        if (oldItems.some(i => !i.articleId) || input.items.some(i => !i.articleId) || unresolvedHistory.some(h => h.changeType !== 'verkauf' || h.quantityChange >= 0)) throw Error('ORDER_ITEM_STOCK_EDIT_REVIEW_REQUIRED');
+        const demand=(items:any[]) => {const m=new Map<number,number>(); for(const i of items)m.set(i.articleId,(m.get(i.articleId) || 0)+i.quantity);return m;};
+        const before=demand(oldItems),after=demand(input.items);
+        const sold=new Map<number,number>(); for(const h of activeSales)sold.set(h.articleId,(sold.get(h.articleId) || 0)-h.quantityChange);
+        if ([...before].some(([id,qty]) => sold.get(id)!==qty) || [...sold].some(([id,qty]) => before.get(id)!==qty)) throw Error('ORDER_ITEM_STOCK_EDIT_REVIEW_REQUIRED');
+        const ids=[...new Set([...before.keys(),...after.keys()])].sort((a,b)=>a-b);
+        const catalog=ids.length ? await tx.select().from(articles).where(inArray(articles.id,ids)).orderBy(articles.id).for('update') : [];
+        // Reverse original movements, then record a replacement sale plan. A later
+        // cancellation sees only unreturned originals, even for removed positions.
+        await returnOrderStock(tx,order,'Explicit unpaid order item edit','Admin');
+        for(const id of ids) {
+          const [article]=await tx.select().from(articles).where(eq(articles.id,id));
+          if(!article)throw Error('ORDER_ITEM_STOCK_EDIT_REVIEW_REQUIRED');
+          const qty=after.get(id) || 0;
+          if(qty)await applyStockMovement(tx,{articleId:id,sku:article.sku,expectedStock:article.stock,change:-qty,type:'verkauf',reason:'Explicit unpaid order item edit',orderId:input.orderId,actor:'Admin'});
+        }
+      }
+      if (!Number.isFinite(input.total) || input.total < 0 || input.subtotal < 0 || input.discount < 0 || input.shipping < 0 || Math.abs(input.total-(input.subtotal-input.discount+input.shipping)) > 0.011 || Math.abs(input.subtotal-input.items.reduce((sum,i)=>sum+i.price*i.quantity,0)) > 0.011) throw Error('ORDER_EDIT_AMOUNTS_INVALID');
 
       // Update order financials
       await db.update(orders).set({
@@ -2485,12 +2520,16 @@ export const orderRouter = router({
           price: item.price.toFixed(2),
           quantity: item.quantity,
           articleId: item.articleId || null,
+          isNasalSpray: (oldItems.find(old => old.id === item.id) || oldItems.find(old => stockShape([old])===stockShape([item])))?.isNasalSpray || false,
+          isNasalDiySet: (oldItems.find(old => old.id === item.id) || oldItems.find(old => stockShape([old])===stockShape([item])))?.isNasalDiySet || false,
+          isPlugPlay: (oldItems.find(old => old.id === item.id) || oldItems.find(old => stockShape([old])===stockShape([item])))?.isPlugPlay || false,
         });
       }
 
       console.log(`[Orders] Updated order ${input.orderId} – ${input.total.toFixed(2)} EUR – ${input.items.length} items`);
 
       return { success: true };
+      });
     }),
 
   // Send packing notification to customer (WhatsApp link + Email)
