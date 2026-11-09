@@ -29,7 +29,7 @@ test("actual isolated PostgreSQL permission, snapshot and assignment contracts",
   ENV.databaseUrl = `postgresql://ubuntu@localhost:${port}/${name}?host=${encodeURIComponent(socket!)}`;
   const dialect = new PgDialect();
   try {
-    const tables = [schema.customers, schema.orders, schema.orderItems, schema.articles, schema.stockHistory, schema.shopSettings, schema.customerCommunications];
+    const tables = [schema.users, schema.customers, schema.orders, schema.orderItems, schema.articles, schema.stockHistory, schema.shopSettings, schema.customerCommunications];
     const enums = new Map<string, string[]>();
     for (const table of tables) for (const column of getTableConfig(table).columns) if (column.enumValues) enums.set(column.getSQLType(), column.enumValues);
     for (const [enumName, values] of enums) await pool.query(`CREATE TYPE "${enumName}" AS ENUM (${values.map(value => `'${value}'`).join(",")})`);

@@ -1,6 +1,7 @@
 import {trackCustomerCreation} from './customerCreationMaintenance.js';
 import { recordAdminMutation } from "./adminChangeLogService.js";
 import { initTRPC, TRPCError } from "@trpc/server";
+import { assertOperationsAccountCapability, OPERATIONS_CAPABILITIES, type OperationsCapability } from "./operationsAccountPermissions.js";
 import superjson from "superjson";
 import type { Request, Response } from "express";
 
@@ -61,6 +62,23 @@ const auditAdminMutation = middleware(async ({ ctx, path, type, input, next }) =
 
 export const protectedProcedure = tracked.use(isAuthed).use(auditAdminMutation);
 export const adminProcedure = tracked.use(isAdmin).use(auditAdminMutation);
+
+// Only these narrowly scoped operations use Pakko's account-specific DB grants.
+// No change to adminProcedure, productManagerProcedure or unrelated mutations.
+function scopedOperationsProcedure(capability: OperationsCapability) {
+  return tracked.use(isAuthed).use(middleware(async ({ ctx, path, type, input, next }) => {
+    await assertOperationsAccountCapability(ctx.user, capability);
+    const result = await next();
+    if (type === "mutation" && result.ok) {
+      // Includes granted non-admin operations; safe field names only, no values.
+      await recordAdminMutation({ path, actor: ctx.user!.username, input });
+    }
+    return result;
+  }));
+}
+export const scopedOperationsReadProcedure = scopedOperationsProcedure(OPERATIONS_CAPABILITIES.read);
+export const scopedPartnerCreditProcedure = scopedOperationsProcedure(OPERATIONS_CAPABILITIES.partnerCredit);
+export const scopedOrderCleanupProcedure = scopedOperationsProcedure(OPERATIONS_CAPABILITIES.orderCleanup);
 
 // Product Manager: role = "admin" OR role = "product_manager"
 // Kein Zugriff auf orders, customers, invoices, payments, checkout, users, migrations

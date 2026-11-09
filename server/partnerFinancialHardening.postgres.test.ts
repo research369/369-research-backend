@@ -15,6 +15,7 @@ import { redeemPartnerCreditInTransaction, reversePartnerFinancialEntriesForCanc
 import { cancelCreditInTransaction, redeemCreditInTransaction, syncKwkAccountCache, releaseCredit, bookPendingCredit, partialRefundCredit } from "./kwkService.js";
 import { hasOtherPaidCodeOrder } from "./partnerCodeHistory.js";
 import { updatePartnerTransactionStatus, recordPartnerPayout, previewHistoricalPartnerClaim, bookHistoricalPartnerClaim, type HistoricalPartnerClaimInput } from "./partnerFinancialAdminService.js";
+import { correctOperationsPartnerCredit } from "./operationsPartnerCredit.js";
 
 const enabled = process.env.LEDGER_LOCAL_POSTGRES === "true";
 const url = "postgresql://ledger@127.0.0.1:55448/ledger_isolated";
@@ -275,4 +276,51 @@ run("KWK native authenticated route cannot apply one session's credit to another
   await kwkEntry(null,'manual_correction',100);await seedOrder('kwkroute',{kwk_credit_owner_id:2,kwk_credit_requested:10,kwk_credit_used:10,discount:10});
   const ctx=adminContext();ctx.user=null;ctx.req.headers.authorization=`Bearer ${createKwkToken(1)}`;
   await assert.rejects(kwkRouter.createCaller(ctx).redeemCredit({orderId:'kwkroute',amount:10}),/OWNER_REQUIRED/);
+});
+
+run("operations correction -25.01 has explicit negative-balance consent and atomic visible journal", async () => {
+  await pool.query("UPDATE partners SET credit_balance=12.06 WHERE id=9");
+  const input = {partnerId:9,amount:-25.01,expectedBalance:12.06,description:"Fehlbuchungskorrektur",requestId:randomUUID(),allowNegativeBalance:false};
+  await assert.rejects(tx(c=>correctOperationsPartnerCredit(input,"synthetic-ops",c)), /NEGATIVE_BALANCE_REQUIRES_EXPLICIT_APPROVAL/);
+  assert.equal(await balance(),12.06);
+  assert.equal(Number((await pool.query("SELECT COUNT(*) n FROM partner_transactions")).rows[0].n),0);
+  const approved={...input,allowNegativeBalance:true};
+  const results=await Promise.all([tx(c=>correctOperationsPartnerCredit(approved,"synthetic-ops",c)),tx(c=>correctOperationsPartnerCredit(approved,"synthetic-ops",c))]);
+  assert.equal(results.filter(r=>!r.alreadyApplied).length,1);
+  assert.equal(await balance(),-12.95);
+  const entries=(await pool.query("SELECT type,amount,balance_after,description,status,admin_note FROM partner_transactions")).rows;
+  assert.equal(entries.length,1);assert.equal(entries[0].type,"korrektur");assert.equal(Number(entries[0].amount),-25.01);
+  assert.equal(Number(entries[0].balance_after),-12.95);assert.equal(entries[0].description,"Fehlbuchungskorrektur");
+  assert.equal(entries[0].status,"normal");assert.match(entries[0].admin_note,/actor=synthetic-ops/);
+  const replay=await tx(c=>correctOperationsPartnerCredit(approved,"synthetic-ops",c));assert.equal(replay.alreadyApplied,true);
+  assert.equal(await balance(),-12.95);
+});
+run("operations correction binds replay payload, owner and expected balance without second deduction", async()=>{
+  const input={partnerId:9,amount:-25.01,expectedBalance:100,description:"Fehlbuchungskorrektur",requestId:randomUUID(),allowNegativeBalance:false};
+  await tx(c=>correctOperationsPartnerCredit(input,"synthetic-ops",c));
+  for(const delta of [{amount:-25.02},{description:"Other correction"},{expectedBalance:99},{partnerId:4}]){
+    await assert.rejects(tx(c=>correctOperationsPartnerCredit({...input,...delta},"synthetic-ops",c)),/PAYLOAD_CONFLICT/);
+  }
+  await assert.rejects(tx(c=>correctOperationsPartnerCredit({...input,requestId:randomUUID()},"synthetic-ops",c)),/BALANCE_CHANGED/);
+  assert.equal(await balance(),74.99);assert.equal(await balance(4),100);
+  assert.equal(Number((await pool.query("SELECT COUNT(*) n FROM partner_transactions")).rows[0].n),1);
+});
+run("operations correction never changes a payout balance and rolls back wallet plus journal on failure",async()=>{
+  const input={partnerId:9,amount:-25.01,expectedBalance:100,description:"Fehlbuchungskorrektur",requestId:randomUUID(),allowNegativeBalance:false};
+  await assert.rejects(tx(c=>correctOperationsPartnerCredit({...input,partnerId:4},"synthetic-ops",c)),/NOT_SHOP_CREDIT/);
+  await assert.rejects(tx(async c=>{await correctOperationsPartnerCredit(input,"synthetic-ops",c);throw Error("injected correction rollback");}),/injected/);
+  assert.equal(await balance(),100);assert.equal(await balance(4),100);
+  assert.equal(Number((await pool.query("SELECT COUNT(*) n FROM partner_transactions")).rows[0].n),0);
+});
+run("future paid shipped 10-percent earning offsets negative correction once without changing paid order",async()=>{
+  await pool.query("UPDATE partners SET credit_balance=-12.95 WHERE id=9");
+  await seedOrder("future-10-10",{subtotal:284,discount:28.40,shipping:25,total:280.60,
+    partner_commission_base_snapshot:255.60,partner_commission_percent_snapshot:10,partner_commission:25.56,
+    status:"versendet",paid_at:new Date("2026-11-09T00:00:00Z"),shipped_at:new Date("2026-11-09T00:01:00Z")});
+  await bookPaidPartnerCommission("future-10-10");await bookPaidPartnerCommission("future-10-10");
+  assert.equal(await balance(),12.61);
+  const rows=(await pool.query("SELECT amount,type FROM partner_transactions WHERE order_id='future-10-10'")).rows;
+  assert.equal(rows.length,1);assert.equal(rows[0].type,"provision");assert.equal(Number(rows[0].amount),25.56);
+  const order=(await pool.query("SELECT subtotal,discount,total FROM orders WHERE order_id='future-10-10'")).rows[0];
+  assert.equal(Number(order.subtotal),284);assert.equal(Number(order.discount),28.40);assert.equal(Number(order.total),280.60);
 });

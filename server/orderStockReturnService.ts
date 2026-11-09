@@ -22,6 +22,30 @@ export async function assertOrderFinanciallyEditable(tx: any, order: any) {
     EXISTS(SELECT 1 FROM invoices WHERE order_number=${order.orderId}) AS linked`));
   if (links?.linked) throw Error('ORDER_FINANCIAL_CORRECTION_REVIEW_REQUIRED');
 }
+/** Caller owns the row lock. Metadata/discount/credit intent is NOT a booking.
+ * Keep the stricter EDIT guard above unchanged. Never delete booked evidence,
+ * even when entries were subsequently reversed or an order was cancelled.
+ */
+export async function assertOrderDeletable(tx: any, order: any) {
+  assertUnshipped(order);
+  if (order.paidAt || order.bunqPaymentId || order.bunqMatchedAt || order.packedAt || !['offen','storniert'].includes(order.status))
+    throw Error('ORDER_FINANCIAL_CORRECTION_REVIEW_REQUIRED');
+  if (order.shippingLabelUrl || order.shippingLabelContent || order.trackingNumber)
+    throw Error('ORDER_SHIPPING_REVIEW_REQUIRED');
+  const [links] = resultRows(await tx.execute(sql`SELECT
+    EXISTS(SELECT 1 FROM partner_transactions WHERE order_id=${order.orderId}) OR
+    EXISTS(SELECT 1 FROM kwk_ledger WHERE order_id=${order.orderId}) OR
+    EXISTS(SELECT 1 FROM kwk_referrals WHERE order_id=${order.orderId}) OR
+    EXISTS(SELECT 1 FROM invoices WHERE order_number=${order.orderId} OR order_number=${order.externalOrderReference ?? null}) AS linked`));
+  if (links?.linked) throw Error('ORDER_FINANCIAL_CORRECTION_REVIEW_REQUIRED');
+  // Label generations can retain evidence even after a header pointer is cleared.
+  // Older installations without the additive archive retain legacy header checks.
+  const [archive] = resultRows(await tx.execute(sql`SELECT to_regclass('dhl_label_generations') IS NOT NULL AS present`));
+  if (archive?.present) {
+    const [label] = resultRows(await tx.execute(sql`SELECT EXISTS(SELECT 1 FROM dhl_label_generations WHERE order_id=${order.orderId} AND state <> 'create_rejected') AS linked`));
+    if (label?.linked) throw Error('ORDER_SHIPPING_REVIEW_REQUIRED');
+  }
+}
 /** Caller already owns order row lock. Never use order item names or requested variant. */
 export async function returnOrderStock(tx: any, order: any, reason: string, actor: string) {
   assertUnshipped(order);
@@ -67,9 +91,7 @@ export async function deleteOrderAtomically(db: any, orderId: string, restock: b
       return { success:true, restoredStock:prior.stock_units, alreadyDeleted:true };
     }
     const order = await lockOrder(tx, orderId);
-    await assertOrderFinanciallyEditable(tx, order);
-    // Issued labels preserve shipping audit and require separate deliberate cancellation.
-    if (order.shippingLabelUrl || order.trackingNumber) throw Error('ORDER_SHIPPING_REVIEW_REQUIRED');
+    await assertOrderDeletable(tx, order);
     const units = restock ? await returnOrderStock(tx,order,'Explicit order deletion',actor) : 0;
     await recordOrderAction(tx,orderId,restock ? 'delete' : 'delete_no_restock','Explicit order deletion',actor,units);
     await tx.delete(orderItems).where(eq(orderItems.orderId, orderId));

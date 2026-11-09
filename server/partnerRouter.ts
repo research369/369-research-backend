@@ -17,7 +17,8 @@ import { z } from "zod";
 import { eq, desc, and, inArray, isNull, or, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import bcrypt from "bcryptjs";
-import { router, publicProcedure, adminProcedure, middleware } from "./trpc.js";
+import { router, publicProcedure, adminProcedure, middleware, scopedOperationsReadProcedure, scopedPartnerCreditProcedure } from "./trpc.js";
+import { correctOperationsPartnerCredit, readOperationsPartnerAccount } from "./operationsPartnerCredit.js";
 import { getDb, getPool } from "./db.js";
 import { partners, partnerAddressRequests, partnerTransactions, orders, orderItems, partnerCodeUsage, customers } from "../drizzle/schema.js";
 import { ENV } from "./env.js";
@@ -509,6 +510,21 @@ export const partnerRouter = router({
       await writeAccountPassword("partner", input.partnerId, hash);
       return { success: true };
     }),
+
+  operationsAccount: scopedOperationsReadProcedure
+    .input(z.object({ partnerId: z.number().int().positive() }))
+    .query(({ input }) => readOperationsPartnerAccount(input.partnerId)),
+
+  operationsAdjustCredit: scopedPartnerCreditProcedure
+    .input(z.object({
+      partnerId: z.number().int().positive(),
+      amount: z.number().finite().min(-9999).max(9999),
+      expectedBalance: z.number().finite(),
+      description: z.string().trim().min(1).max(500),
+      requestId: z.string().uuid(),
+      allowNegativeBalance: z.boolean().default(false),
+    }))
+    .mutation(({ input, ctx }) => correctOperationsPartnerCredit(input, ctx.user!.username)),
 
   // Manual credit adjustment (admin)
   adjustCredit: adminProcedure

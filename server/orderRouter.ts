@@ -18,7 +18,7 @@ import { reassignOrderCustomer } from "./orderCustomerAssignmentService.js";
 import {applyStockMovement} from "./stockMovementService.js";
 import {orderHash} from "./jarvyOrderContract.js";
 import { eq, desc, inArray, and, or, getTableColumns } from "drizzle-orm";
-import { router, publicProcedure, adminProcedure } from "./trpc.js";
+import { router, publicProcedure, adminProcedure, scopedOperationsReadProcedure, scopedOrderCleanupProcedure } from "./trpc.js";
 import { getDb, getPool } from "./db.js";
 import { orders, orderItems, articles, stockHistory, customers, customerCommunications, promoCodes } from "../drizzle/schema.js";
 import { getIncomingPayments, matchPaymentToOrder, intelligentMatch, type MatchResult } from "./bunqService.js";
@@ -1906,7 +1906,7 @@ export const orderRouter = router({
     }),
 
   // ADMIN: List all orders with items
-  list: adminProcedure
+  list: scopedOperationsReadProcedure
     .input(z.object({
       status: z.enum(["alle", "offen", "bezahlt", "gepackt", "versendet", "zugestellt", "abgeholt", "storniert"]).optional(),
       search: z.string().optional(),
@@ -1985,7 +1985,7 @@ export const orderRouter = router({
     }),
 
   // ADMIN: Get single order with items
-  get: adminProcedure
+  get: scopedOperationsReadProcedure
     .input(z.object({ orderId: z.string() }))
     .query(async ({ input }) => {
       const db = await getDb();
@@ -2034,7 +2034,7 @@ export const orderRouter = router({
     const [receipt]=resultRows(await db.execute(sql`SELECT order_id FROM priority_checkout_receipts WHERE intent_key=${input.checkoutIdempotencyKey} AND payload_fingerprint=${input.payloadFingerprint}`));
     return receipt ? {state:'committed' as const,orderId:receipt.order_id} : {state:'not_found' as const};
   }),
-  cancel: adminProcedure.input(z.object({orderId:z.string(),restock:z.boolean(),reason:z.string().trim().min(5).max(500)}))
+  cancel: scopedOrderCleanupProcedure.input(z.object({orderId:z.string(),restock:z.boolean(),reason:z.string().trim().min(5).max(500)}))
     .mutation(async ({input,ctx}) => {
       const db=await getDb(); if(!db) throw Error('Database not available');
       return db.transaction(async tx => {
@@ -2404,11 +2404,11 @@ export const orderRouter = router({
     }),
 
   // Both deletion paths preserve audit and are atomic; financial/shipping links require review.
-  deleteNoRestock: adminProcedure.input(z.object({orderId:z.string()})).mutation(async ({input,ctx}) => {
+  deleteNoRestock: scopedOrderCleanupProcedure.input(z.object({orderId:z.string()})).mutation(async ({input,ctx}) => {
     const db=await getDb(); if(!db) throw Error('Database not available');
     return deleteOrderAtomically(db,input.orderId,false,ctx.user?.username || 'Admin');
   }),
-  delete: adminProcedure.input(z.object({orderId:z.string()})).mutation(async ({input,ctx}) => {
+  delete: scopedOrderCleanupProcedure.input(z.object({orderId:z.string()})).mutation(async ({input,ctx}) => {
     const db=await getDb(); if(!db) throw Error('Database not available');
     return deleteOrderAtomically(db,input.orderId,true,ctx.user?.username || 'Admin');
   }),
