@@ -143,6 +143,21 @@ export function getChangedCustomerDataFields(previous: CustomerDataSnapshot, sub
     .filter((field) => field !== "name" && before[field] !== after[field]);
 }
 
+/** Optional address fields belong to the same address, never to another snapshot. */
+export function resolveAddressBoundOptionalFields(
+  previous: CheckoutCustomerIdentity,
+  submitted: CheckoutCustomerIdentity,
+): { company: string; dhlPostNumber: string } {
+  const addressChanged = (["street", "houseNumber", "zip", "city", "country"] as const)
+    .some((field) => comparisonText(previous[field]) !== comparisonText(submitted[field]));
+  return {
+    company: submitted.company === undefined && !addressChanged
+      ? clean(previous.company) : clean(submitted.company),
+    dhlPostNumber: submitted.dhlPostNumber === undefined && !addressChanged
+      ? clean(previous.dhlPostNumber) : clean(submitted.dhlPostNumber),
+  };
+}
+
 /**
  * Resolves only a unique contact-based identity. If e-mail and phone point to
  * different records, or a contact is duplicated, no existing customer record
@@ -160,6 +175,9 @@ export function resolveCheckoutCustomerDataChange(
   const phoneCandidates = phone
     ? allCustomers.filter((customer) => normalizeCustomerMatchPhone(customer.phone) === phone)
     : [];
+  if (emailCandidates.length > 1 || phoneCandidates.length > 1) {
+    return { kind: "no_unique_match", reason: "ambiguous", requiresConfirmation: false };
+  }
   const emailCustomer = emailCandidates.length === 1 ? emailCandidates[0] : null;
   const phoneCustomer = phoneCandidates.length === 1 ? phoneCandidates[0] : null;
 
@@ -180,11 +198,9 @@ export function resolveCheckoutCustomerDataChange(
       : "phone";
   const previousSnapshot = toCustomerDataSnapshot(customer);
   const submittedSnapshot = toCustomerDataSnapshot(submittedCustomer);
-  // These optional fields are not always rendered by the checkout (for
-  // example DHL Post Number on a home-delivery order). An omitted value is not
-  // evidence that a customer wants to erase an existing value.
-  if (!submittedSnapshot.company) submittedSnapshot.company = previousSnapshot.company;
-  if (!submittedSnapshot.dhlPostNumber) submittedSnapshot.dhlPostNumber = previousSnapshot.dhlPostNumber;
+  // An explicitly empty value remains empty. Only genuinely omitted legacy
+  // fields on an unchanged address may retain the previous profile value.
+  Object.assign(submittedSnapshot, resolveAddressBoundOptionalFields(customer, submittedCustomer));
   const changedFields = getChangedCustomerDataFields(previousSnapshot, submittedSnapshot);
   return {
     kind: "matched",
@@ -326,7 +342,7 @@ export async function consumeCustomerDataChangeConfirmation(
   if ((consumed.rowCount ?? 0) !== 1) throwReconfirmationRequired();
 }
 
-/** Writes the immutable event after the order exists and updates only the matched customer. */
+/** Records consent to the new order snapshot, not authorization to write a profile. */
 export async function persistConfirmedCustomerDataChange(
   db: any,
   input: {

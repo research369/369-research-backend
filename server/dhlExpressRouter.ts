@@ -2,7 +2,7 @@
  * DHL Express Router
  *
  * Eigenständiger Express-Router für die DHL Geschäftskunden-Integration.
- * KEINE Änderungen an bestehenden Routen, Endpoints oder Datenmodellen.
+ * Additive Labelhistorie; keine Status-/Bestands-/Zahlungs-/Kommunikationsänderungen.
  * DHL ist eine additive Versandoption neben dem manuellen Workflow
  * und der Sendcloud-Integration.
  *
@@ -16,10 +16,10 @@
  *   - orders.shippingLabelUrl wird auf /api/shipping/dhl/label/{orderId} gesetzt
  *   - Download-Route liest aus DB, decoded Base64 → Buffer → PDF-Response
  *
- * Duplikat-Schutz (persistent, server-restart-sicher):
- *   Stufe 1: DB-Prüfung vor dem Call (trackingNumber IS NULL AND shippingLabelUrl IS NULL)
- *   Stufe 2: Atomares UPDATE mit WHERE-Bedingung (Race-Condition-Schutz auf DB-Ebene)
- *   Stufe 3: Kein blindes Überschreiben nach dem DHL-Call
+ * Durable generations + operation ledger under a shared per-order transaction lock.
+ * Pending/unknown external outcomes NEVER expire or permit blind retries.
+ * Explicit cancel/attest/replace routes are documented in docs/DHL_RELABEL_CONTRACT.md.
+ * Cancellation preserves order tracking and never reopens an order.
  *
  * Sicherheit:
  *   - Nur eingeloggte Admin-User dürfen Labels erstellen und abrufen (JWT via getUserFromRequest)
@@ -28,13 +28,19 @@
 
 import { Router, type Request, type Response } from "express";
 import { ENV } from "./env.js";
-import { createDhlShipmentCH, createDhlShipmentDE, createDhlShipmentEU, validateConsignee, normalizeCountryToAlpha3, type DhlConsignee } from "./dhlService.js";
-import { getDhlProfiles, getActiveProfile, suggestProfile, type DhlProfileKey } from "./dhlProfiles.js";
+import { normalizeCountryToAlpha3 } from "./dhlService.js";
+import { getDhlProfiles, suggestProfile, type DhlProfileKey } from "./dhlProfiles.js";
 import { getDb, getPool } from "./db.js";
 import { orderItems, orders } from "../drizzle/schema.js";
-import { eq, and, isNull } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { getUserFromRequest } from "./auth.js";
-import { buildSwissCommercialInvoicePdf, buildSwissCustomsDocumentsPdf, buildSwissThermalLabelPackagePdf, validateSwissCustomsDeclaration, type SwissCommercialInvoice, type SwissCustomsDeclaration, type ValidatedSwissCustomsDeclaration } from "./swissCustomsService.js";
+import { validateSwissCustomsDeclaration, type SwissCustomsDeclaration } from "./swissCustomsService.js";
+import { getDhlLabelLifecycleForOrders, isDhlLabelLifecycleUsable } from "./dhlLabelLifecycleSummary.js";
+
+import { DhlRelabelService, DhlLabelError } from "./dhlRelabelService.js";
+import { PgDhlLabelStore } from "./dhlRelabelStore.js";
+import { prepareDhlLabel, requestDhlLabel, buildDhlLabelDocuments } from "./dhlLabelPreparation.js";
+import { cancelDhlShipment } from "./dhlCancellationService.js";
 
 export const dhlExpressRouter: Router = Router();
 
@@ -105,85 +111,6 @@ type SwissCustomsDraftItem = {
 
 function isSwissDestination(country: string | null | undefined): boolean {
   return normalizeCountryToAlpha3(String(country ?? "")) === "CHE";
-}
-
-async function loadSwissCustomsForLabel(order: typeof orders.$inferSelect): Promise<{
-  declaration: ValidatedSwissCustomsDeclaration;
-  invoice: SwissCommercialInvoice;
-}> {
-  const pool = await getPool();
-  if (!pool) throw new Error("Datenbank für Schweizer Zolldaten nicht verfügbar");
-  const result = await pool.query(`
-    SELECT
-      declaration.package_weight_grams,
-      declaration.invoice_number,
-      declaration.created_at,
-      declaration.compliance_confirmed_at,
-      item.order_item_id,
-      item.item_description,
-      item.hs_code,
-      item.country_of_origin,
-      item.unit_weight_grams,
-      item.unit_customs_value_eur,
-      order_item.quantity
-    FROM order_swiss_customs_declarations declaration
-    JOIN order_swiss_customs_items item ON item.declaration_id = declaration.id
-    JOIN order_items order_item ON order_item.id = item.order_item_id
-    WHERE declaration.order_id = $1
-    ORDER BY order_item.id ASC
-  `, [order.orderId]);
-  if (result.rows.length === 0) {
-    throw new Error("Für diese Schweizer Bestellung fehlen gespeicherte Zolldaten.");
-  }
-  const first = result.rows[0];
-  if (!first.compliance_confirmed_at) {
-    throw new Error("Die Compliance-Prüfung für diese Schweizer Sendung wurde nicht bestätigt.");
-  }
-  const declaration: SwissCustomsDeclaration = {
-    orderId: order.orderId,
-    packageWeightGrams: Number(first.package_weight_grams),
-    shippingEur: Number(order.shipping ?? 0),
-    subtotalEur: Number(order.subtotal ?? 0),
-    discountEur: Number(order.discount ?? 0),
-    lines: result.rows.map((row) => ({
-      orderItemId: Number(row.order_item_id),
-      description: row.item_description,
-      hsCode: row.hs_code,
-      countryOfOrigin: row.country_of_origin,
-      unitWeightGrams: Number(row.unit_weight_grams),
-      quantity: Number(row.quantity),
-      unitCustomsValueEur: Number(row.unit_customs_value_eur),
-    })),
-  };
-  const validated = validateSwissCustomsDeclaration(declaration);
-  if (!validated.ok) throw new Error(validated.error);
-  if (validated.value.goodsValueEur > 1000) {
-    throw new Error("Warenwert über 1.000 €: Ausfuhrbegleitdokument (ABD) ist zusätzlich erforderlich und wird nicht automatisch erzeugt.");
-  }
-  return {
-    declaration: validated.value,
-    invoice: {
-      invoiceNumber: String(first.invoice_number),
-      invoiceDate: new Date(first.created_at),
-      seller: {
-        name: "369 RESEARCH Sp. z o.o.",
-        street: "Hoża 86/210",
-        zip: "00-682",
-        city: "Warszawa",
-        country: "Poland",
-        taxId: "PL5214161163",
-      },
-      consignee: {
-        name: `${order.firstName ?? ""} ${order.lastName ?? ""}`.trim(),
-        street: String(order.street ?? ""),
-        houseNumber: String(order.houseNumber ?? ""),
-        zip: String(order.zip ?? ""),
-        city: String(order.city ?? ""),
-        country: "Switzerland",
-      },
-      declaration: validated.value,
-    },
-  };
 }
 
 // ─── Schweizer Zolldaten: nur auftragsbezogen und vollständig ─────────────────
@@ -486,6 +413,15 @@ dhlExpressRouter.get(
       return;
     }
 
+    if (order.trackingCarrier === "DHL" || order.trackingCarrier === "DHL_PENDING") {
+      const lifecycle = (await getDhlLabelLifecycleForOrders([orderId])).get(orderId) ?? null;
+      if (!isDhlLabelLifecycleUsable(lifecycle)) {
+        res.status(409).json({ success: false, code: "LABEL_NOT_ACTIVE", state: lifecycle?.state,
+          error: "Dieses Label ist storniert oder sein DHL-Zustand nicht sicher. Alte PDFs nur über die gekennzeichnete Labelhistorie öffnen." });
+        return;
+      }
+    }
+
     const storedData = order.shippingLabelContent
       ? `data:application/pdf;base64,${order.shippingLabelContent}`
       : order.shippingLabelUrl;
@@ -554,6 +490,13 @@ dhlExpressRouter.get(
       return;
     }
 
+    const lifecycle = (await getDhlLabelLifecycleForOrders([orderId.trim()])).get(orderId.trim()) ?? null;
+    if (!isDhlLabelLifecycleUsable(lifecycle)) {
+      res.status(409).json({ success: false, code: "LABEL_NOT_ACTIVE", state: lifecycle?.state,
+        error: "Dieses Label ist nicht als aktives Versandlabel freigegeben. Archivierte PDFs stehen separat in der Labelhistorie." });
+      return;
+    }
+
     // Base64 → Buffer → PDF
     const pdfBuffer = Buffer.from(order.shippingLabelContent as string, "base64");
 
@@ -567,342 +510,37 @@ dhlExpressRouter.get(
   }
 );
 
-// ─── POST /api/shipping/dhl/create-label ──────────────────────────────────────
-// Erstellt ein DHL-Label für eine bestehende Bestellung.
-// Schreibt in: trackingNumber, trackingCarrier, shippingLabelUrl, shippingLabelContent
-
-dhlExpressRouter.post(
-  "/api/shipping/dhl/create-label",
-  requireWawiAdmin,
-  async (req: Request, res: Response) => {
-    const { orderId, weightGrams, shippingProfile } = req.body as {
-      orderId?:        string;
-      weightGrams?:    number;
-      shippingProfile?: string;
-    };
-    // ── Profil-Auswahl (Default: DHL_DE_STANDARD) ────────────────────────────
-    const profileKey: DhlProfileKey = (shippingProfile as DhlProfileKey) ?? "DHL_DE_STANDARD";
-    const allProfiles = getDhlProfiles();
-    if (!allProfiles[profileKey]) {
-      res.status(400).json({ success: false, error: `Unbekanntes Versandprofil: ${profileKey}` });
-      return;
-    }
-    let activeProfile;
-    try {
-      activeProfile = getActiveProfile(profileKey);
-    } catch (err: any) {
-      res.status(400).json({ success: false, error: err.message });
-      return;
-    }
-
-    // ── Eingabe-Validierung ──────────────────────────────────────────────────
-    if (!orderId || typeof orderId !== "string" || orderId.trim() === "") {
-      res.status(400).json({ success: false, error: "orderId fehlt oder ungültig" });
-      return;
-    }
-
-    const db = await getDb();
-    if (!db) {
-      res.status(503).json({ success: false, error: "Datenbank nicht verfügbar" });
-      return;
-    }
-
-    // ── Stufe 1: Bestellung laden und Duplikat-Prüfung ───────────────────────
-    const [order] = await db
-      .select()
-      .from(orders)
-      .where(eq(orders.orderId, orderId.trim()))
-      .limit(1);
-
-    if (!order) {
-      res.status(404).json({ success: false, error: `Bestellung ${orderId} nicht gefunden` });
-      return;
-    }
-
-    if (order.trackingNumber || order.shippingLabelUrl) {
-      res.status(409).json({
-        success: false,
-        error:   "Bestellung hat bereits ein Label oder eine Trackingnummer – kein neues Label erstellt",
-        existing: {
-          trackingNumber: order.trackingNumber ?? null,
-          labelUrl:       order.shippingLabelUrl ?? null,
-        },
-      });
-      return;
-    }
-
-    // Das gewählte Vertragsprodukt darf nur für sein tatsächlich hinterlegtes
-    // Zielland und innerhalb der serverseitigen Gewichtsgrenze verwendet werden.
-    // Die Prüfung bleibt bewusst im Backend, damit sie nicht über einen direkten
-    // API-Aufruf oder eine veraltete Browseransicht umgangen werden kann.
-    const rawDestinationCountry = String(order.country ?? (order as any).shippingCountry ?? "").trim();
-    const destinationCountry = alpha3ToAlpha2[normalizeCountryToAlpha3(rawDestinationCountry)] ?? rawDestinationCountry.toUpperCase();
-    if (!activeProfile.countries.includes(destinationCountry)) {
-      res.status(422).json({
-        success: false,
-        error: `Versandprofil \"${activeProfile.label}\" ist für das Zielland ${destinationCountry || "ohne Länderangabe"} nicht zulässig.`,
-      });
-      return;
-    }
-
-    // Ein fehlender Gewichtsdatensatz darf niemals das Profil-Maximum als Sendungsgewicht
-    // an DHL übergeben. Bei CH ist ausschließlich das zuvor gespeicherte, tatsächliche
-    // Paketgewicht zulässig; Browserwerte werden bewusst nicht akzeptiert.
-    let swissCustoms: { declaration: ValidatedSwissCustomsDeclaration; invoice: SwissCommercialInvoice } | null = null;
-    if (profileKey === "DHL_CH") {
-      try {
-        swissCustoms = await loadSwissCustomsForLabel(order);
-      } catch (error: any) {
-        res.status(422).json({ success: false, error: error.message || "Schweizer Zolldaten sind unvollständig." });
-        return;
-      }
-    }
-    const requestedWeightG = profileKey === "DHL_CH"
-      ? swissCustoms!.declaration.packageWeightGrams
-      : Number(weightGrams ?? (order as any).weightGrams ?? 1000);
-    if (!Number.isFinite(requestedWeightG) || requestedWeightG <= 0) {
-      res.status(422).json({ success: false, error: "Gewicht für die DHL-Sendung fehlt oder ist ungültig." });
-      return;
-    }
-    if (requestedWeightG > activeProfile.maxWeightG) {
-      res.status(422).json({
-        success: false,
-        error: `${activeProfile.label} erlaubt maximal ${activeProfile.maxWeightG} g; angegeben sind ${requestedWeightG} g. Bitte DHL Paket Standard wählen.`,
-      });
-      return;
-    }
-
-    // ── Adress-Validierung vor DHL-Call ──────────────────────────────────────
-    // Normalisiere Land: "Deutschland", "Germany", "DEU", "de" → "DE"
-    const normalizeCountry = (raw: string | null | undefined): string => {
-      if (!raw) return "";
-      const s = raw.trim().toUpperCase();
-      if (s === "DEUTSCHLAND" || s === "GERMANY" || s === "DEU" || s === "DE") return "DE";
-      return raw.trim();
-    };
-    // ── DHL-Abholort-Erkennung ────────────────────────────────────────────────
-    // Prüft delivery_type aus DB ODER erkennt "Packstation" im street-Feld (Fallback)
-    // Drei Erkennungswege (OR-Logik, alle idempotent):
-    // 1. delivery_type = "packstation" (gesetzt beim Checkout)
-    // 2. street-Feld enthaelt "Packstation" (manuell eingetragen oder aeltere Bestellungen)
-    // 3. dhlPostNumber vorhanden + street leer (WaWi-Kunden mit Packstation-Nr. in houseNumber)
-    const dhlPostNumberRaw = ((order as any).dhlPostNumber ?? "").trim();
-    const isPackstation =
-      (order as any).deliveryType === "packstation" ||
-      /^packstation\b/i.test((order.street ?? "").trim()) ||
-      (!!dhlPostNumberRaw && !(order.street ?? "").trim());
-    const isPostfiliale =
-      (order as any).deliveryType === "postfiliale" ||
-      /^postfiliale\b/i.test((order.street ?? "").trim());
-
-    const consignee: DhlConsignee = {
-      name1:         `${order.firstName} ${order.lastName}`.trim(),
-      addressStreet: order.street,
-      addressHouse:  order.houseNumber,
-      postalCode:    (order.zip ?? "").trim(), // trim() verhindert DHL-Fehler bei PLZ mit Leerzeichen
-      city:          order.city,
-      // DE: normalisiert auf "DE"; EU: Rohwert – normalizeCountryToAlpha3 läuft in createDhlShipmentEU
-      country:       profileKey === "DHL_DE_STANDARD" ? normalizeCountry(order.country) : (order.country ?? ""),
-      email:         order.email ?? undefined,
-      phone:         order.phone ?? undefined,
-    };
-
-    if (profileKey === "DHL_DE_ECONOMY" && (isPackstation || isPostfiliale)) {
-      res.status(422).json({
-        success: false,
-        error: "DHL Kleinpaket ist nicht für Packstation- oder Postfilial-Adressen zulässig. Bitte DHL Paket Standard wählen.",
-      });
-      return;
-    }
-
-    if (isPackstation || isPostfiliale) {
-      // DHL-Abholort-Adressformat:
-      //   name1 = Kundenname
-      //   name2 = DHL-Postnummer (Pflichtfeld)
-      //   addressStreet = "Packstation" oder "Postfiliale"
-      //   addressHouse  = Standortnummer
-      const dhlPostNumber = dhlPostNumberRaw; // bereits oben aus order gelesen
-      if (!dhlPostNumber) {
-        // Sicherheitsnetz: Wenn keine Postnummer hinterlegt, Label-Erstellung blockieren
-        res.status(422).json({
-          success: false,
-          error: `${isPostfiliale ? "Postfilial" : "Packstation"}-Lieferung: DHL-Postnummer fehlt. Bitte Bestellung manuell prüfen.`,
-        });
-        return;
-      }
-      const pickupLocationLabel = isPostfiliale ? "Postfiliale" : "Packstation";
-      consignee.addressStreet = pickupLocationLabel;
-      // Standortnummer: aus houseNumber ODER aus street-Feld parsen.
-      let pickupLocationNr = (order.houseNumber ?? "").trim();
-      if (!pickupLocationNr) {
-        // Fallback: street-Feld parsen → "Packstation 135 118" → erster Token nach "Packstation" ist die Nr.
-        const streetParts = (order.street ?? "").trim().split(/\s+/);
-        if (streetParts.length >= 2) pickupLocationNr = streetParts[1];
-      }
-      consignee.addressHouse = pickupLocationNr || "";
-      // name2 = Postnummer (DHL-Pflichtfeld)
-      consignee.name2 = dhlPostNumber.slice(0, 20);
-      console.log(`[dhlRouter] ${pickupLocationLabel}-Lieferung: ${pickupLocationLabel} ${pickupLocationNr}, Post-Nr. ${dhlPostNumber}`);
-    } else if (order.company?.trim()) {
-      // Firmenname als name1 wenn vorhanden, Personenname dann in name2
-      const fullName = `${order.firstName} ${order.lastName}`.trim();
-      consignee.name1 = order.company.trim().slice(0, 50);
-      if (fullName) consignee.name2 = fullName.slice(0, 50);
-    }
-
-    const validationError = validateConsignee(consignee);
-    if (validationError) {
-      res.status(422).json({ success: false, error: validationError });
-      return;
-    }
-
-    // ── Stufe 2: Atomares UPDATE als Race-Condition-Schutz ───────────────────
-    // Setzt trackingCarrier auf "DHL_PENDING" nur wenn noch kein Tracking vorhanden.
-    const lockResult = await db
-      .update(orders)
-      .set({ trackingCarrier: "DHL_PENDING" })
-      .where(
-        and(
-          eq(orders.orderId, orderId.trim()),
-          isNull(orders.trackingNumber),
-          isNull(orders.shippingLabelUrl),
-          isNull(orders.trackingCarrier)
-        )
-      );
-
-    const rowsUpdated = (lockResult as any)?.rowCount ?? (lockResult as any)?.rowsAffected ?? 1;
-    if (rowsUpdated === 0) {
-      res.status(409).json({
-        success: false,
-        error:   "Label-Erstellung bereits in Bearbeitung oder Duplikat erkannt",
-      });
-      return;
-    }
-
-        // ── DHL-Call ─────────────────────────────────────────────────────────────
-    console.log(`[dhlRouter] Erstelle DHL-Label für Bestellung ${orderId} | Profil: ${profileKey} | Produkt: ${activeProfile.product} | Sandbox: ${ENV.dhlSandbox}`);
-    const shipmentInput = {
-      orderId:       orderId.trim(),
-      consignee,
-      weightGrams:   requestedWeightG,
-      productCode:   activeProfile.product,
-      billingNumber: activeProfile.billingNumber!,
-      ...(swissCustoms ? { swissCustoms: swissCustoms.declaration } : {}),
-    };
-    // DHL_DE_STANDARD → createDhlShipmentDE (unverändert)
-    // DHL_EU          → createDhlShipmentEU (Phase 2, V53WPAK)
-    // DHL_CH          → V53WPAK mit DAP und vollständigen Zoll-EDI-Daten
-    const result = profileKey === "DHL_CH"
-      ? await createDhlShipmentCH(shipmentInput)
-      : profileKey === "DHL_EU"
-        ? await createDhlShipmentEU(shipmentInput)
-        : await createDhlShipmentDE(shipmentInput);
-
-    // ── Stufe 3: Ergebnis in DB schreiben ────────────────────────────────────
-    if (result.success && result.trackingNumber) {
-      // Interne Download-Route als shippingLabelUrl
-      const labelRoute = `/api/shipping/dhl/label/${orderId.trim()}`;
-
-      // Schweiz: Das gespeicherte Versandlabel besteht bewusst aus drei
-      // Thermoetiketten: Marke 100×150 mm hochkant, danach oberer und unterer
-      // CN23-Bereich jeweils 150×100 mm quer. Die A4-Handelsrechnungen bleiben
-      // zusätzlich unverändert gespeichert.
-      let labelContent = result.labelBase64 ?? null;
-      const customsDocContent = result.customsDocBase64 ?? null;
-      let commercialInvoiceContent: string | null = null;
-      let customsPrintContent: string | null = null;
-      if (profileKey === "DHL_CH") {
-        try {
-          if (!labelContent || !customsDocContent || !swissCustoms) throw new Error(result.error || "DHL-Label, CN23 oder Zolldaten fehlen");
-          const commercialInvoice = await buildSwissCommercialInvoicePdf({
-            invoice: swissCustoms.invoice,
-          });
-          commercialInvoiceContent = Buffer.from(commercialInvoice).toString("base64");
-          const customsPrintPackage = await buildSwissCustomsDocumentsPdf({
-            customsDocPdfBase64: customsDocContent,
-            invoice: swissCustoms.invoice,
-          });
-          customsPrintContent = Buffer.from(customsPrintPackage).toString("base64");
-          const thermalLabelPackage = await buildSwissThermalLabelPackagePdf({
-            shippingLabelPdfBase64: labelContent,
-            customsDocPdfBase64: customsDocContent,
-          });
-          labelContent = Buffer.from(thermalLabelPackage).toString("base64");
-        } catch (error: any) {
-          // Das DHL-Label wurde extern bereits gebucht. Ohne eine gespeicherte
-          // vollständige Zollmappe darf keine scheinbar vollständige Schweiz-Sendung
-          // erscheinen; der Pending-Lock verhindert ein zweites Label.
-          console.error(`[dhlRouter/CH] Schweizer Druckpaket konnte nicht erzeugt werden:`, error);
-          res.status(500).json({ success: false, error: "DHL-Label erstellt, aber das Schweizer Druckpaket konnte nicht vollständig erzeugt und abgelegt werden. Bitte Support kontaktieren; kein zweites Label auslösen." });
-          return;
-        }
-      }
-
-      if (profileKey === "DHL_CH" && commercialInvoiceContent) {
-        const pool = await getPool();
-        if (!pool) {
-          console.error(`[dhlRouter/CH] Handelsrechnung für ${orderId} konnte nicht gespeichert werden: Datenbank nicht verfügbar`);
-          res.status(500).json({ success: false, error: "DHL-Label erstellt, aber die Handelsrechnung konnte nicht gespeichert werden. Bitte Support kontaktieren; kein zweites Label auslösen." });
-          return;
-        }
-        const invoiceStored = await pool.query(`
-          UPDATE order_swiss_customs_declarations
-          SET commercial_invoice_content = $1,
-              commercial_invoice_generated_at = NOW(),
-              customs_print_content = $2,
-              customs_print_generated_at = NOW(),
-              updated_at = NOW()
-          WHERE order_id = $3
-        `, [commercialInvoiceContent, customsPrintContent, orderId.trim()]);
-        if ((invoiceStored.rowCount ?? 0) !== 1) {
-          console.error(`[dhlRouter/CH] Handelsrechnung für ${orderId} konnte nicht zugeordnet werden`);
-          res.status(500).json({ success: false, error: "DHL-Label erstellt, aber die Zollunterlagen konnten nicht der Bestellung zugeordnet werden. Bitte Support kontaktieren; kein zweites Label auslösen." });
-          return;
-        }
-      }
-
-      await db
-        .update(orders)
-        .set({
-          trackingNumber:   result.trackingNumber,
-          trackingCarrier:  "DHL",
-          shippingLabelUrl: labelRoute,
-          ...(labelContent ? { shippingLabelContent: labelContent } as any : {}),
-        })
-        .where(eq(orders.orderId, orderId.trim()));
-
-      console.log(`[dhlRouter] Schweizer Unterlagen gespeichert: ${result.trackingNumber} | Label 4×6 hochkant + 2× CN23 quer, Handelsrechnung A4 | Customs: ${customsPrintContent ? 'ja' : 'nein'}`);
-
-      res.json({
-        success:        true,
-        trackingNumber: result.trackingNumber,
-        labelUrl:       labelRoute,
-        hasContent:     !!labelContent,
-        customsInvoiceStored: profileKey === "DHL_CH" && !!commercialInvoiceContent && !!customsDocContent,
-        sandbox:        ENV.dhlSandbox,
-      });
-    } else {
-      // Fehlerfall: Lock-Marker zurücksetzen
-      await db
-        .update(orders)
-        .set({ trackingCarrier: null })
-        .where(
-          and(
-            eq(orders.orderId, orderId.trim()),
-            isNull(orders.trackingNumber)
-          )
-        );
-
-      console.error(`[dhlRouter] DHL-Fehler für ${orderId}:`, result.error);
-
-      res.status(502).json({
-        success: false,
-        error:   result.error ?? "Unbekannter DHL-Fehler",
-        statusCode: result.statusCode ?? null,
-      });
-    }
-  }
-);
+// Normal create and explicit relabel operations share the durable per-order guard.
+const dhlOperations = new DhlRelabelService(new PgDhlLabelStore(), {
+ prepare: prepareDhlLabel, create: requestDhlLabel, documents: buildDhlLabelDocuments, cancel: cancelDhlShipment,
+});
+for (const [path, kind] of [["create-label","create"],["cancel-label","cancel"],["attest-cancellation","attest"],["replace-label","replace"]] as const) {
+ dhlExpressRouter.post(`/api/shipping/dhl/${path}`,requireWawiAdmin,async(req:Request,res:Response)=>{
+  try {
+   const user = await getUserFromRequest(req);
+   const result = await dhlOperations.execute(kind, req.body, `${user?.id ?? "admin"}:${user?.username ?? user?.name ?? "admin"}`);
+   res.status(result.httpStatus).json(result.body);
+  } catch(error) { sendDhlOperationError(res,error); }
+ });
+}
+dhlExpressRouter.get("/api/shipping/dhl/label-history/:orderId",requireWawiAdmin,async(req:Request,res:Response)=>{
+ try { res.json(await dhlOperations.history(String(req.params.orderId))); } catch(error) { sendDhlOperationError(res,error); }
+});
+for (const [path, document] of [["label-generation","label"],["label-generation-documents","invoice"]] as const) {
+ dhlExpressRouter.get(`/api/shipping/dhl/${path}/:orderId/:generationId`,requireWawiAdmin,async(req:Request,res:Response)=>{
+  try {
+   const content = await dhlOperations.document(String(req.params.orderId),String(req.params.generationId),document);
+   const buffer = Buffer.from(content,"base64");
+   res.set({"Content-Type":"application/pdf","Content-Disposition":`inline; filename="dhl-${document}.pdf"`,"Content-Length":String(buffer.length),"Cache-Control":"private, no-cache"});
+   res.send(buffer);
+  } catch(error) { sendDhlOperationError(res,error); }
+ });
+}
+function sendDhlOperationError(res:Response,error:unknown) {
+ if(error instanceof DhlLabelError) {res.status(error.status).json({success:false,error:error.message,code:error.code});return;}
+ console.error("[dhlRouter] DHL operation failed; no blind retry",error);
+ res.status(503).json({success:false,error:"DHL-Vorgang konnte nicht sicher abgeschlossen werden. Historie prüfen; kein zweites Label auslösen.",code:"DATABASE_UNAVAILABLE"});
+}
 
 // ─── POST /api/shipping/dhl/sandbox-test ─────────────────────────────────────
 /**

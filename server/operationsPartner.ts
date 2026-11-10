@@ -6,8 +6,7 @@ import { getDb, getPool, withReadOnlyDatabase } from "./db.js";
 import { partners } from "../drizzle/schema.js";
 import {
   getPartnerProgram,
-  calculateSelfOrderDiscountPercent,
-  canRedeemShopCredit,
+  resolveSelfOrderTerms,
   listPartnerCodeTerms,
 } from "./partnerProgramService.js";
 export async function diagnosePartner(body: unknown) {
@@ -73,6 +72,11 @@ export async function diagnosePartner(body: unknown) {
       else audit = "missing";
       evidence.push({ ...visible, audit });
     }
+    const selfOrderTerms = resolveSelfOrderTerms(
+      p.isActive === 1 ? program : null,
+      Number(p.customerDiscountPercent),
+      Number(p.commissionPercent),
+    );
     return {
       codes,
       bookingEvidence: evidence,
@@ -84,17 +88,12 @@ export async function diagnosePartner(body: unknown) {
         active: p.isActive === 1,
       },
       program,
-      ownDiscount: program?.active
-        ? calculateSelfOrderDiscountPercent(
-            program,
-            Number(p.customerDiscountPercent),
-            Number(p.commissionPercent),
-          )
+      ownDiscount: p.isActive === 1 && program?.active
+        ? selfOrderTerms.discountPercent
         : null,
       credit: {
         balance: Number(p.creditBalance),
-        redeemable:
-          p.isActive === 1 && !!program?.active && canRedeemShopCredit(program),
+        redeemable: selfOrderTerms.creditRedeemable,
       },
       observedAt: new Date().toISOString(),
     };

@@ -70,6 +70,8 @@ export interface DhlShipmentInput {
 
 export interface DhlShipmentResult {
   success:        boolean;
+  /** Only explicit known rejection may release the durable guard. */
+  outcome?: "rejected" | "unknown";
   trackingNumber?: string;
   labelUrl?:       string;
   /** Base64-kodiertes PDF-Label (falls URL nicht verfügbar) */
@@ -79,6 +81,23 @@ export interface DhlShipmentResult {
   error?:          string;
   /** HTTP-Statuscode der DHL-Antwort */
   statusCode?:     number;
+}
+
+/** Retain evidence even when an error envelope includes an already-created shipment. */
+function failedPostOutcome(status: number, data: any): Partial<DhlShipmentResult> {
+ const item = data?.items?.[0];
+ const trackingNumber = item?.shipmentNo ?? item?.trackingId ?? item?.shipmentTrackingNumber;
+ const knownRejection = [400,401,403,404,409,422,429].includes(status) && !trackingNumber;
+ return {
+  outcome: knownRejection ? "rejected" : "unknown",
+  ...(trackingNumber ? {trackingNumber: String(trackingNumber)} : {}),
+  labelBase64: item?.label?.b64 ?? item?.label?.content,
+  customsDocBase64: item?.customsDoc?.b64 ?? item?.customsDoc?.content,
+ };
+}
+function itemHasUnknownStatus(item:any):boolean {
+ const status = item?.sstatus?.status;
+ return status !== undefined && status !== 200 && status !== 201;
 }
 
 // ─── Auth-Hilfsfunktionen ─────────────────────────────────────────────────────
@@ -327,6 +346,7 @@ export async function createDhlShipmentDE(
       method:  "POST",
       headers,
       body:    JSON.stringify(body),
+      signal: AbortSignal.timeout(30_000),
     });
     responseText = await rawResponse.text();
   } catch (err: any) {
@@ -334,6 +354,7 @@ export async function createDhlShipmentDE(
       success:    false,
       error:      `DHL API nicht erreichbar: ${err.message}`,
       statusCode: 0,
+      outcome: "unknown",
     };
   }
 
@@ -345,6 +366,7 @@ export async function createDhlShipmentDE(
     return {
       success:    false,
       error:      `DHL API: Ungültige JSON-Antwort (HTTP ${rawResponse.status})`,
+      outcome: "unknown",
       statusCode: rawResponse.status,
     };
   }
@@ -360,6 +382,7 @@ export async function createDhlShipmentDE(
     return {
       success:    false,
       error:      `DHL Fehler (${rawResponse.status}): ${detail}`,
+      ...failedPostOutcome(rawResponse.status, data),
       statusCode: rawResponse.status,
     };
   }
@@ -370,6 +393,7 @@ export async function createDhlShipmentDE(
     return {
       success:    false,
       error:      "DHL API: Keine Sendungsdaten in der Antwort",
+      outcome: "unknown",
       statusCode: rawResponse.status,
     };
   }
@@ -386,10 +410,14 @@ export async function createDhlShipmentDE(
     (shipment.label?.b64 as string | undefined) ??
     (shipment.label?.content as string | undefined);
 
+  if (itemHasUnknownStatus(shipment)) {
+    return { success:false, ...failedPostOutcome(rawResponse.status,data), outcome:"unknown", error:"DHL-Sendungsstatus nicht eindeutig bestätigt", statusCode:rawResponse.status };
+  }
   if (!trackingNumber) {
     return {
       success:    false,
       error:      "DHL API: Keine Trackingnummer in der Antwort",
+      outcome: "unknown",
       statusCode: rawResponse.status,
     };
   }
@@ -514,6 +542,7 @@ export async function createDhlShipmentEU(
       method:  "POST",
       headers,
       body:    JSON.stringify(body),
+      signal: AbortSignal.timeout(30_000),
     });
     responseText = await rawResponse.text();
   } catch (err: any) {
@@ -521,6 +550,7 @@ export async function createDhlShipmentEU(
       success:    false,
       error:      `DHL API nicht erreichbar: ${err.message}`,
       statusCode: 0,
+      outcome: "unknown",
     };
   }
 
@@ -532,6 +562,7 @@ export async function createDhlShipmentEU(
     return {
       success:    false,
       error:      `DHL API: Ungültige JSON-Antwort (HTTP ${rawResponse.status})`,
+      outcome: "unknown",
       statusCode: rawResponse.status,
     };
   }
@@ -547,6 +578,7 @@ export async function createDhlShipmentEU(
     return {
       success:    false,
       error:      `DHL Fehler EU (${rawResponse.status}): ${detail}`,
+      ...failedPostOutcome(rawResponse.status, data),
       statusCode: rawResponse.status,
     };
   }
@@ -557,6 +589,7 @@ export async function createDhlShipmentEU(
     return {
       success:    false,
       error:      "DHL API: Keine Sendungsdaten in der Antwort",
+      outcome: "unknown",
       statusCode: rawResponse.status,
     };
   }
@@ -571,10 +604,14 @@ export async function createDhlShipmentEU(
     (shipment.label?.b64 as string | undefined) ??
     (shipment.label?.content as string | undefined);
 
+  if (itemHasUnknownStatus(shipment)) {
+    return { success:false, ...failedPostOutcome(rawResponse.status,data), outcome:"unknown", error:"DHL-Sendungsstatus nicht eindeutig bestätigt", statusCode:rawResponse.status };
+  }
   if (!trackingNumber) {
     return {
       success:    false,
       error:      "DHL API: Keine Trackingnummer in der Antwort",
+      outcome: "unknown",
       statusCode: rawResponse.status,
     };
   }
@@ -674,22 +711,23 @@ export async function createDhlShipmentCH(
       method: "POST",
       headers,
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30_000),
     });
     responseText = await rawResponse.text();
   } catch (err: any) {
-    return { success: false, error: `DHL API nicht erreichbar: ${err.message}`, statusCode: 0 };
+    return { success: false, error: `DHL API nicht erreichbar: ${err.message}`, statusCode: 0, outcome: "unknown" };
   }
 
   let data: any;
   try {
     data = JSON.parse(responseText);
   } catch {
-    return { success: false, error: `DHL API: Ungültige JSON-Antwort (HTTP ${rawResponse.status})`, statusCode: rawResponse.status };
+    return { success: false, error: `DHL API: Ungültige JSON-Antwort (HTTP ${rawResponse.status})`, outcome: "unknown", statusCode: rawResponse.status };
   }
   if (!rawResponse.ok) {
     const detail = data?.detail || data?.title || data?.items?.[0]?.validationMessages?.[0]?.validationMessage || JSON.stringify(data).slice(0, 300);
     console.error(`[dhlService/CH] DHL API Fehler HTTP ${rawResponse.status}:`, detail);
-    return { success: false, error: `DHL Fehler Schweiz (${rawResponse.status}): ${detail}`, statusCode: rawResponse.status };
+    return { success: false, error: `DHL Fehler Schweiz (${rawResponse.status}): ${detail}`, ...failedPostOutcome(rawResponse.status, data), statusCode: rawResponse.status };
   }
 
   const shipment = data?.items?.[0];
@@ -697,8 +735,11 @@ export async function createDhlShipmentCH(
   const labelUrl = shipment?.label?.url;
   let labelBase64 = await resolveDhlDocumentBase64(shipment?.label, headers);
   let customsDocBase64 = await resolveDhlDocumentBase64(shipment?.customsDoc, headers);
+  if (itemHasUnknownStatus(shipment)) {
+    return { success:false, ...failedPostOutcome(rawResponse.status,data), outcome:"unknown", error:"DHL-Sendungsstatus nicht eindeutig bestätigt", statusCode:rawResponse.status };
+  }
   if (!trackingNumber) {
-    return { success: false, error: "DHL API: Keine Trackingnummer in der Antwort", statusCode: rawResponse.status };
+    return { success: false, error: "DHL API: Keine Trackingnummer in der Antwort", outcome: "unknown", statusCode: rawResponse.status };
   }
 
   // DHL kann beim POST Dokumente als URL liefern oder die CN23 erst über den
@@ -719,7 +760,7 @@ export async function createDhlShipmentCH(
     }
   }
   if (!labelBase64) {
-    return { success: false, error: "DHL hat kein druckbares Label-PDF zurückgegeben.", statusCode: rawResponse.status };
+    return { success: false, error: "DHL hat kein druckbares Label-PDF zurückgegeben.", trackingNumber, customsDocBase64, outcome: "unknown", statusCode: rawResponse.status };
   }
 
   if (!customsDocBase64) {

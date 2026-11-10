@@ -1,8 +1,13 @@
-import { assertLegacyQuantityPricingReady, checkoutShippingItems, is369CustomerCheckout } from "./mainshopCheckoutIntegration.js";
+import { TRPCError } from "@trpc/server";
+import { canonicalizeMainshopLines, quantityPricing, allocateMoney, mainshopPromoDiscount, quoteHash, mainshopBusinessIntent, assertMainshopStock, type MainshopCatalogArticle, mainshopPolicySnapshot as buildMainshopPolicySnapshot, mainshopCatalogScope } from "./mainshopCanonicalPricing.js";
+import { checkoutShippingItems, is369CustomerCheckout } from "./mainshopCheckoutIntegration.js";
+import { checkoutFingerprint, readCheckoutReceipt, lockCheckoutIntent, persistCheckoutReceipt, queueOrderTask, runOrderTask, resultRows, getOrderIntegrityIssues } from './priorityOrderIntegrity.js';
+import { lockOrder, returnOrderStock, recordOrderAction, deleteOrderAtomically, assertOrderFinanciallyEditable } from './orderStockReturnService.js';
+import { reverseOrderFinancesInTransaction } from './priorityOrderFinancialAdapter.js';
 import {nextCustomerNumber} from './customerNumberService.js';
 import {checkCustomerCreationMaintenance} from './customerCreationMaintenance.js';
 import { publicCodeCommissionPreview } from "./partnerCommissionPreview.js";
-import { hasOtherPaidCodeOrder } from "./partnerCodeHistory.js";
+import { hasOtherPaidCodeOrder, partnerPaidCodeContactKey } from "./partnerCodeHistory.js";
 /**
  * Order Router – tRPC routes for order management (WaWi)
  * Public: createOrder (from checkout)
@@ -11,18 +16,20 @@ import { hasOtherPaidCodeOrder } from "./partnerCodeHistory.js";
 
 import {assertKwkNewCustomer,assertKwkCreditAvailable} from './kwkCheckoutEligibility.js';
 import { z } from "zod";
+import { assertManualSaleRole } from "./manualSaleAuthorization.js";
+import { reassignOrderCustomer } from "./orderCustomerAssignmentService.js";
 import {applyStockMovement} from "./stockMovementService.js";
 import {orderHash} from "./jarvyOrderContract.js";
 import { eq, desc, inArray, and, or, getTableColumns } from "drizzle-orm";
-import { router, publicProcedure, adminProcedure, type Context } from "./trpc.js";
-import { getDb, getPool } from "./db.js";
-import { orders, orderItems, articles, stockHistory, customers, customerCommunications, promoCodes } from "../drizzle/schema.js";
+import { router, publicProcedure, adminProcedure, scopedOperationsReadProcedure, scopedOrderCleanupProcedure, type Context } from "./trpc.js";
+import { getDb, getPool, withReadOnlyDatabase } from "./db.js";
+import { orders, orderItems, articles, stockHistory, customers, customerCommunications, promoCodes, bundles, bundleItems, shopSettings } from "../drizzle/schema.js";
 import { getIncomingPayments, matchPaymentToOrder, intelligentMatch, type MatchResult } from "./bunqService.js";
 import { sendOrderConfirmationEmail, sendShippingNotificationEmail, sendAdminOrderNotification, sendPackingNotificationEmail } from "./emailService.js";
 import { getReleasedBankTransferInstructions } from "./paymentInstructionsConfig.js";
 import { isSubstitutionEnabled, resolveSubstitution, extractDosageMg, isSubstitutionEligible } from "./substitutionService.js";
 // KWK-Modul: statischer Import (sicherer als dynamischer Import)
-import { isKwkEnabled, hashAddress, calculateKwkCommission, calculateKwkCommissionBase } from "./kwkService.js";
+import { isKwkEnabled, hashAddress, calculateKwkCommission, calculateKwkCommissionBase, redeemCreditInTransaction } from "./kwkService.js";
 import { partners } from "../drizzle/schema.js";
 import { sql } from "drizzle-orm";
 import { queueCustomerDuplicateReview } from "./customerIntegrityService.js";
@@ -31,8 +38,10 @@ import { persistAddressValidation, validateGermanAddress } from "./addressValida
 import {
   bookPaidPartnerCommission,
   redeemPartnerCreditForOrder,
+  redeemPartnerCreditInTransaction,
   reversePartnerFinancialEntriesForCancelledOrder,
 } from "./partnerCreditService.js";
+import { createPartnerCreditTransactionQueryClient } from "./partnerCreditTransactionQuery.js";
 import { resolveQrAttribution } from "./qrCampaignService.js";
 import { withStoreSourceMarker } from "./storeSource.js";
 import {
@@ -47,7 +56,7 @@ import {
   resolveAuthoritativeItemPrice,
   type PromoDefinition,
 } from "./kwkCheckoutPricing.js";
-import { verifyKwkToken } from "./kwkAuth.js";
+import { getAuthenticatedKwkFromToken } from "./kwkAuth.js";
 import {
   getActiveGlobalAutomaticDiscountFromDb,
   resolveGlobalAutomaticDiscountBenefits,
@@ -62,8 +71,9 @@ import { isPromoCodeExpired } from "./promoCodeRouter.js";
 import {
   calculatePublicPartnerCustomerDiscount,
   calculateProgramDiscount,
-  canRedeemShopCredit,
-  calculateSelfOrderDiscountPercent,
+  assertNoMixedPartnerOrderInput,
+  assertPartnerShopCreditAvailable,
+  resolveSelfOrderTerms,
   getPartnerProgram,
   isDiscountAllowedForProgram,
   isRepeatCodeUseAllowed,
@@ -90,12 +100,13 @@ import {
   getChangedCustomerDataFields,
   persistConfirmedCustomerDataChange,
   resolveCheckoutCustomerDataChange,
+  resolveAddressBoundOptionalFields,
   toCustomerDataSnapshot,
-  toCustomerUpdateFromSnapshot,
   type CheckoutCustomerDataChangeResolution,
 } from "./customerDataChangeService.js";
 import { normalizeCommunicationLanguage } from "./communicationLanguageService.js";
 import { buildPackingWhatsAppMessage } from "./packingWhatsAppMessage.js";
+import { getDhlLabelLifecycleForOrders } from "./dhlLabelLifecycleSummary.js";
 import {
   clearOrderCommunicationPhoneOverride,
   getEffectiveCommunicationPhone,
@@ -166,12 +177,15 @@ export const createOrderSchema = z.object({
   // Peps4pets und Checkout V2 verwenden einen evidenzgebundenen Schlüssel. Die kanonische
   // WaWi-Nummer bleibt unabhängig davon weiterhin der interne Primärvertrag.
   checkoutIdempotencyKey: z.string().trim().min(12).max(128).optional(),
+  expectedQuoteHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   items: z.array(z.object({
+    bundleId: z.number().int().positive().optional(),
+    bundleGroup: z.string().trim().min(1).max(100).optional(),
     name: z.string(),
     dosage: z.string().optional(),
     variant: z.string().optional(),
     price: z.number(),
-    quantity: z.number(),
+    quantity: z.number().int().positive(),
     type: z.string(),
     shopProductId: z.string().optional(), // product id from shop (e.g. '3g-triple-g')
     isNasalSpray: z.boolean().optional(),
@@ -256,26 +270,38 @@ const updateStatusSchema = z.object({
 export type CreateOrderInput = z.infer<typeof createOrderSchema>;
 
 /**
- * Canonical WaWi persistence path. Callers must pass values already resolved by
- * the server; public storefront requests continue to enter through `order.create`.
+ * Shared regular checkout resolution and persistence path. Public requests are
+ * always repriced here; quoteOnly exits before all writes under a READ ONLY scope.
  */
 export async function createOrderFromTrustedInput(
   input: CreateOrderInput,
   ctx: Context,
-  options: { suppressExternalNotifications?: boolean } = {},
+  options: { suppressExternalNotifications?: boolean; quoteOnly?: boolean } = {},
 ) {
-      assertLegacyQuantityPricingReady(input);
+      // Reject foreign public-code terms before lookup, pricing or any writes.
+      assertNoMixedPartnerOrderInput(input);
+      assertManualSaleRole(input.orderSource, ctx.user);
+      const originalBusinessIntent = mainshopBusinessIntent(input);
+      const originalMainshopItems = structuredClone(input.items);
+      const isPublic369Create = !options.quoteOnly && input.storeKey === '369research' && input.orderSource === 'shop' && !ctx.operationsPreview && !ctx.jarvyOrder;
+      if (isPublic369Create && !input.checkoutIdempotencyKey) throw Error('CHECKOUT_INTENT_KEY_REQUIRED');
+      if (isPublic369Create && !/^[a-f0-9]{64}$/.test(input.checkoutIdempotencyKey!)) throw Error('CHECKOUT_INTENT_KEY_INVALID');
       const db = await getDb();
       if (!db) throw new Error("Database not available");
-      await checkCustomerCreationMaintenance('order.create','mutation',await getPool());
+      const normalCheckoutKey = !options.quoteOnly && input.storeKey === '369research' && !ctx.jarvyOrder ? input.checkoutIdempotencyKey : undefined;
+      if (normalCheckoutKey && !/^[a-f0-9]{64}$/.test(normalCheckoutKey)) throw Error('CHECKOUT_INTENT_KEY_INVALID');
+      const normalFingerprint = normalCheckoutKey ? checkoutFingerprint(input) : undefined;
+      if (normalCheckoutKey) {
+        const receipt = await readCheckoutReceipt(db,normalCheckoutKey,normalFingerprint!);
+        if (receipt) return receipt;
+      }
+      if (!options.quoteOnly) await checkCustomerCreationMaintenance('order.create','mutation',await getPool());
       const communicationLanguage = normalizeCommunicationLanguage(input.communicationLanguage);
 
       const isRequestedWawiManualSale = input.orderSource === "wawi_manual";
-      if (isRequestedWawiManualSale && !ctx.user) {
-        throw new Error("WAWI_ANMELDUNG_ERFORDERLICH: Bitte erneut anmelden, bevor ein manueller Verkauf angelegt wird.");
-      }
       const isAuthenticatedWawiManualSale = isRequestedWawiManualSale && Boolean(ctx.user);
       const isMainshopCustomer = is369CustomerCheckout({ storeKey: input.storeKey, isAuthenticatedWawiManualSale });
+      const isRegularMainshopPricing = isMainshopCustomer && input.storeKey === "369research";
       // The manual workflow records discounts in discountBreakdown; labels such
       // as "25%" or "Kostenloser Versand" must never enter promo-code lookup.
       input.discountCode = normalizeDiscountCodeForOrderSource(input.orderSource, input.discountCode);
@@ -318,6 +344,10 @@ export async function createOrderFromTrustedInput(
           resolvedPublicPartnerCode.partnerEmail,
         );
         const normalizedCustomerEmail = input.customer.email?.trim().toLowerCase() || "";
+        if (resolvedPublicPartnerCode.program.customerDiscountPolicy === 'first_paid_code_use'
+          || resolvedPublicPartnerCode.program.commissionPolicy === 'first_paid_code_order') {
+          partnerPaidCodeContactKey(resolvedPublicPartnerCode.partnerCode, normalizedCustomerEmail);
+        }
         if (publicPartnerDiscountEligible && normalizedCustomerEmail && !isRepeatCodeUseAllowed(resolvedPublicPartnerCode.program)) {
           const pool = await getPool();
           if (!pool) throw new Error("Database not available");
@@ -368,10 +398,11 @@ export async function createOrderFromTrustedInput(
       // terms are resolved below from the session-owned partner row; a public
       // code or any browser-provided percentage can never authorize this route.
       const requiresPartnerSession = Boolean(input.partnerNumber?.trim()) || (input.creditUsed || 0) > 0;
+      const requestPartnerPrincipal = isRegularMainshopPricing && !ctx.operationsPreview ? await getAuthenticatedPartnerFromRequest(ctx.req) : null;
       const authenticatedPartner = requiresPartnerSession
         ? ctx.operationsPreview?.partnerId
           ? (await db.select().from(partners).where(and(eq(partners.id,ctx.operationsPreview.partnerId),eq(partners.isActive,1))).limit(1))[0]??null
-          : await getAuthenticatedPartnerFromRequest(ctx.req)
+          : requestPartnerPrincipal || await getAuthenticatedPartnerFromRequest(ctx.req)
         : null;
       if (requiresPartnerSession && !authenticatedPartner) {
         throw new Error("PARTNER_GUTHABEN_AUTHENTIFIZIERUNG_ERFORDERLICH");
@@ -382,6 +413,7 @@ export async function createOrderFromTrustedInput(
 
       let selfOrderDiscountPercent: number | null = null;
       let authenticatedSelfOrderProgram: PartnerProgram | null = null;
+      let authenticatedSelfOrderTerms: ReturnType<typeof resolveSelfOrderTerms> | null = null;
       if (authenticatedPartner) {
         const normalizedPartnerEmail = (authenticatedPartner.email || "").trim().toLowerCase();
         const normalizedOrderEmail = (input.customer.email || "").trim().toLowerCase();
@@ -404,12 +436,22 @@ export async function createOrderFromTrustedInput(
         }
         authenticatedSelfOrderProgram = await getPartnerProgram(authenticatedPartner.id);
         if (!authenticatedSelfOrderProgram?.active) throw new Error("PARTNER_PROGRAMM_NICHT_VERFUEGBAR");
-        selfOrderDiscountPercent = calculateSelfOrderDiscountPercent(
+        authenticatedSelfOrderTerms = resolveSelfOrderTerms(
           authenticatedSelfOrderProgram,
           Number(authenticatedPartner.customerDiscountPercent || 0),
           Number(authenticatedPartner.commissionPercent || 0),
         );
+        selfOrderDiscountPercent = authenticatedSelfOrderTerms.discountPercent;
       }
+
+      // Shared real/preview preflight, before pricing can clamp a requested
+      // amount and before order numbers, stock or customer writes. A balance
+      // alone never authorizes redemption; final locked ledger checks remain.
+      assertPartnerShopCreditAvailable(
+        authenticatedSelfOrderProgram,
+        input.creditUsed || 0,
+        Number(authenticatedPartner?.creditBalance || 0),
+      );
 
       // Im öffentlichen Shop werden Preise für KWK und den aktiven Dauerrabatt
       // zwingend aus dem aktuellen Katalog rekonstruiert. Eine WaWi-Anlage ist
@@ -450,6 +492,11 @@ export async function createOrderFromTrustedInput(
       // commercial term is evaluated. The authenticated manual WaWi workflow is
       // intentionally excluded because its manually entered prices have a
       // separate, server-authorized business process.
+      let quantity = { percentage: 0, units: 0, amount: 0, lineValues: [] as number[] };
+      let mainshopCatalog: MainshopCatalogArticle[] = [];
+      let mainshopPolicySnapshot: unknown = null;
+      let mainshopSettingsSnapshot: Array<{ key: string; value: string | null }> = [];
+      let mainshopPromotion2for3 = { enabled: false, expiresAt: null as string | null, mode: "all" as "all" | "include" | "exclude", products: [] as string[] };
       if (!isAuthenticatedWawiManualSale) {
         const catalog = await db.select({
           sku: articles.sku,
@@ -460,8 +507,27 @@ export async function createOrderFromTrustedInput(
           variants: articles.variants,
           isActive: articles.isActive,
           shopVisible: articles.shopVisible,
+          category: articles.category, categories: articles.categories, stock: articles.stock,
         }).from(articles);
-        const repriced = repricePublicCheckoutItems(input.items, catalog);
+        if (isRegularMainshopPricing) {
+          const config = await db.select({ key: shopSettings.key, value: shopSettings.value }).from(shopSettings).where(inArray(shopSettings.key, ["promo_2for3_enabled", "promo_2for3_expires_at", "promo_2for3_mode", "promo_2for3_products"]));
+          const values = new Map(config.map(s => [s.key, s.value || ""]));
+          let valid = true; let products: string[] = [];
+          try { const parsed: unknown = JSON.parse(values.get("promo_2for3_products") || "[]"); if (!Array.isArray(parsed)) throw Error("invalid promo config"); products = parsed.filter((p): p is string => typeof p === "string" && !!p.trim()); } catch { valid = false; }
+          const mode = values.get("promo_2for3_mode");
+          mainshopPromotion2for3 = { enabled: valid && values.get("promo_2for3_enabled") === "true", expiresAt: values.get("promo_2for3_expires_at") || null, mode: mode === "include" || mode === "exclude" ? mode : "all", products };
+          mainshopCatalog = catalog;
+        }
+        const canonicalBundles = isRegularMainshopPricing ? await db.select().from(bundles) : [];
+        const canonicalComponents = isRegularMainshopPricing ? await db.select().from(bundleItems) : [];
+        if (isRegularMainshopPricing) {
+          mainshopPolicySnapshot = buildMainshopPolicySnapshot(originalMainshopItems, catalog, canonicalBundles, canonicalComponents);
+          mainshopSettingsSnapshot = await db.select({ key: shopSettings.key, value: shopSettings.value }).from(shopSettings).where(inArray(shopSettings.key, ["global_automatic_discount", "promo_2for3_enabled", "promo_2for3_expires_at", "promo_2for3_mode", "promo_2for3_products"])).orderBy(shopSettings.key);
+        }
+        const canonical = isRegularMainshopPricing
+          ? canonicalizeMainshopLines(input.items, catalog, canonicalBundles, canonicalComponents, mainshopPromotion2for3)
+          : null;
+        const repriced = canonical ? { items: canonical.items, subtotal: roundMoney(canonical.items.reduce((sum, i) => sum + i.price * i.quantity, 0)) } : repricePublicCheckoutItems(input.items, catalog);
         input.items = repriced.items;
         input.subtotal = repriced.subtotal;
         if (isMainshopCustomer) {
@@ -470,6 +536,16 @@ export async function createOrderFromTrustedInput(
             category: articles.category, categories: articles.categories,
           }).from(articles);
           input.items = reconcileFreeBacWaterForShopOrder(input.items, bacEligibilityCatalog, { storeKey: input.storeKey });
+          if (canonical) {
+            input.items = input.items.map(i => {
+              if (!i.isFreeGift || i.shopProductId !== "bac-wasser-3ml") return i;
+              const bac = catalog.find(a => a.isActive === 1 && a.shopProductId === "bac-wasser-3ml");
+              if (!bac) throw Error("CHECKOUT_BAC_INVENTORY_REQUIRED");
+              return { ...i, shopProductId: bac.sku, canonicalProductId: "bac-wasser-3ml" };
+            });
+            quantity = quantityPricing(input.items, [...canonical.quantityEligible, ...input.items.slice(canonical.items.length).map(() => false)], canonical.quantityUnits);
+            assertMainshopStock(input.items, catalog);
+          }
         }
       }
       // A standalone public code's minimum order is evaluated only after the
@@ -497,7 +573,7 @@ export async function createOrderFromTrustedInput(
       );
       const activeGlobalDiscount = configuredGlobalDiscount;
       const automaticGlobalDiscountAmount = globalBenefitResolution.globalDiscountApplies && activeGlobalDiscount
-        ? calculateAutomaticGlobalDiscount(input.subtotal, activeGlobalDiscount.percentage)
+        ? calculateAutomaticGlobalDiscount(input.subtotal - quantity.amount, activeGlobalDiscount.percentage)
         : 0;
       // Browserwerte für Versand sind niemals maßgeblich. Jeder öffentliche
       // Checkout startet mit der kanonischen Länder-/Positionsberechnung;
@@ -536,25 +612,22 @@ export async function createOrderFromTrustedInput(
       // rebuilt here from its server-owned source; an old browser preview must
       // never change the payable amount. An authenticated partner's own discount
       // and separately entered shop credit are intentionally both retained.
-      const authoritativePromoDiscount = resolvedPromoCode
-        ? calculatePromoDiscount({
-            subtotal: input.subtotal,
-            items: input.items,
-            promo: resolvedPromoCode,
-            precedingProductDiscount: automaticGlobalDiscountAmount,
-          })
-        : 0;
+      const globalAllocations = allocateMoney(automaticGlobalDiscountAmount, quantity.lineValues);
+      const remainingLineValues = quantity.lineValues.map((v, n) => roundMoney(v - globalAllocations[n]));
+      const authoritativePromoDiscount = isRegularMainshopPricing
+        ? mainshopPromoDiscount(input.items, remainingLineValues, resolvedPromoCode)
+        : resolvedPromoCode ? calculatePromoDiscount({ subtotal: input.subtotal, items: input.items, promo: resolvedPromoCode, precedingProductDiscount: automaticGlobalDiscountAmount }) : 0;
       const authoritativePartnerDiscount = resolvedPublicPartnerCode
         ? calculatePublicPartnerCustomerDiscount({
             subtotal: input.subtotal,
-            priorProductDiscount: automaticGlobalDiscountAmount + authoritativePromoDiscount,
+            priorProductDiscount: quantity.amount + automaticGlobalDiscountAmount + authoritativePromoDiscount,
             percentage: publicPartnerDiscountEligible ? resolvedPublicPartnerCode.customerDiscountPercent : 0,
             isAuthenticatedWawiManualSale,
           })
         : authenticatedPartner
           ? calculateProgramDiscount(
               input.subtotal,
-              automaticGlobalDiscountAmount,
+              quantity.amount + automaticGlobalDiscountAmount,
               selfOrderDiscountPercent || 0,
             )
           : 0;
@@ -565,7 +638,7 @@ export async function createOrderFromTrustedInput(
         const authoritativeShopPricing = calculateAuthoritativeShopCheckoutPricing({
           subtotal: input.subtotal,
           shipping: input.shipping,
-          automaticGlobalDiscount: automaticGlobalDiscountAmount,
+          automaticGlobalDiscount: quantity.amount + automaticGlobalDiscountAmount,
           promotionDiscount: authoritativePromoDiscount,
           partnerDiscount: authoritativePartnerDiscount,
           partnerCreditUsed: authenticatedPartner ? roundMoney(input.creditUsed || 0) : 0,
@@ -621,6 +694,7 @@ export async function createOrderFromTrustedInput(
       // Partnerzuordnung (Code, Nummer, Rabatt oder Guthaben) schließt KWK dagegen aus.
       let kwkReferralAccount: { id: number; email: string; phone: string } | null = null;
       let kwkCreditAccountId: number | null = null;
+      let kwkSessionVersion: number | null = null;
       if (hasKwkRequest) {
         const normalizedDiscountCode = input.discountCode?.trim().toUpperCase() || "";
         let discountCodeIsPartnerCode = false;
@@ -642,11 +716,15 @@ export async function createOrderFromTrustedInput(
           throw new Error("KWK_NEUKUNDENRABATT_UND_GUTHABEN_NICHT_KOMBINIERBAR");
         }
         if (requestedKwkCredit > 0) {
-          const authenticatedKwk = ctx.operationsPreview?.kwkCreditAccountId?{kwkId:ctx.operationsPreview.kwkCreditAccountId}:input.kwkCreditToken ? verifyKwkToken(input.kwkCreditToken) : null;
+          // Trusted synthetic preview returns before every real write below.
+          const authenticatedKwk = ctx.operationsPreview?.kwkCreditAccountId
+            ? { kwkId: ctx.operationsPreview.kwkCreditAccountId, sessionVersion: null }
+            : input.kwkCreditToken ? await getAuthenticatedKwkFromToken(input.kwkCreditToken) : null;
           if (!authenticatedKwk) {
             throw new Error("KWK_GUTHABEN_AUTHENTIFIZIERUNG_ERFORDERLICH");
           }
           kwkCreditAccountId = authenticatedKwk.kwkId;
+          kwkSessionVersion = authenticatedKwk.sessionVersion;
         }
 
         let promoDefinition: PromoDefinition | null = null;
@@ -708,12 +786,7 @@ export async function createOrderFromTrustedInput(
           }
         }
 
-        const promoDiscount = calculatePromoDiscount({
-          subtotal: input.subtotal,
-          items: input.items,
-          promo: promoDefinition,
-          precedingProductDiscount: automaticGlobalDiscountAmount,
-        });
+        const promoDiscount = isRegularMainshopPricing ? mainshopPromoDiscount(input.items, remainingLineValues, promoDefinition) : calculatePromoDiscount({ subtotal: input.subtotal, items: input.items, promo: promoDefinition, precedingProductDiscount: automaticGlobalDiscountAmount });
         input.shipping = calculateAuthoritativeShipping({
           country: input.customer.country,
           items: checkoutShippingItems({ storeKey: input.storeKey, isAuthenticatedWawiManualSale, items: input.items }),
@@ -727,7 +800,7 @@ export async function createOrderFromTrustedInput(
         const authoritative = calculateAuthoritativeKwkOrder({
           subtotal: input.subtotal,
           shipping: input.shipping,
-          globalDiscount: automaticGlobalDiscountAmount,
+          globalDiscount: quantity.amount + automaticGlobalDiscountAmount,
           promoDiscount,
           kwkCreditUsed: requestedKwkCredit,
           applyReferralDiscount: Boolean(kwkReferralAccount),
@@ -770,7 +843,7 @@ export async function createOrderFromTrustedInput(
       // aus der aktiven DB-Konfiguration neu aufgebaut und ist damit in jeder
       // Bestellung sauber von Aktionscodes, Partnern und Guthaben getrennt.
       const submittedDiscountBreakdown = (input.discountBreakdown || [])
-        .filter((entry) => entry.amount > 0
+        .filter((entry) => !isRegularMainshopPricing && entry.amount > 0
           && shouldKeepClientDiscountBreakdownSource(entry.source, {
             hasResolvedPromotionCode: Boolean(resolvedPromoCode),
             hasResolvedPublicPartnerCode: Boolean(resolvedPublicPartnerCode),
@@ -781,8 +854,11 @@ export async function createOrderFromTrustedInput(
           amount: roundMoney(entry.amount),
           percentage: entry.percentage === undefined ? undefined : roundMoney(entry.percentage),
         }));
+      if (quantity.amount > 0) submittedDiscountBreakdown.push({ source: "quantity_discount", label: `Mengenrabatt (${quantity.percentage}%)`, amount: quantity.amount, percentage: quantity.percentage });
+      if (isRegularMainshopPricing && (input.kwkDiscount || 0) > 0) submittedDiscountBreakdown.push({ source: "kwk_referral", label: "KWK-Neukundenrabatt", amount: input.kwkDiscount!, percentage: 10 });
+      if (isRegularMainshopPricing && authoritativeKwkCredit > 0) submittedDiscountBreakdown.push({ source: "kwk_credit", label: "KWK-Guthaben eingelöst", amount: authoritativeKwkCredit, percentage: undefined });
       if (automaticGlobalDiscountAmount > 0 && activeGlobalDiscount) {
-        submittedDiscountBreakdown.unshift({
+        submittedDiscountBreakdown[isRegularMainshopPricing ? "push" : "unshift"]({
           source: "automatic_global_percent" as const,
           label: activeGlobalDiscount.labelDe,
           amount: automaticGlobalDiscountAmount,
@@ -790,12 +866,6 @@ export async function createOrderFromTrustedInput(
         });
       }
       if (resolvedPromoCode) {
-        const authoritativePromoDiscount = calculatePromoDiscount({
-          subtotal: input.subtotal,
-          items: input.items,
-          promo: resolvedPromoCode,
-          precedingProductDiscount: automaticGlobalDiscountAmount,
-        });
         if (authoritativePromoDiscount > 0) {
           submittedDiscountBreakdown.push({
             source: "promotion_code" as const,
@@ -856,6 +926,31 @@ export async function createOrderFromTrustedInput(
           : []),
       ];
 
+      const quoteValue = {
+        version: "369-server-v1" as const, items: input.items, subtotal: input.subtotal,
+        discount: input.discount, discountBreakdown, shipping: input.shipping,
+        shippingCountry: input.shippingCountry, total: input.total,
+        partnerDiscount: input.partnerDiscount || 0, creditUsed: input.creditUsed || 0,
+        kwkDiscount: input.kwkDiscount || 0, kwkCreditUsed: input.kwkCreditUsed || 0,
+      };
+      const optionalKwkPrincipal = isRegularMainshopPricing && input.kwkCreditToken && !kwkCreditAccountId ? await getAuthenticatedKwkFromToken(input.kwkCreditToken) : null;
+      // Safe server identities only. Hash input is never returned or logged; credentials are excluded.
+      const authoritativeQuote = { ...quoteValue, hash: quoteHash({
+        intent: originalBusinessIntent, quote: quoteValue,
+        principal: { userId: ctx.user?.id || null, partnerId: requestPartnerPrincipal?.id || null, kwkId: kwkCreditAccountId || optionalKwkPrincipal?.kwkId || null },
+        policies: { version: "369-server-v1", global: configuredGlobalDiscount, globalResolution: globalBenefitResolution, promo: resolvedPromoCode, promoRecord: resolvedPromoCodeRecord, publicPartner: resolvedPublicPartnerCode, selfProgram: authenticatedSelfOrderProgram, selfTerms: authenticatedSelfOrderTerms, kwkReferralId: kwkReferralAccount?.id || null, promotion2for3: mainshopPromotion2for3, catalogBundles: mainshopPolicySnapshot },
+      }) };
+      if (options.quoteOnly) {
+        if (!isMainshopCustomer || input.storeKey !== "369research" || ctx.operationsPreview || ctx.jarvyOrder) throw Error("CHECKOUT_QUOTE_SCOPE_INVALID");
+        if (await findActiveCheckoutBlock(input.customer)) throw Error(CUSTOMER_ORDER_BLOCKED_CODE);
+        if (kwkReferralAccount) await assertKwkNewCustomer(db, input.customer);
+        if (authoritativeKwkCredit > 0 && kwkCreditAccountId) await assertKwkCreditAvailable(db, kwkCreditAccountId, authoritativeKwkCredit);
+        return { quote: authoritativeQuote, addressValidation: await validateGermanAddress(input.customer) };
+      }
+      if (isMainshopCustomer && input.storeKey === "369research" && !ctx.operationsPreview && !ctx.jarvyOrder) {
+        if (!input.expectedQuoteHash) throw new TRPCError({ code: "CONFLICT", message: "CHECKOUT_QUOTE_REQUIRED" });
+        if (input.expectedQuoteHash !== authoritativeQuote.hash) throw new TRPCError({ code: "CONFLICT", message: "CHECKOUT_QUOTE_CHANGED" });
+      }
       // Bestandsoverride ist strikt an einen authentifizierten Admin gebunden.
       // Eine Shop-Bestellung besitzt keinen WaWi-Admin-Token und kann diese Prüfung nie umgehen.
       const stockOverrideRequested = input.stockOverride?.enabled === true;
@@ -873,10 +968,6 @@ export async function createOrderFromTrustedInput(
         if(await findActiveCheckoutBlock(input.customer))throw Error(CUSTOMER_ORDER_BLOCKED_CODE);
         if(kwkReferralAccount)await assertKwkNewCustomer(db,input.customer);
         if((input.kwkCreditUsed||0)>0&&kwkCreditAccountId)await assertKwkCreditAvailable(db,kwkCreditAccountId,input.kwkCreditUsed||0);
-        if(authenticatedPartner&&(input.creditUsed||0)>0){
-          if(!authenticatedSelfOrderProgram||!canRedeemShopCredit(authenticatedSelfOrderProgram))throw Error('PARTNER_GUTHABEN_PROGRAMM_AUSGESCHLOSSEN');
-          if(Number(authenticatedPartner.creditBalance||0)+0.001<(input.creditUsed||0))throw Error('PARTNER_GUTHABEN_NICHT_AUSREICHEND');
-        }
         let partnerCustomerCheck;
         if (resolvedPublicPartnerCode) {
           const pool = await getPool();
@@ -1022,6 +1113,7 @@ export async function createOrderFromTrustedInput(
 
       // ── Generate sequential canonical WaWi order ID from DB sequence ──
       let orderId = input.orderId || `369-${Date.now()}`;
+      const allocateCanonicalOrderId = async () => {
       try {
         const { sql } = await import('drizzle-orm');
         const seqResult = await db.execute(sql`SELECT next_order_id() as order_id`);
@@ -1035,10 +1127,13 @@ export async function createOrderFromTrustedInput(
         console.warn('[Orders] Failed to generate sequential order ID, using fallback:', err);
       }
 
+      };
+      if (!isRegularMainshopPricing) await allocateCanonicalOrderId();
       let externalOrderReference: string | null = null;
 
       // Ein bewusst übergangener Hinweis wird sofort mit der finalen Bestellnummer
       // festgeschrieben. Der Nachweis enthält keine änderbare UI-Aktion.
+      const persistConfirmedAddress = async () => {
       if (addressWarningNeedsConfirmation) {
         await persistAddressValidation({
           input: input.customer,
@@ -1050,6 +1145,8 @@ export async function createOrderFromTrustedInput(
         });
       }
 
+      };
+      if (!isRegularMainshopPricing) await persistConfirmedAddress();
       // ── Partner logic: validate attribution and financial authorization ──
       let partnerCode = input.partnerCode || null;
       let partnerNumber = input.partnerNumber || null;
@@ -1091,15 +1188,13 @@ export async function createOrderFromTrustedInput(
       }
 
       // Case 2: authenticated partner self-order. The session-owned partner is
-      // the only authority for the direct discount and its zero Creator payout.
+      // the only authority for both direct discount and commission snapshots.
       if (partnerNumber && authenticatedPartner) {
         await resolvePartnerForOrder({ id: authenticatedPartner.id, code: null }, "Eigenbestellung");
         partnerProgram = authenticatedSelfOrderProgram;
-        // For Creators, the code discount plus the normal payout becomes a single
-        // direct self-order discount. No later payout/ledger commission may arise.
-        partnerCommissionPercentSnapshot = partnerProgram?.key === "creator"
-          ? 0
-          : Number(authenticatedPartner.commissionPercent || 0);
+        // Actual payout Creator conversion earns zero; explicit shop-credit
+        // programs retain their separate commission, even with a Creator key.
+        partnerCommissionPercentSnapshot = authenticatedSelfOrderTerms?.commissionPercent ?? 0;
       }
 
       if (partnerProgram) {
@@ -1127,6 +1222,7 @@ export async function createOrderFromTrustedInput(
         ? await db.select().from(orders).where(eq(orders.checkoutIdempotencyKey, checkoutIdempotencyKey)).limit(1)
         : await db.select().from(orders).where(eq(orders.orderId, orderId)).limit(1);
       if (existingOrder.length > 0) {
+        if (normalCheckoutKey) throw Error('ORDER_REFERENCE_CONFLICT');
         console.warn(`[Orders] Duplicate request for order ${orderId} – completing only idempotent ledger steps`);
         if (parseFloat(existingOrder[0].creditUsed || "0") > 0) {
           await redeemPartnerCreditForOrder(orderId);
@@ -1138,8 +1234,37 @@ export async function createOrderFromTrustedInput(
       // form one transaction. A failure in this section cannot leave a partial P4P order.
       let customerId: number | null = null;
       let customerIntegrityTrigger: "order_customer_created" | "order_customer_changed" | null = null;
-      await db.transaction(async (tx) => {
+      const transactionResponse = await db.transaction(async (tx) => {
       const db = tx;
+      if (normalCheckoutKey) {
+        await lockCheckoutIntent(tx,normalCheckoutKey);
+        const receipt = await readCheckoutReceipt(tx,normalCheckoutKey,normalFingerprint!);
+        if (receipt) return receipt;
+      }
+      if (isRegularMainshopPricing) {
+        // Lock only published selected families and their tracked components, then verify the confirmed snapshot.
+        const scopedSkus = mainshopCatalogScope(originalMainshopItems, mainshopCatalog).map(a => a.sku);
+        await db.select({ id: articles.id }).from(articles).where(inArray(articles.sku, scopedSkus)).orderBy(articles.id).for('update');
+        const requestedBundleIds = [...new Set(originalMainshopItems.map(i => i.bundleId).filter((id): id is number => id !== undefined))];
+        if (requestedBundleIds.length) {
+          await db.select().from(bundles).where(inArray(bundles.id, requestedBundleIds)).orderBy(bundles.id).for('share');
+          await db.select().from(bundleItems).where(inArray(bundleItems.bundleId, requestedBundleIds)).orderBy(bundleItems.id).for('share');
+        }
+        const freshSettings = await db.select({ key: shopSettings.key, value: shopSettings.value }).from(shopSettings).where(inArray(shopSettings.key, ["global_automatic_discount", "promo_2for3_enabled", "promo_2for3_expires_at", "promo_2for3_mode", "promo_2for3_products"])).orderBy(shopSettings.key).for('share');
+        const freshCatalog = await db.select().from(articles);
+        const freshPolicy = buildMainshopPolicySnapshot(originalMainshopItems, freshCatalog, await db.select().from(bundles), await db.select().from(bundleItems));
+        if (quoteHash(freshPolicy) !== quoteHash(mainshopPolicySnapshot) || quoteHash(freshSettings) !== quoteHash(mainshopSettingsSnapshot)) throw new TRPCError({ code: "CONFLICT", message: "CHECKOUT_QUOTE_CHANGED" });
+        if (resolvedPromoCodeRecord) {
+          const [freshPromo] = await db.select().from(promoCodes).where(eq(promoCodes.id, resolvedPromoCodeRecord.id)).for('update');
+          const freshDefinition = freshPromo ? { discountType: freshPromo.discountType, percentage: Number(freshPromo.percentage || 0), fixedAmount: Number(freshPromo.fixedAmount || 0), description: freshPromo.description } : null;
+          if (!freshPromo || freshPromo.isActive !== 1 || isPromoCodeExpired(freshPromo) || (freshPromo.validFrom && freshPromo.validFrom > new Date()) || ((freshPromo.maxUses || 0) > 0 && freshPromo.currentUses >= (freshPromo.maxUses || 0)) || Number(freshPromo.minOrder || 0) !== resolvedPromoCodeRecord.minimumOrder || quoteHash(freshDefinition) !== quoteHash(resolvedPromoCode)) throw new TRPCError({ code: "CONFLICT", message: "CHECKOUT_QUOTE_CHANGED" });
+        }
+        if (configuredGlobalDiscount && Date.parse(configuredGlobalDiscount.expiresAt) <= Date.now()) throw new TRPCError({ code: "CONFLICT", message: "CHECKOUT_QUOTE_CHANGED" });
+        if (mainshopPromotion2for3.enabled && mainshopPromotion2for3.expiresAt && Date.parse(mainshopPromotion2for3.expiresAt) <= Date.now() && input.items.some(i => i.variant === "2für3 · servergeneriert")) throw new TRPCError({ code: "CONFLICT", message: "CHECKOUT_QUOTE_CHANGED" });
+        assertMainshopStock(input.items, freshCatalog);
+        await allocateCanonicalOrderId();
+        await persistConfirmedAddress();
+      }
       if(ctx.jarvyOrder?.mode==='execute') {
         const actor=await db.execute(sql`SELECT id FROM users WHERE id=${ctx.user!.id} AND role='admin' FOR SHARE`);
         if(!actor.rows.length)throw new Error('JARVY_ACTOR_REVOKED');
@@ -1162,6 +1287,7 @@ export async function createOrderFromTrustedInput(
       // row. A token cannot be replayed for a changed record or used to update
       // a different customer after a concurrent profile edit.
       if (transactionCustomerDataChangeResolution?.kind === "matched") {
+        await db.execute(sql`LOCK TABLE customers IN SHARE MODE`);
         await db.execute(sql`
           SELECT id FROM customers
           WHERE id = ${transactionCustomerDataChangeResolution.customer.id}
@@ -1171,7 +1297,7 @@ export async function createOrderFromTrustedInput(
           .where(eq(customers.id, transactionCustomerDataChangeResolution.customer.id))
           .limit(1);
         const freshResolution = currentCustomer
-          ? resolveCheckoutCustomerDataChange([currentCustomer], {
+          ? resolveCheckoutCustomerDataChange(await db.select().from(customers), {
             ...input.customer,
             dhlPostNumber: input.customer.dhlPostNumber || null,
           })
@@ -1192,6 +1318,14 @@ export async function createOrderFromTrustedInput(
       // entstehen und die vom Browser gesendete Account-ID wird nicht vertraut.
       if (authoritativeKwkCredit > 0 && kwkCreditAccountId) {
         await assertKwkCreditAvailable(db,kwkCreditAccountId,authoritativeKwkCredit,true);
+        // Re-run the exact shared auth query AFTER the owner lock: reset/logout
+        // may have revoked the session since preflight. Never trust client IDs.
+        const lockedAuth = input.kwkCreditToken
+          ? await getAuthenticatedKwkFromToken(input.kwkCreditToken, createPartnerCreditTransactionQueryClient(query => tx.execute(query)))
+          : null;
+        if (!lockedAuth || lockedAuth.kwkId !== kwkCreditAccountId || lockedAuth.sessionVersion !== kwkSessionVersion) {
+          throw new Error("KWK_GUTHABEN_SESSION_WIDERRUFEN");
+        }
       }
 
       // KWK gilt ausschließlich für die erste Bestellung eines echten Neukunden.
@@ -1216,11 +1350,19 @@ export async function createOrderFromTrustedInput(
             // ── Stock check: verify all peptide items are in stock before creating order ──
       if(ctx.jarvyOrder)await db.select({id:articles.id}).from(articles).where(inArray(articles.sku,input.items.map(i=>i.shopProductId!))).orderBy(articles.id).for('update');
       const allArticlesForCheck = await db.select().from(articles).where(eq(articles.isActive, 1));
+      if (!isAuthenticatedWawiManualSale) {
+        for (const item of input.items) {
+          const family = allArticlesForCheck.filter(a => a.sku.toLowerCase() === item.shopProductId?.toLowerCase() || a.shopProductId?.toLowerCase() === item.shopProductId?.toLowerCase());
+          const categories = family.flatMap(a => [a.category || '',...(Array.isArray(a.categories) ? a.categories : [])]);
+          // Existing vial families are stock-led, regardless of the client type.
+          if (categories.some(c => /^(peptide|peptide.*|vials)$/i.test(c.trim()))) item.type = 'peptide';
+        }
+      }
       const outOfStockItems: string[] = [];
       const ambiguousVariantItems: string[] = [];
 
       // Smart Substitution: prüfen ob Feature aktiv ist
-      const substitutionActive = input.storeKey !== "checkout-v2" && !ctx.jarvyOrder && await isSubstitutionEnabled();
+      const substitutionActive = !isRegularMainshopPricing && input.storeKey !== "checkout-v2" && !ctx.jarvyOrder && await isSubstitutionEnabled();
 
       // Helper: find articles matching a shop item by direct variant SKU or canonical
       // shop product ID plus dosage. Bundle items carry the selected variant SKU; it must
@@ -1235,6 +1377,7 @@ export async function createOrderFromTrustedInput(
       const dosageMatches = (article: typeof allArticlesForCheck[number], dosageNorm: string): boolean =>
         !dosageNorm || getArticleDosage(article) === dosageNorm;
       const findMatchingArticles = (item: { name: string; dosage?: string; shopProductId?: string }, allArts: typeof allArticlesForCheck) => {
+        if (isRegularMainshopPricing) return allArts.filter(a => a.isActive === 1 && a.sku.toLowerCase() === item.shopProductId?.toLowerCase());
         if(ctx.jarvyOrder) {
           const exact=allArts.filter(a=>a.sku===item.shopProductId);
           if(exact.length!==1||exact[0].name!==item.name)throw new Error('JARVY_ARTICLE_CHANGED');
@@ -1271,7 +1414,7 @@ export async function createOrderFromTrustedInput(
       // Checkout V2 merges paid and server-generated gift lines that consume the
       // same inventory variant. This closes the historical per-line stock gap.
       const stockRelevantItems = (() => {
-        if (input.storeKey !== "checkout-v2") return input.items;
+        if (input.storeKey !== "checkout-v2" && !isRegularMainshopPricing) return input.items;
         const grouped = new Map<string, { item: (typeof input.items)[number]; quantity: number; giftOnly: boolean }>();
         for (const item of input.items) {
           const key = `${(item.shopProductId || item.name).trim().toLowerCase()}::${(item.dosage || "").trim().toLowerCase()}`;
@@ -1293,9 +1436,9 @@ export async function createOrderFromTrustedInput(
         const item = stockRelevantItems[itemIdx];
         if (input.storeKey === "peps4pets" || isAuthenticatedWawiManualSale) {
           if (item.type !== 'peptide') continue;
-        } else if (item.type !== 'peptide' && item.isFreeGift !== true) continue;
+        } else if (!isRegularMainshopPricing && item.type !== 'peptide' && item.isFreeGift !== true) continue;
         const matchingArticles = findMatchingArticles(item, allArticlesForCheck);
-        if (matchingArticles.length === 0 && input.storeKey === "checkout-v2") {
+        if (matchingArticles.length === 0 && (input.storeKey === "checkout-v2" || isRegularMainshopPricing)) {
           outOfStockItems.push(`${item.name}${item.dosage ? ` (${item.dosage})` : ""} (nicht im aktiven Warenbestand gefunden)`);
           continue;
         }
@@ -1366,7 +1509,8 @@ export async function createOrderFromTrustedInput(
       // Der Checkout kann die Bestands- oder Produktfreigabe nicht über Namen manipulieren.
       const diyNasalItems = input.items.filter((item) => item.isNasalDiySet === true);
       for (const item of diyNasalItems) {
-        if (!isNasalDiySetEligible(item.shopProductId)) {
+        const canonicalFamily = isRegularMainshopPricing ? mainshopCatalog.find(a => a.sku === item.shopProductId)?.shopProductId : item.shopProductId;
+        if (!isNasalDiySetEligible(canonicalFamily)) {
           throw new Error(`DIY-Nasenspray-Set ist für ${item.name} nicht verfügbar`);
         }
       }
@@ -1383,20 +1527,36 @@ export async function createOrderFromTrustedInput(
         externalOrderReference = `P4P-${String(referenceNumber)}`;
       }
 
+      // Lock only the actual inventory plan, consistently by article id, including
+      // substitution and already catalogued BAC/DIY components. No whole-shop lock.
+      const plannedIds=new Set<number>();
+      stockRelevantItems.forEach((item,index) => {
+        if (isRegularMainshopPricing || item.type === 'peptide') {
+          const sub=substitutionMap.get(index);
+          if(sub?.possible)sub.components.forEach(c => plannedIds.add(c.articleId));
+          else findMatchingArticles(item,allArticlesForCheck).forEach(a => plannedIds.add(a.id));
+        }
+        if(item.isNasalSpray || item.isNasalDiySet) {
+          allArticlesForCheck.filter(a => a.shopProductId === 'bac-wasser' || NASAL_DIY_SET_COMPONENTS.some(c => c.inventoryTracked && a.shopProductId === c.articleShopProductId)).forEach(a => plannedIds.add(a.id));
+        }
+      });
+      const lockedInventory=plannedIds.size ? await db.select().from(articles).where(inArray(articles.id,[...plannedIds].sort((a,b)=>a-b))).orderBy(articles.id).for('update') : [];
+      lockedInventory.forEach(fresh => {const a=allArticlesForCheck.find(a=>a.id===fresh.id);if(a)a.stock=fresh.stock;});
+      if (isRegularMainshopPricing) assertMainshopStock(input.items, allArticlesForCheck);
       // ── Stock deduction: reduce stock for all ordered peptide items ──
       // Bei Substitution: Bestand der Ersatz-Varianten abziehen, nicht der bestellten Variante
       for (let itemIdx = 0; itemIdx < stockRelevantItems.length; itemIdx++) {
         const item = stockRelevantItems[itemIdx];
         if (input.storeKey === "peps4pets" || isAuthenticatedWawiManualSale) {
           if (item.type !== 'peptide') continue;
-        } else if (item.type !== 'peptide' && item.isFreeGift !== true) continue;
+        } else if (!isRegularMainshopPricing && item.type !== 'peptide' && item.isFreeGift !== true) continue;
 
         const sub = substitutionMap.get(itemIdx);
         if (sub && sub.possible) {
           // Substitution: Bestand der Ersatz-Varianten abziehen
           for (const comp of sub.components) {
             const article = allArticlesForCheck.find(a => a.id === comp.articleId);
-            if (!article) continue;
+            if (!article) throw Error('ORDER_STOCK_COMPONENT_MISSING');
             const newStock = (article.stock ?? 0) - comp.quantity;
             await applyStockMovement(db,{articleId:article.id,sku:article.sku,expectedStock:article.stock??0,change:-comp.quantity,type:'verkauf',reason:`Smart Substitution für Bestellung ${orderId}: ${sub.internalNote}`,orderId,actor:'system'});
 
@@ -1417,6 +1577,7 @@ export async function createOrderFromTrustedInput(
               console.log(`[Orders] Stock deducted: ${article.name} ${newStock+deduct} → ${newStock} (order ${orderId})`);
             }
           }
+          if (remainingToDeduct > 0 && !stockOverrideAuthorized) throw Error('ORDER_STOCK_DEMAND_NOT_COVERED');
         }
       }
 
@@ -1476,6 +1637,7 @@ export async function createOrderFromTrustedInput(
         creditUsed: creditUsed.toFixed(2),
         kwkCreditUsed: (input.kwkCreditUsed || 0).toFixed(2),
         kwkCreditRequested: (input.kwkCreditUsed || 0).toFixed(2),
+        kwkCreditOwnerId: authoritativeKwkCredit > 0 ? kwkCreditAccountId : null,
         qrCampaignId: qrAttribution?.campaignId ?? null,
         qrAttributionToken: qrAttribution?.attributionToken ?? null,
         qrCode: qrAttribution?.shortCode ?? null,
@@ -1515,26 +1677,10 @@ export async function createOrderFromTrustedInput(
       }
 
       if (authoritativeKwkCredit > 0 && kwkCreditAccountId) {
-        await db.execute(sql`
-          INSERT INTO kwk_ledger (kwk_id, order_id, amount, type, status, note, created_by)
-          VALUES (${kwkCreditAccountId}, ${orderId}, ${(-authoritativeKwkCredit).toFixed(2)},
-                  'redeemed', 'confirmed', ${`Guthaben eingelöst bei Bestellung ${orderId}`}, 'system')
-        `);
-        await db.execute(sql`
-          UPDATE kwk_accounts
-          SET credit_available = (
-                SELECT COALESCE(SUM(CASE
-                  WHEN type IN ('credit_released','redeemed','cancelled','refund','manual_correction')
-                   AND status='confirmed' THEN amount ELSE 0 END), 0)
-                FROM kwk_ledger WHERE kwk_id=${kwkCreditAccountId}
-              ),
-              credit_redeemed = (
-                SELECT COALESCE(SUM(ABS(amount)), 0) FROM kwk_ledger
-                WHERE kwk_id=${kwkCreditAccountId} AND type='redeemed' AND status='confirmed'
-              ),
-              updated_at=NOW()
-          WHERE id=${kwkCreditAccountId}
-        `);
+        await redeemCreditInTransaction(
+          kwkCreditAccountId, orderId, authoritativeKwkCredit,
+          createPartnerCreditTransactionQueryClient(query => tx.execute(query)),
+        );
       }
 
       // Insert order items. If a client omitted the selected dosage, recover it first
@@ -1591,7 +1737,7 @@ export async function createOrderFromTrustedInput(
           i.name.toLowerCase().includes('[nasenspray]') ||
           i.name.toLowerCase().includes('nasenspray')
         )
-      ).length;
+      ).reduce((sum,i) => sum+i.quantity,0);
       if (nasalSprayCount > 0) {
         const [bacWasser10ml] = await db.select().from(articles)
           .where(eq(articles.shopProductId, 'bac-wasser'))
@@ -1608,7 +1754,8 @@ export async function createOrderFromTrustedInput(
           quantity: nasalSprayCount,
           articleId: bacArticleId,
         });
-        // Bestand abziehen
+        // Full stock demand or rollback; never silently commit partial component demand.
+        if ((!bacWasser10ml || (bacWasser10ml.stock ?? 0) < nasalSprayCount) && !stockOverrideAuthorized) throw Error('ORDER_STOCK_DEMAND_NOT_COVERED');
         if (bacWasser10ml && (bacWasser10ml.stock ?? 0) > 0) {
           const deduct = Math.min(nasalSprayCount, bacWasser10ml.stock ?? 0);
           const newStock = (bacWasser10ml.stock ?? 0) - deduct;
@@ -1643,6 +1790,7 @@ export async function createOrderFromTrustedInput(
             isNasalDiySet: true,
           });
 
+          if (component.inventoryTracked && (!componentArticle || (componentArticle.stock ?? 0) < item.quantity) && !stockOverrideAuthorized) throw Error('ORDER_STOCK_DEMAND_NOT_COVERED');
           if (componentArticle && (componentArticle.stock ?? 0) > 0) {
             const deduct = Math.min(item.quantity, componentArticle.stock ?? 0);
             const newStock = (componentArticle.stock ?? 0) - deduct;
@@ -1708,6 +1856,7 @@ export async function createOrderFromTrustedInput(
 
       if (isAuthenticatedWawiManualSale && input.existingCustomerId) {
         const [found] = await db.select().from(customers).where(eq(customers.id, input.existingCustomerId));
+        if (!found) throw new Error("Kunde nicht gefunden");
         if (found) {
           existingCustomer = found;
           console.log(`[Customers] Using manually matched customer ID=${input.existingCustomerId} (${found.name})`);
@@ -1735,12 +1884,8 @@ export async function createOrderFromTrustedInput(
           ? transactionCustomerDataChangeResolution
           : null;
         if (confirmedPublicChange) {
-          await db.update(customers)
-            .set({
-              ...toCustomerUpdateFromSnapshot(confirmedPublicChange.submittedSnapshot),
-              communicationLanguage,
-            })
-            .where(eq(customers.id, existingCustomer.id));
+          // A guest confirmation proves only consent to this order snapshot.
+          // Knowledge of an email/phone is never profile-write authorization.
           await persistConfirmedCustomerDataChange(db, {
             customerId: existingCustomer.id,
             orderId,
@@ -1749,14 +1894,14 @@ export async function createOrderFromTrustedInput(
             submittedSnapshot: confirmedPublicChange.submittedSnapshot,
             changedFields: confirmedPublicChange.changedFields,
           });
-          customerIntegrityTrigger = "order_customer_changed";
-          console.log(`[CustomerDataChange] Confirmed checkout update for customer #${existingCustomer.customerNumber} in order ${orderId}`);
+          console.log(`[CustomerDataChange] Confirmed order snapshot recorded in order ${orderId}; profile unchanged`);
         } else if (isAuthenticatedWawiManualSale && !ctx.jarvyOrder) {
           // The established authenticated WaWi workflow remains unchanged. The
           // public shop path above is deliberately the only changed behavior.
+          const addressBoundOptionalFields = resolveAddressBoundOptionalFields(existingCustomer, input.customer);
           const manuallyChanged = getChangedCustomerDataFields(
             toCustomerDataSnapshot(existingCustomer),
-            toCustomerDataSnapshot({ ...input.customer, dhlPostNumber: input.customer.dhlPostNumber || null }),
+            toCustomerDataSnapshot({ ...input.customer, ...addressBoundOptionalFields }),
           ).length > 0;
           await db.update(customers).set({
             name: fullName,
@@ -1764,22 +1909,21 @@ export async function createOrderFromTrustedInput(
             lastName: input.customer.lastName,
             phone: customerPhone || existingCustomer.phone,
             email: customerEmail || existingCustomer.email,
-            company: input.customer.deliveryType === "packstation" ? existingCustomer.company : (input.customer.company || existingCustomer.company),
+            company: input.customer.deliveryType === "packstation" || input.customer.deliveryType === "postfiliale"
+              ? null : (addressBoundOptionalFields.company || null),
             street: input.customer.street,
             houseNumber: input.customer.houseNumber,
             zip: (input.customer.zip ?? "").trim(),
             city: input.customer.city,
             country: input.customer.country,
-            dhlPostNumber: input.customer.dhlPostNumber || existingCustomer.dhlPostNumber,
+            dhlPostNumber: addressBoundOptionalFields.dhlPostNumber || null,
             communicationLanguage,
             updatedAt: new Date(),
           }).where(eq(customers.id, existingCustomer.id));
           customerIntegrityTrigger = manuallyChanged ? "order_customer_changed" : null;
         } else {
-          // A shop customer can choose the communication language independently
-          // from address/contact changes. It is never inferred from the URL later.
-          await db.update(customers).set({ communicationLanguage, updatedAt: new Date() })
-            .where(eq(customers.id, existingCustomer.id));
+          // Guest language/address preferences belong to the new order only.
+          // Even a no-change checkout cannot alter an existing profile.
         }
         console.log(`[Customers] Linked order ${orderId} to existing customer #${existingCustomer.customerNumber} (${fullName})`);
       } else {
@@ -1826,25 +1970,42 @@ export async function createOrderFromTrustedInput(
       // Link order to customer
       if (customerId) {
         await db.update(orders).set({ customerId }).where(eq(orders.orderId, orderId));
-        if (customerIntegrityTrigger) {
-          try {
-            await queueCustomerDuplicateReview(customerId, customerIntegrityTrigger, "order.create");
-          } catch (error) {
-            console.warn("[Customer Integrity] Prüfung nach Bestell-Kundenabgleich fehlgeschlagen (nicht blockierend):", error);
-          }
-        }
+
       }
 
       // NOTE: Communication log is written AFTER successful email send (see below)
       // Do NOT log here to avoid false-positive idempotency check
 
-      });
-
-      // This must run after the persistence transaction commits. Derived CRM
-      // fields are recalculated only from directly assigned, active orders.
-      if (customerId) {
-        await refreshCustomerOrderMetrics(customerId);
+      // Final locked entitlement/balance check and redemption share the order,
+      // stock and customer transaction. Any rejection rolls all of them back.
+      if (creditUsed > 0) {
+        await redeemPartnerCreditInTransaction(
+          orderId,
+          createPartnerCreditTransactionQueryClient(query => tx.execute(query)),
+        );
       }
+
+      const response = {
+        success:true,orderId,paymentInstructions:null,externalOrderReference:externalOrderReference || undefined,
+        ...(isRegularMainshopPricing ? { quote: authoritativeQuote } : {}),
+        subtotal:input.subtotal,discount:input.discount,kwkDiscount:input.kwkDiscount || 0,
+        kwkCreditUsed:input.kwkCreditUsed || 0,shipping:input.shipping,total:input.total,
+      };
+      if (normalCheckoutKey) await persistCheckoutReceipt(tx,normalCheckoutKey,normalFingerprint!,response);
+      await queueOrderTask(tx,orderId,'customer_metrics');
+      if (customerIntegrityTrigger) await queueOrderTask(tx,orderId,'customer_duplicate_review');
+      await queueOrderTask(tx,orderId,'payment_instructions');
+      if (shouldSendConfirmation) await queueOrderTask(tx,orderId,'order_confirmation');
+      return response;
+      });
+      // Another concurrent attempt committed the receipt: no second communication.
+      if (transactionResponse.orderId !== orderId) return transactionResponse;
+      await runOrderTask(db,orderId,'customer_metrics',async () => {
+        if (customerId) await refreshCustomerOrderMetrics(customerId);
+      });
+      await runOrderTask(db,orderId,'customer_duplicate_review',async () => {
+        if (customerId && customerIntegrityTrigger) await queueCustomerDuplicateReview(customerId,customerIntegrityTrigger,'order.create');
+      });
 
       // Nach Kundenverknüpfung wird der bereits gesicherte Nachweis zusätzlich der
       // Kundenakte zugeordnet, ohne seinen Inhalt oder seine Bestätigung zu verändern.
@@ -1857,49 +2018,16 @@ export async function createOrderFromTrustedInput(
         }
       }
 
-      // Der Guthabeneinsatz wird erst nach vollständiger Bestellpersistenz gebucht.
-      // Der zentrale Service sperrt den Partnerdatensatz und verhindert Doppelbuchungen.
-      if (creditUsed > 0) {
-        await redeemPartnerCreditForOrder(orderId);
-      }
-
-      // Log new order
-      const { generateSKUFromName: _logSku } = await import("./articleCodes.js");
-      const itemList = input.items.map(i => `${i.quantity}x ${_logSku(i.name, i.dosage || i.variant)}`).join(", ");
-      console.log(`[Orders] New order: ${orderId} – ${input.total.toFixed(2)} EUR – ${input.customer.firstName} ${input.customer.lastName} – ${itemList}`);
-
-      // The shared CRM service sends, archives and protects the confirmation with
-      // a Resend idempotency key. Do not add a second order-router log entry here.
-      if (shouldSendConfirmation && !options.suppressExternalNotifications) {
-        try {
-          const emailSent = await sendOrderConfirmationEmail({
-            orderId: orderId,
-            communicationLanguage,
-            mainshopCustomerPresentation: isMainshopCustomer,
-            storeKey: input.storeKey,
-            externalOrderReference,
-            customer: input.customer,
-            items: input.items.map(i => ({ ...i, dosage: i.dosage || null, variant: i.variant || null })),
-            subtotal: input.subtotal,
-            discount: input.discount,
-            discountCode: input.discountCode,
-            shipping: input.shipping,
-            total: input.total,
-            paymentMethod: input.paymentMethod,
-          });
-          if (!emailSent) {
-            console.warn(`[Orders] Confirmation email was not accepted for ${orderId}; failure is stored in the CRM communication record`);
-          }
-        } catch (err) {
-          console.warn("[Orders] Failed to send confirmation email:", err);
-        }
-      } else {
-        if (options.suppressExternalNotifications) {
-          console.info(`[Orders] Checkout V2 Commerce-Staging: confirmation email suppressed for ${orderId}`);
-        } else {
-          console.info(`[Orders] Manual order confirmation intentionally not sent for ${orderId}`);
-        }
-      }
+      // Only the durable claim holder invokes the normal automatic shop confirmation.
+      if (shouldSendConfirmation && !options.suppressExternalNotifications) await runOrderTask(db,orderId,'order_confirmation',async () => {
+        const accepted = await sendOrderConfirmationEmail({
+          orderId,communicationLanguage,storeKey:input.storeKey,externalOrderReference,
+          customer:input.customer,items:input.items.map(i => ({...i,dosage:i.dosage || null,variant:i.variant || null})),
+          subtotal:input.subtotal,discount:input.discount,discountCode:input.discountCode,
+          shipping:input.shipping,total:input.total,paymentMethod:input.paymentMethod,
+        });
+        if (!accepted) throw Error('ORDER_CONFIRMATION_NOT_ACCEPTED');
+      },true);
 
       // Admin-Benachrichtigung deaktiviert:
       // Pakko erhält bereits eine BCC-Kopie der Bestellbestätigung (mit IBAN/Zahlungsinfos).
@@ -1909,20 +2037,8 @@ export async function createOrderFromTrustedInput(
       // Bank transfer is always returned after a successful order, including
       // optional direct/card payments. It is the reliable fallback if a payment
       // link or card transaction cannot be processed.
-      const paymentInstructions = await getReleasedBankTransferInstructions();
-
-      return {
-        success: true,
-        orderId,
-        paymentInstructions,
-        externalOrderReference: externalOrderReference || undefined,
-        subtotal: input.subtotal,
-        discount: input.discount,
-        kwkDiscount: input.kwkDiscount || 0,
-        kwkCreditUsed: input.kwkCreditUsed || 0,
-        shipping: input.shipping,
-        total: input.total,
-      };
+      const paymentInstructions = await runOrderTask(db,orderId,'payment_instructions',getReleasedBankTransferInstructions);
+      return { ...transactionResponse, paymentInstructions };
       } finally {
         if (checkoutLockClient) {
           try {
@@ -1937,6 +2053,7 @@ export async function createOrderFromTrustedInput(
 /** Only the Checkout V2 server route may persist an order with this source key. */
 export async function createOrderForCheckoutV2(input: CreateOrderInput, ctx: Context) {
   const parsed = createOrderSchema.parse({ ...input, storeKey: "checkout-v2" });
+  if (parsed.discountBreakdown?.some(e => e.source === "quantity_discount")) throw Error("LEGACY_QUANTITY_PRICING_NOT_APPROVED: V2 parity remains separate; use regular order.quote/create for 369.");
   // This adapter is reachable only behind the explicit Commerce-Staging gate.
   // The mode is server-owned and cannot be set by a checkout browser request.
   const suppressExternalNotifications = process.env.CHECKOUT_V2_TEST_MODE === "true";
@@ -1944,6 +2061,14 @@ export async function createOrderForCheckoutV2(input: CreateOrderInput, ctx: Con
 }
 
 export const orderRouter = router({
+  quote: publicProcedure.input(createOrderSchema).mutation(({ input, ctx }) => {
+    if (input.storeKey !== "369research" || input.orderSource !== "shop" || ctx.operationsPreview || ctx.jarvyOrder) throw Error("CHECKOUT_QUOTE_SCOPE_INVALID");
+    return withReadOnlyDatabase(async () => {
+      const result = await createOrderFromTrustedInput(input, ctx, { quoteOnly: true });
+      if (!("quote" in result) || !result.quote || !("hash" in result.quote) || !("addressValidation" in result)) throw Error("CHECKOUT_QUOTE_RESULT_INVALID");
+      return { quote: result.quote, addressValidation: result.addressValidation };
+    });
+  }),
   // PUBLIC: Historical checkout route. Checkout V2 uses the server-only adapter above.
   create: publicProcedure
     .input(createOrderSchema)
@@ -1955,8 +2080,7 @@ export const orderRouter = router({
     }),
 
   // ADMIN: List all orders with items
-
-  list: adminProcedure
+  list: scopedOperationsReadProcedure
     .input(z.object({
       status: z.enum(["alle", "offen", "bezahlt", "gepackt", "versendet", "zugestellt", "abgeholt", "storniert"]).optional(),
       search: z.string().optional(),
@@ -1993,11 +2117,17 @@ export const orderRouter = router({
       const communicationPhones = await getEffectiveCommunicationPhonesForOrders(
         filteredOrders.map((order) => ({ orderId: order.orderId, phone: order.phone })),
       );
+      const dhlLabelLifecycle = await getDhlLabelLifecycleForOrders(filteredOrders
+        .filter((order) => order.trackingCarrier === "DHL" || order.trackingCarrier === "DHL_PENDING")
+        .map((order) => order.orderId));
 
       // Combine. Die Datenbankabfrage schließt große Labeldaten vollständig aus.
       // Für vorhandene DHL-Labels wird nur eine kurze, geschützte Abrufroute geliefert.
+      const integrityIssues = await getOrderIntegrityIssues(db, orderIds);
       const result = filteredOrders.map(o => ({
         ...o,
+        integrityIssues: integrityIssues.get(o.orderId) ?? [],
+        dhlLabelLifecycle: dhlLabelLifecycle.get(o.orderId) ?? null,
         // Labels werden ausschließlich über eine kurze, geschützte Abrufroute
         // geliefert. Das gilt für DHL-PDFs und extern hochgeladene Labels gleich.
         shippingLabelUrl: o.hasShippingLabel
@@ -2029,7 +2159,7 @@ export const orderRouter = router({
     }),
 
   // ADMIN: Get single order with items
-  get: adminProcedure
+  get: scopedOperationsReadProcedure
     .input(z.object({ orderId: z.string() }))
     .query(async ({ input }) => {
       const db = await getDb();
@@ -2044,9 +2174,14 @@ export const orderRouter = router({
       const items = await db.select().from(orderItems).where(eq(orderItems.orderId, order.orderId));
       const personalPromoAssignments = await getPersonalPromoAssignmentsForOrderIds([order.orderId]);
       const communicationPhone = await getEffectiveCommunicationPhone(order.orderId);
+      const dhlLabelLifecycle = await getDhlLabelLifecycleForOrders(
+        order.trackingCarrier === "DHL" || order.trackingCarrier === "DHL_PENDING" ? [order.orderId] : [],
+      );
 
       return {
         ...order,
+        integrityIssues: (await getOrderIntegrityIssues(db, [order.orderId])).get(order.orderId) ?? [],
+        dhlLabelLifecycle: dhlLabelLifecycle.get(order.orderId) ?? null,
         subtotal: parseFloat(order.subtotal),
         discount: parseFloat(order.discount),
         discountBreakdown: order.discountBreakdown || [],
@@ -2063,6 +2198,27 @@ export const orderRouter = router({
         personalPromoCodes: personalPromoAssignments.get(order.orderId) ?? [],
         items: items.map(i => ({ ...i, price: parseFloat(i.price) })),
       };
+    }),
+
+  checkoutStatus: publicProcedure.input(z.object({
+    checkoutIdempotencyKey:z.string().regex(/^[a-f0-9]{64}$/),
+    payloadFingerprint:z.string().regex(/^[a-f0-9]{64}$/),
+  })).query(async ({input}) => {
+    const db=await getDb(); if(!db) throw Error('Database not available');
+    const [receipt]=resultRows(await db.execute(sql`SELECT order_id FROM priority_checkout_receipts WHERE intent_key=${input.checkoutIdempotencyKey} AND payload_fingerprint=${input.payloadFingerprint}`));
+    return receipt ? {state:'committed' as const,orderId:receipt.order_id} : {state:'not_found' as const};
+  }),
+  cancel: scopedOrderCleanupProcedure.input(z.object({orderId:z.string(),restock:z.boolean(),reason:z.string().trim().min(5).max(500)}))
+    .mutation(async ({input,ctx}) => {
+      const db=await getDb(); if(!db) throw Error('Database not available');
+      return db.transaction(async tx => {
+        const order=await lockOrder(tx,input.orderId);
+        const units=input.restock ? await returnOrderStock(tx,order,input.reason,ctx.user?.username || 'Admin') : 0;
+        await tx.update(orders).set({status:'storniert',cancelledAt:order.cancelledAt || new Date(),updatedAt:new Date()}).where(eq(orders.orderId,input.orderId));
+        const finances=await reverseOrderFinancesInTransaction(tx,input.orderId);
+        await recordOrderAction(tx,input.orderId,input.restock ? 'cancel_restock' : 'cancel_no_restock',input.reason,ctx.user?.username || 'Admin',units);
+        return {success:true,restoredStock:units,financialRepairRequired:finances.repairRequired};
+      });
     }),
 
   // ADMIN: Update order status
@@ -2090,31 +2246,37 @@ export const orderRouter = router({
       if (input.status === "storniert") updateData.cancelledAt = now;
       if (input.internalNote !== undefined) updateData.internalNote = input.internalNote;
 
-      await db.update(orders).set(updateData).where(eq(orders.orderId, input.orderId));
+      let financialRepairRequired = await db.transaction(async tx => {
+        const previous=await lockOrder(tx,input.orderId);
+        if (previous.status === 'storniert' && input.status !== 'storniert') {
+          const [obligation]=resultRows(await tx.execute(sql`SELECT EXISTS(SELECT 1 FROM priority_stock_returns WHERE order_id=${input.orderId}) OR EXISTS(SELECT 1 FROM priority_order_tasks WHERE order_id=${input.orderId} AND task='financial_cancellation') OR EXISTS(SELECT 1 FROM partner_transactions WHERE order_id=${input.orderId}) OR EXISTS(SELECT 1 FROM kwk_ledger WHERE order_id=${input.orderId}) AS blocked`));
+          if(obligation?.blocked) throw Error('ORDER_CANCELLED_REOPEN_REVIEW_REQUIRED');
+        }
+        // Preserve immutable event timestamps on repeated status confirmation.
+        if (previous.paidAt && input.status === 'bezahlt') updateData.paidAt=previous.paidAt;
+        if (previous.shippedAt && input.status === 'versendet') updateData.shippedAt=previous.shippedAt;
+        if (previous.cancelledAt && input.status === 'storniert') updateData.cancelledAt=previous.cancelledAt;
+        await tx.update(orders).set(updateData).where(eq(orders.orderId,input.orderId));
+        if (input.status === 'storniert') return (await reverseOrderFinancesInTransaction(tx,input.orderId)).repairRequired;
+        if (isFinanciallyPaidStatus(input.status)) await queueOrderTask(tx,input.orderId,`financial_status_${input.status}`);
+        return false;
+      });
 
       // Partnerprovision benötigt bestätigte Zahlung UND Versand; KWK bleibt zahlungsgebunden.
       // Jeder spätere Versand-/Zustellstatus wiederholt die idempotente Prüfung.
-      const [updatedFinancialOrder] = isFinanciallyPaidStatus(input.status)
-        ? await db.select({ paidAt: orders.paidAt }).from(orders).where(eq(orders.orderId, input.orderId)).limit(1)
-        : [null];
-      if (updatedFinancialOrder?.paidAt) {
-        const creditResult = await bookPaidPartnerCommission(input.orderId);
-        console.log(`[Partners] Prüfung Zahlung und Versand ${input.orderId}: ${creditResult.reason} (${creditResult.amount.toFixed(2)} €)`);
-        await releaseKwkCreditForPaidOrder(input.orderId);
-      }
-
-      if (input.status === "storniert") {
-        const reversal = await reversePartnerFinancialEntriesForCancelledOrder(input.orderId);
-        console.log(`[Partners] Stornogegenbuchung ${input.orderId}: ${reversal.reason} (${reversal.reversed.toFixed(2)} €)`);
-      }
-
-      // KWK-Guthaben entfernen bei Storno
-      if (input.status === "storniert") {
-        try {
-          const { cancelCredit } = await import('./kwkService.js');
-          await cancelCredit(input.orderId);
-        } catch (kwkErr) {
-          console.warn('[KWK] cancelCredit failed (non-fatal):', kwkErr);
+      if (isFinanciallyPaidStatus(input.status)) {
+        const completed = await runOrderTask(db,input.orderId,`financial_status_${input.status}`,async () => {
+          const [order] = await db.select({paidAt:orders.paidAt}).from(orders).where(eq(orders.orderId,input.orderId));
+          if (order?.paidAt) {
+            await bookPaidPartnerCommission(input.orderId);
+            await releaseKwkCreditForPaidOrder(input.orderId);
+          }
+          return true;
+        });
+        // Receipt remains truthful even if post-commit financial work fails.
+        if (completed !== true) {
+          const [task] = resultRows(await db.execute(sql`SELECT state FROM priority_order_tasks WHERE order_id=${input.orderId} AND task=${`financial_status_${input.status}`}`));
+          financialRepairRequired = task?.state !== 'done';
         }
       }
 
@@ -2141,6 +2303,7 @@ export const orderRouter = router({
 
       return {
         success: true,
+        financialRepairRequired,
         emailSent: emailResult.sent,
         emailError: emailResult.error,
       };
@@ -2414,59 +2577,15 @@ export const orderRouter = router({
       return { success: true, results };
     }),
 
-  // ADMIN: Delete order WITHOUT stock restoration (items vanish, no restock)
-  deleteNoRestock: adminProcedure
-    .input(z.object({ orderId: z.string() }))
-    .mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database not available");
-      const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1);
-      if (!order) throw new Error("Bestellung nicht gefunden");
-      await db.delete(orderItems).where(eq(orderItems.orderId, input.orderId));
-      await db.delete(orders).where(eq(orders.orderId, input.orderId));
-      console.log(`[Orders] Deleted order ${input.orderId} WITHOUT stock restoration`);
-      return { success: true };
-    }),
-
-  // ADMIN: Delete order with stock restoration
-  delete: adminProcedure
-    .input(z.object({ orderId: z.string() }))
-    .mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database not available");
-
-      return db.transaction(async tx=>{
-      const db=tx;
-      // Get the order
-      const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1).for("update");
-      if (!order) throw new Error("Bestellung nicht gefunden");
-
-      // Get order items
-      const items = await db.select().from(orderItems).where(eq(orderItems.orderId, input.orderId));
-
-      // Restore stock for each item that has an articleId
-      for (const item of items) {
-        if (item.articleId) {
-          const [article] = await db.select().from(articles).where(eq(articles.id, item.articleId)).limit(1);
-          if (article) {
-            const newStock = article.stock + item.quantity;
-            await applyStockMovement(db,{articleId:article.id,sku:article.sku,expectedStock:article.stock,change:item.quantity,type:'retoure',reason:`Bestellung ${input.orderId} gelöscht`,orderId:input.orderId,actor:ctx.user?.name||'Admin'});
-
-          }
-        }
-      }
-
-      // Delete order items first
-      await db.delete(orderItems).where(eq(orderItems.orderId, input.orderId));
-
-      // Delete the order
-      await db.delete(orders).where(eq(orders.orderId, input.orderId));
-
-      console.log(`[Orders] Deleted order ${input.orderId} with stock restoration`);
-
-      return { success: true, restoredItems: items.length };
-      });
-    }),
+  // Both deletion paths preserve audit and are atomic; financial/shipping links require review.
+  deleteNoRestock: scopedOrderCleanupProcedure.input(z.object({orderId:z.string()})).mutation(async ({input,ctx}) => {
+    const db=await getDb(); if(!db) throw Error('Database not available');
+    return deleteOrderAtomically(db,input.orderId,false,ctx.user?.username || 'Admin');
+  }),
+  delete: scopedOrderCleanupProcedure.input(z.object({orderId:z.string()})).mutation(async ({input,ctx}) => {
+    const db=await getDb(); if(!db) throw Error('Database not available');
+    return deleteOrderAtomically(db,input.orderId,true,ctx.user?.username || 'Admin');
+  }),
 
   // ADMIN: Add internal note
   addNote: adminProcedure
@@ -2490,11 +2609,12 @@ export const orderRouter = router({
     .input(z.object({
       orderId: z.string(),
       items: z.array(z.object({
+        id: z.number().int().positive().optional(),
         name: z.string(),
         dosage: z.string().optional(),
         variant: z.string().optional(),
         price: z.number(),
-        quantity: z.number(),
+        quantity: z.number().int().positive(),
         type: z.string(),
         articleId: z.number().optional(),
       })),
@@ -2509,9 +2629,41 @@ export const orderRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
-      // Check order exists
-      const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1);
-      if (!order) throw new Error("Bestellung nicht gefunden");
+      return db.transaction(async tx => {
+      const db=tx;
+      const order=await lockOrder(tx,input.orderId);
+      await assertOrderFinanciallyEditable(tx,order);
+      if (order.status === 'storniert') throw Error('ORDER_CANCELLED_EDIT_REVIEW_REQUIRED');
+      const oldItems=await tx.select().from(orderItems).where(eq(orderItems.orderId,input.orderId));
+      const history=await tx.select().from(stockHistory).where(eq(stockHistory.orderId,input.orderId));
+      if (input.items.some(i => i.id && !oldItems.some(old => old.id === i.id))) throw Error('ORDER_ITEM_ID_CONFLICT');
+      const returns=resultRows(await tx.execute(sql`SELECT original_movement_id,return_movement_id FROM priority_stock_returns WHERE order_id=${input.orderId}`));
+      const reversedOriginals=new Set(returns.map(r=>r.original_movement_id));
+      const returnMovements=new Set(returns.map(r=>r.return_movement_id));
+      const activeSales=history.filter(h=>h.quantityChange<0 && h.changeType==='verkauf' && !reversedOriginals.has(h.id));
+      const unresolvedHistory=history.filter(h=>!reversedOriginals.has(h.id) && !returnMovements.has(h.id));
+      const stockShape=(items:any[]) => JSON.stringify(items.map(i => ({name:i.name,dosage:i.dosage || '',variant:i.variant || '',type:i.type,quantity:i.quantity,articleId:i.articleId || null})).sort((a,b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
+      // Unproven historical positions are not reconstructed from names. Monetary-only
+      // unpaid/unlinked edits remain available; item changes require explicit article IDs.
+      if (stockShape(oldItems) !== stockShape(input.items)) {
+        if (oldItems.some(i => !i.articleId) || input.items.some(i => !i.articleId) || unresolvedHistory.some(h => h.changeType !== 'verkauf' || h.quantityChange >= 0)) throw Error('ORDER_ITEM_STOCK_EDIT_REVIEW_REQUIRED');
+        const demand=(items:any[]) => {const m=new Map<number,number>(); for(const i of items)m.set(i.articleId,(m.get(i.articleId) || 0)+i.quantity);return m;};
+        const before=demand(oldItems),after=demand(input.items);
+        const sold=new Map<number,number>(); for(const h of activeSales)sold.set(h.articleId,(sold.get(h.articleId) || 0)-h.quantityChange);
+        if ([...before].some(([id,qty]) => sold.get(id)!==qty) || [...sold].some(([id,qty]) => before.get(id)!==qty)) throw Error('ORDER_ITEM_STOCK_EDIT_REVIEW_REQUIRED');
+        const ids=[...new Set([...before.keys(),...after.keys()])].sort((a,b)=>a-b);
+        const catalog=ids.length ? await tx.select().from(articles).where(inArray(articles.id,ids)).orderBy(articles.id).for('update') : [];
+        // Reverse original movements, then record a replacement sale plan. A later
+        // cancellation sees only unreturned originals, even for removed positions.
+        await returnOrderStock(tx,order,'Explicit unpaid order item edit','Admin');
+        for(const id of ids) {
+          const [article]=await tx.select().from(articles).where(eq(articles.id,id));
+          if(!article)throw Error('ORDER_ITEM_STOCK_EDIT_REVIEW_REQUIRED');
+          const qty=after.get(id) || 0;
+          if(qty)await applyStockMovement(tx,{articleId:id,sku:article.sku,expectedStock:article.stock,change:-qty,type:'verkauf',reason:'Explicit unpaid order item edit',orderId:input.orderId,actor:'Admin'});
+        }
+      }
+      if (!Number.isFinite(input.total) || input.total < 0 || input.subtotal < 0 || input.discount < 0 || input.shipping < 0 || Math.abs(input.total-(input.subtotal-input.discount+input.shipping)) > 0.011 || Math.abs(input.subtotal-input.items.reduce((sum,i)=>sum+i.price*i.quantity,0)) > 0.011) throw Error('ORDER_EDIT_AMOUNTS_INVALID');
 
       // Update order financials
       await db.update(orders).set({
@@ -2538,12 +2690,16 @@ export const orderRouter = router({
           price: item.price.toFixed(2),
           quantity: item.quantity,
           articleId: item.articleId || null,
+          isNasalSpray: (oldItems.find(old => old.id === item.id) || oldItems.find(old => stockShape([old])===stockShape([item])))?.isNasalSpray || false,
+          isNasalDiySet: (oldItems.find(old => old.id === item.id) || oldItems.find(old => stockShape([old])===stockShape([item])))?.isNasalDiySet || false,
+          isPlugPlay: (oldItems.find(old => old.id === item.id) || oldItems.find(old => stockShape([old])===stockShape([item])))?.isPlugPlay || false,
         });
       }
 
       console.log(`[Orders] Updated order ${input.orderId} – ${input.total.toFixed(2)} EUR – ${input.items.length} items`);
 
       return { success: true };
+      });
     }),
 
   // Send packing notification to customer (WhatsApp link + Email)
@@ -2636,22 +2792,11 @@ export const orderRouter = router({
   reassignCustomer: adminProcedure
     .input(z.object({
       orderId: z.string(),
-      newCustomerId: z.number(),
+      newCustomerId: z.number().int().positive(),
     }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
-      const [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1);
-      if (!order) throw new Error("Bestellung nicht gefunden");
-      const oldCustomerId = order.customerId;
-      await db.update(orders)
-        .set({ customerId: input.newCustomerId, updatedAt: new Date() })
-        .where(eq(orders.orderId, input.orderId));
-      // Rebuild exact direct-order statistics for both affected profiles.
-      for (const cid of new Set([oldCustomerId, input.newCustomerId])) {
-        if (cid) await refreshCustomerOrderMetrics(cid);
-      }
-      console.log(`[Orders] Reassigned order ${input.orderId} from customer ${oldCustomerId} to ${input.newCustomerId}`);
-      return { success: true, oldCustomerId, newCustomerId: input.newCustomerId };
+      return reassignOrderCustomer(db, input, ctx.user.id);
     }),
 });

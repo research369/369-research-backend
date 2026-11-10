@@ -12,15 +12,18 @@ import { hasOtherPaidCodeOrder } from "./partnerCodeHistory.js";
  * - All transactions are tracked for transparent accounting
  */
 
+import { confirmAccountReset, enforceAuthRateLimit, invalidateAccountReset, issueAccountReset, sanitizePartnerNotes, setupAndSendPartnerCredentials, writeAccountPassword } from "./accountSecurityService.js";
 import { z } from "zod";
 import { eq, desc, and, inArray, isNull, or, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import bcrypt from "bcryptjs";
-import { router, publicProcedure, adminProcedure, middleware } from "./trpc.js";
+import { router, publicProcedure, adminProcedure, middleware, scopedOperationsReadProcedure, scopedPartnerCreditProcedure } from "./trpc.js";
+import { correctOperationsPartnerCredit, readOperationsPartnerAccount } from "./operationsPartnerCredit.js";
 import { getDb, getPool } from "./db.js";
 import { partners, partnerAddressRequests, partnerTransactions, orders, orderItems, partnerCodeUsage, customers } from "../drizzle/schema.js";
 import { ENV } from "./env.js";
 import { bookPaidPartnerCommission, redeemPartnerCreditForOrder } from "./partnerCreditService.js";
+import { updatePartnerTransactionStatus, recordPartnerPayout, previewHistoricalPartnerClaim, bookHistoricalPartnerClaim } from "./partnerFinancialAdminService.js";
 import { buildPartnerSettlementReport } from "./partnerSettlementReport.js";
 import type { Request } from "express";
 import {
@@ -31,7 +34,7 @@ import {
 } from "./partnerAuth.js";
 import {
   buildLegacyPartnerCodeTerms,
-  calculateSelfOrderDiscountPercent,
+  resolveSelfOrderTerms,
   canRedeemShopCredit,
   getPartnerProgram,
   isDiscountAllowedForProgram,
@@ -239,6 +242,7 @@ export const partnerRouter = router({
         creditBalance: parseFloat(p.creditBalance),
         codeTerms: await listPartnerCodeTerms(p.id),
         passwordHash: undefined, // Never expose
+        notes: sanitizePartnerNotes(p.notes),
       })));
     }),
 
@@ -264,6 +268,7 @@ export const partnerRouter = router({
         creditBalance: parseFloat(partner.creditBalance),
         codeTerms,
         passwordHash: undefined,
+        notes: sanitizePartnerNotes(partner.notes),
         hasPassword: !!partner.passwordHash,
         transactions: transactions.map(t => ({
           ...t,
@@ -356,7 +361,7 @@ export const partnerRouter = router({
       customerDiscountPercent: z.number().min(0).max(100),
       commissionType: z.enum(["einmalig", "dauerhaft"]).optional(),
       programKey: z.enum(["creator", "partner", "self_user"]).optional(),
-      password: z.string().min(6).optional(),
+      password: z.string().min(6).max(100).optional(),
       notes: z.string().optional(),
       street: z.string().optional(),
       houseNumber: z.string().optional(),
@@ -415,12 +420,12 @@ export const partnerRouter = router({
         programKey: input.programKey || (input.commissionType === "einmalig" ? "creator" : "partner"),
         creditBalance: "0.00",
         passwordHash,
-        notes: input.notes || null,
+        notes: sanitizePartnerNotes(input.notes || null),
       }).returning();
 
       const storedCodes = await replacePartnerCodes(newPartner.id, codeTerms);
       console.log(`[Partners] Created partner: ${input.name} (Code: ${activeCodes.join(", ")}, Nr: ${input.partnerNumber}, Program: ${newPartner.programKey})`);
-      return { ...newPartner, codeTerms: storedCodes, passwordHash: undefined };
+      return { ...newPartner, codeTerms: storedCodes, passwordHash: undefined, notes: sanitizePartnerNotes(newPartner.notes) };
     }),
 
   // Update partner
@@ -477,7 +482,7 @@ export const partnerRouter = router({
       if (input.commissionType !== undefined) updateData.commissionType = input.commissionType;
       if (input.programKey !== undefined) updateData.programKey = input.programKey;
       if (input.isActive !== undefined) updateData.isActive = input.isActive;
-      if (input.notes !== undefined) updateData.notes = input.notes || null;
+      if (input.notes !== undefined) updateData.notes = sanitizePartnerNotes(input.notes || null);
       if (input.street !== undefined) updateData.street = input.street || null;
       if (input.houseNumber !== undefined) updateData.houseNumber = input.houseNumber || null;
       if (input.zip !== undefined) updateData.zip = input.zip || null;
@@ -495,21 +500,31 @@ export const partnerRouter = router({
   setPassword: adminProcedure
     .input(z.object({
       partnerId: z.number(),
-      password: z.string().min(6),
+      password: z.string().min(6).max(100),
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
       const hash = await bcrypt.hash(input.password, 12);
-      await db.update(partners).set({
-        passwordHash: hash,
-        updatedAt: new Date(),
-      }).where(eq(partners.id, input.partnerId));
-
-      console.log(`[Partners] Password set for partner ID ${input.partnerId}`);
+      await writeAccountPassword("partner", input.partnerId, hash);
       return { success: true };
     }),
+
+  operationsAccount: scopedOperationsReadProcedure
+    .input(z.object({ partnerId: z.number().int().positive() }))
+    .query(({ input }) => readOperationsPartnerAccount(input.partnerId)),
+
+  operationsAdjustCredit: scopedPartnerCreditProcedure
+    .input(z.object({
+      partnerId: z.number().int().positive(),
+      amount: z.number().finite().min(-9999).max(9999),
+      expectedBalance: z.number().finite(),
+      description: z.string().trim().min(1).max(500),
+      requestId: z.string().uuid(),
+      allowNegativeBalance: z.boolean().default(false),
+    }))
+    .mutation(({ input, ctx }) => correctOperationsPartnerCredit(input, ctx.user!.username)),
 
   // Manual credit adjustment (admin)
   adjustCredit: adminProcedure
@@ -568,6 +583,18 @@ export const partnerRouter = router({
         client.release();
       }
     }),
+
+  previewHistoricalClaim: adminProcedure
+    .input(z.object({ partnerId: z.number().int().positive(), orderId: z.string().min(1) }))
+    .query(async ({ input }) => previewHistoricalPartnerClaim(input.partnerId,input.orderId)),
+  historicalClaim: adminProcedure
+    .input(z.object({
+      partnerId: z.number().int().positive(), orderId: z.string().min(1), amount: z.number().finite().positive(),
+      expectedBalance: z.number().finite(), requestId: z.string().uuid(), percent: z.literal(10),
+      mode: z.enum(["evidenced_ten_percent", "stored_order_amount"]), reason: z.string().trim().min(1).max(2000),
+      evidenceReference: z.string().trim().min(1).max(2000),
+    }))
+    .mutation(async ({ input, ctx }) => bookHistoricalPartnerClaim(input,ctx.user!.username)),
 
   // ─── ADMIN: REPORTING ──────────────────────────────────────────
 
@@ -649,6 +676,7 @@ export const partnerRouter = router({
           creditBalance: parseFloat(partner.creditBalance),
           codeTerms,
           passwordHash: undefined,
+          notes: sanitizePartnerNotes(partner.notes),
         },
         ...report,
       };
@@ -714,80 +742,7 @@ export const partnerRouter = router({
       status: z.enum(["normal", "storniert", "nicht_gewertet", "ausgeblendet"]),
       adminNote: z.string().optional(),
     }))
-    .mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database not available");
-
-      const [tx] = await db.select().from(partnerTransactions)
-        .where(eq(partnerTransactions.id, input.transactionId))
-        .limit(1);
-      if (!tx) throw new Error("Transaktion nicht gefunden");
-
-      const oldStatus = tx.status || "normal";
-      const txAmount = parseFloat(tx.amount);
-
-      // Get the partner
-      const [partner] = await db.select().from(partners)
-        .where(eq(partners.id, tx.partnerId))
-        .limit(1);
-      if (!partner) throw new Error("Partner nicht gefunden");
-
-      let currentBalance = parseFloat(partner.creditBalance);
-      let balanceAdjustment = 0;
-
-      // Calculate balance adjustment based on status change
-      // If going FROM normal TO storniert/nicht_gewertet: reverse the amount
-      // If going FROM storniert/nicht_gewertet TO normal: re-apply the amount
-      if (oldStatus === "normal" && (input.status === "storniert" || input.status === "nicht_gewertet")) {
-        // Reverse: subtract the positive provision or re-add the negative einloesung
-        balanceAdjustment = -txAmount;
-      } else if ((oldStatus === "storniert" || oldStatus === "nicht_gewertet") && input.status === "normal") {
-        // Restore: re-apply the original amount
-        balanceAdjustment = txAmount;
-      }
-      // ausgeblendet: same balance effect as storniert (reversed) but hidden from partner view
-      if (oldStatus === "normal" && input.status === "ausgeblendet") {
-        balanceAdjustment = -txAmount;
-      } else if (oldStatus === "ausgeblendet" && input.status === "normal") {
-        balanceAdjustment = txAmount;
-      }
-
-      // Apply balance adjustment
-      if (balanceAdjustment !== 0) {
-        currentBalance += balanceAdjustment;
-        await db.update(partners).set({
-          creditBalance: currentBalance.toFixed(2),
-          updatedAt: new Date(),
-        }).where(eq(partners.id, tx.partnerId));
-      }
-
-      // Update transaction status and admin note
-      await db.update(partnerTransactions).set({
-        status: input.status,
-        adminNote: input.adminNote || null,
-      }).where(eq(partnerTransactions.id, input.transactionId));
-
-      // If storniert: create a visible counter-booking for the partner's statement
-      if (input.status === "storniert" && txAmount > 0) {
-        await db.insert(partnerTransactions).values({
-          partnerId: tx.partnerId,
-          type: "korrektur",
-          amount: (-txAmount).toFixed(2),
-          balanceAfter: currentBalance.toFixed(2),
-          orderId: tx.orderId,
-          description: `Storno: ${input.adminNote || "Provision storniert"}`,
-          adminNote: `Storno von Transaktion #${tx.id}`,
-        });
-      }
-
-      console.log(`[Partners] Transaction #${tx.id} status changed: ${oldStatus} -> ${input.status} (Balance adj: ${balanceAdjustment.toFixed(2)})`);
-      return {
-        success: true,
-        balanceAdjustment,
-        newBalance: currentBalance,
-      };
-    }),
-
+    .mutation(async ({ input }) => updatePartnerTransactionStatus(input)),
   // Record a monetary payout for einmalig-partners (admin books cash payout)
   recordPayout: adminProcedure
     .input(z.object({
@@ -796,61 +751,7 @@ export const partnerRouter = router({
       description: z.string().optional(),
       requestId: z.string().uuid(),
     }))
-    .mutation(async ({ input }) => {
-      const pool = await getPool();
-      if (!pool) throw new Error("Database not available");
-      const client = await pool.connect();
-      try {
-        await client.query("BEGIN");
-        await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`partner-payout:${input.partnerId}`]);
-        const duplicate = await client.query<{ balance_after: string }>(
-          `SELECT balance_after FROM partner_transactions
-            WHERE partner_id = $1 AND type = 'auszahlung' AND admin_note = $2
-            LIMIT 1`,
-          [input.partnerId, `request:${input.requestId}`],
-        );
-        if (duplicate.rows.length > 0) {
-          await client.query("COMMIT");
-          return { success: true, newBalance: Number(duplicate.rows[0].balance_after), alreadyApplied: true };
-        }
-
-        const partnerResult = await client.query<{ name: string; credit_balance: string }>(
-          "SELECT name, credit_balance FROM partners WHERE id = $1 FOR UPDATE",
-          [input.partnerId],
-        );
-        if (partnerResult.rows.length !== 1) throw new Error("Partner nicht gefunden");
-        const partner = partnerResult.rows[0];
-        const currentBalance = Number(partner.credit_balance);
-        if (input.amount > currentBalance + 0.001) {
-          throw new Error(`Nicht genügend Guthaben für Auszahlung. Verfügbar: ${currentBalance.toFixed(2)} €`);
-        }
-        const newBalance = Math.round((currentBalance - input.amount + Number.EPSILON) * 100) / 100;
-        await client.query(
-          "UPDATE partners SET credit_balance = $1, updated_at = NOW() WHERE id = $2",
-          [newBalance.toFixed(2), input.partnerId],
-        );
-        await client.query(
-          `INSERT INTO partner_transactions
-            (partner_id, type, amount, balance_after, description, admin_note, status)
-           VALUES ($1, 'auszahlung', $2, $3, $4, $5, 'normal')`,
-          [
-            input.partnerId,
-            (-input.amount).toFixed(2),
-            newBalance.toFixed(2),
-            input.description || `Monetäre Auszahlung: ${input.amount.toFixed(2)} €`,
-            `request:${input.requestId}`,
-          ],
-        );
-        await client.query("COMMIT");
-        console.log(`[Partners] Payout recorded: ${input.amount.toFixed(2)} EUR for ${partner.name}`);
-        return { success: true, newBalance, alreadyApplied: false };
-      } catch (error) {
-        await client.query("ROLLBACK");
-        throw error;
-      } finally {
-        client.release();
-      }
-    }),
+    .mutation(async ({ input }) => recordPartnerPayout(input)),
 
   // ─── PUBLIC: Checkout integration ──────────────────────────────
 
@@ -953,10 +854,11 @@ export const partnerRouter = router({
   // Partner login via Partnernummer + Passwort (public)
   portalLogin: publicProcedure
     .input(z.object({
-      partnerNumber: z.string(),
-      password: z.string(),
+      partnerNumber: z.string().trim().min(1).max(50),
+      password: z.string().max(100),
     }))
     .mutation(async ({ input, ctx }) => {
+      await enforceAuthRateLimit(ctx.req, "partner.login", input.partnerNumber);
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
@@ -979,14 +881,14 @@ export const partnerRouter = router({
       // Update last login
       await db.update(partners).set({ lastLogin: new Date() }).where(eq(partners.id, partner.id));
 
-      const token = createPartnerToken(partner.id);
+      const token = createPartnerToken(partner.id, partner.sessionVersion);
       const program = await getPartnerProgram(partner.id);
       if (!program) throw new Error("Partnerprogramm nicht verfügbar");
-      const selfOrderDiscountPercent = calculateSelfOrderDiscountPercent(
+      const selfOrderDiscountPercent = resolveSelfOrderTerms(
         program,
         parseFloat(partner.customerDiscountPercent),
         parseFloat(partner.commissionPercent),
-      );
+      ).discountPercent;
 
       // Set cookie
       ctx.res.cookie(PARTNER_COOKIE_NAME, token, {
@@ -1054,13 +956,11 @@ export const partnerRouter = router({
         commissionType: partner.commissionType,
         programKey: partner.programKey,
         creditBalance: parseFloat(partner.creditBalance),
-        selfOrderDiscountPercent: program
-          ? calculateSelfOrderDiscountPercent(
-              program,
-              parseFloat(partner.customerDiscountPercent),
-              parseFloat(partner.commissionPercent),
-            )
-          : parseFloat(partner.customerDiscountPercent),
+        selfOrderDiscountPercent: resolveSelfOrderTerms(
+          program,
+          parseFloat(partner.customerDiscountPercent),
+          parseFloat(partner.commissionPercent),
+        ).discountPercent,
         address: {
           street: partner.street || "",
           houseNumber: partner.houseNumber || "",
@@ -1503,7 +1403,8 @@ export const partnerRouter = router({
       orderId: z.string(),
       description: z.string().optional(),
     }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
+      await enforceAuthRateLimit(ctx.req, "partner.login", input.partnerNumber);
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
@@ -1542,7 +1443,7 @@ export const partnerRouter = router({
   portalChangePassword: partnerProcedure
     .input(z.object({
       currentPassword: z.string(),
-      newPassword: z.string().min(6),
+      newPassword: z.string().min(6).max(100),
     }))
     .mutation(async ({ ctx, input }) => {
       const partner = (ctx as any).partner;
@@ -1559,10 +1460,10 @@ export const partnerRouter = router({
       }
 
       const hash = await bcrypt.hash(input.newPassword, 12);
-      await db.update(partners).set({
-        passwordHash: hash,
-        updatedAt: new Date(),
-      }).where(eq(partners.id, partner.id));
+      await writeAccountPassword("partner", partner.id, hash, {
+        passwordHash: partner.passwordHash, sessionVersion: partner.sessionVersion,
+      });
+      ctx.res.clearCookie(PARTNER_COOKIE_NAME, { httpOnly: true, secure: true, sameSite: "none", path: "/" });
 
       return { success: true };
     }),
@@ -1577,9 +1478,12 @@ export const partnerRouter = router({
    */
   portalRequestPasswordReset: publicProcedure
     .input(z.object({
-      partnerNumber: z.string().min(1),
+      partnerNumber: z.string().trim().min(1).max(50),
     }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
+      await enforceAuthRateLimit(ctx.req, "partner.reset.request", input.partnerNumber);
+      const apiKey = process.env.RESEND_API_KEY;
+      if (!apiKey) return { success: false, message: "E-Mail-Service nicht verfügbar. Bitte kontaktiere den Admin." };
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
@@ -1590,39 +1494,12 @@ export const partnerRouter = router({
       // Always return success to prevent enumeration attacks
       if (!partner || partner.isActive !== 1) {
         // Don't reveal whether partner exists
-        return { success: true, message: "Falls eine E-Mail-Adresse hinterlegt ist, wurde ein Reset-Code gesendet." };
+        return { success: true, message: "Falls ein aktives Konto mit E-Mail vorhanden ist, erhältst du einen Reset-Code. Bei erneuter Anfrage bitte 15 Minuten warten." };
       }
 
-      if (!partner.email) {
-        return { success: false, message: "Keine E-Mail-Adresse hinterlegt. Bitte kontaktiere den Admin." };
-      }
-
-      // Generate 6-digit code
-      const code = Math.floor(100000 + Math.random() * 900000).toString();
-      const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
-
-      // Store code in partner's notes field temporarily (prefixed so we can parse it)
-      // Format: __RESET_CODE__:CODE:EXPIRY_ISO
-      const resetData = `__RESET_CODE__:${code}:${expiresAt.toISOString()}`;
-      
-      // We store the reset code in a dedicated field approach: use SQL directly
-      const { getPool } = await import("./db.js");
-      const pool = await getPool();
-      if (!pool) throw new Error("Database not available");
-      
-      // Store reset code (we use a simple approach: store in a temporary column or use notes)
-      // Using raw SQL to set a reset_code and reset_code_expires field
-      await pool.query(
-        `UPDATE partners SET notes = COALESCE(REGEXP_REPLACE(notes, '__RESET_CODE__:[^|]*\\|?', ''), '') || $1 WHERE id = $2`,
-        [`|${resetData}`, partner.id]
-      );
-
-      // Send email via Resend
-      const apiKey = process.env.RESEND_API_KEY;
-      if (!apiKey) {
-        console.warn("[Partners] RESEND_API_KEY not configured, cannot send reset email");
-        return { success: false, message: "E-Mail-Service nicht verfuegbar. Bitte kontaktiere den Admin." };
-      }
+      if (!partner.email) return { success: true, message: "Falls ein aktives Konto mit E-Mail vorhanden ist, erhältst du einen Reset-Code. Bei erneuter Anfrage bitte 15 Minuten warten." };
+      const code = await issueAccountReset("partner", partner.id);
+      if (!code) return { success: true, message: "Falls ein aktives Konto mit E-Mail vorhanden ist, erhältst du einen Reset-Code. Bei erneuter Anfrage bitte 15 Minuten warten." };
 
       const emailHtml = `
 <!DOCTYPE html>
@@ -1651,6 +1528,7 @@ export const partnerRouter = router({
         const RESEND_API_URL = "https://api.resend.com/emails";
         const response = await fetch(RESEND_API_URL, {
           method: "POST",
+          signal: AbortSignal.timeout(15_000),
           headers: {
             Authorization: `Bearer ${apiKey}`,
             "Content-Type": "application/json",
@@ -1665,15 +1543,16 @@ export const partnerRouter = router({
         });
 
         if (!response.ok) {
-          const errorText = await response.text();
-          console.warn(`[Partners] Failed to send reset email (${response.status}):`, errorText);
+          await invalidateAccountReset("partner", partner.id, code);
+          console.warn(`[Partners] Reset email rejected (${response.status})`);
           return { success: false, message: "E-Mail konnte nicht gesendet werden. Bitte versuche es spaeter." };
         }
 
-        console.log(`[Partners] Password reset code sent to ${partner.email} for ${partner.partnerNumber}`);
-        return { success: true, message: "Falls eine E-Mail-Adresse hinterlegt ist, wurde ein Reset-Code gesendet." };
+
+        return { success: true, message: "Falls ein aktives Konto mit E-Mail vorhanden ist, erhältst du einen Reset-Code. Bei erneuter Anfrage bitte 15 Minuten warten." };
       } catch (error) {
-        console.warn("[Partners] Error sending reset email:", error);
+        await invalidateAccountReset("partner", partner.id, code);
+        console.warn("[Partners] Reset email status unknown");
         return { success: false, message: "E-Mail konnte nicht gesendet werden." };
       }
     }),
@@ -1683,11 +1562,12 @@ export const partnerRouter = router({
    */
   portalConfirmPasswordReset: publicProcedure
     .input(z.object({
-      partnerNumber: z.string().min(1),
-      code: z.string().length(6),
-      newPassword: z.string().min(6),
+      partnerNumber: z.string().trim().min(1).max(50),
+      code: z.string().regex(/^\d{6}$/),
+      newPassword: z.string().min(6).max(100),
     }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
+      await enforceAuthRateLimit(ctx.req, "partner.reset.confirm", input.partnerNumber);
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
@@ -1702,38 +1582,11 @@ export const partnerRouter = router({
         throw new Error("Ungueltiger Reset-Code");
       }
 
-      // Extract reset code from notes
-      const notes = partner.notes || "";
-      const resetMatch = notes.match(/__RESET_CODE__:(\d{6}):([^|]+)/);
-      
-      if (!resetMatch) {
-        throw new Error("Kein Reset-Code vorhanden. Bitte fordere einen neuen an.");
-      }
-
-      const storedCode = resetMatch[1];
-      const expiresAt = new Date(resetMatch[2]);
-
-      if (storedCode !== input.code) {
-        throw new Error("Ungueltiger Reset-Code");
-      }
-
-      if (new Date() > expiresAt) {
-        throw new Error("Reset-Code abgelaufen. Bitte fordere einen neuen an.");
-      }
-
-      // Code is valid – set new password
       const hash = await bcrypt.hash(input.newPassword, 12);
-      
-      // Remove reset code from notes and update password
-      const cleanedNotes = notes.replace(/\|?__RESET_CODE__:[^|]*/g, "").replace(/^\|/, "");
-      
-      await db.update(partners).set({
-        passwordHash: hash,
-        notes: cleanedNotes || null,
-        updatedAt: new Date(),
-      }).where(eq(partners.id, partner.id));
-
-      console.log(`[Partners] Password reset confirmed for ${partner.partnerNumber}`);
+      if (!await confirmAccountReset("partner", partner.id, input.code, hash)) {
+        throw new Error("Ungültiger oder abgelaufener Reset-Code. Bitte nach der Wartezeit einen neuen anfordern.");
+      }
+      ctx.res.clearCookie(PARTNER_COOKIE_NAME, { httpOnly: true, secure: true, sameSite: "none", path: "/" });
       return { success: true, message: "Passwort erfolgreich zurueckgesetzt. Du kannst dich jetzt einloggen." };
     }),
 
@@ -1742,7 +1595,7 @@ export const partnerRouter = router({
   sendCredentials: adminProcedure
     .input(z.object({
       partnerId: z.number(),
-      password: z.string().min(6, "Passwort muss mindestens 6 Zeichen haben"),
+      password: z.string().min(6, "Passwort muss mindestens 6 Zeichen haben").max(100),
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
@@ -1753,12 +1606,9 @@ export const partnerRouter = router({
       if (!partner) throw new Error("Partner nicht gefunden");
       if (!partner.email) throw new Error("Partner hat keine E-Mail-Adresse hinterlegt");
 
-      // Set the password first
+      const apiKey = process.env.RESEND_API_KEY;
+      if (!apiKey) throw new Error("E-Mail-Service nicht konfiguriert; Passwort nicht geändert");
       const hash = await bcrypt.hash(input.password, 12);
-      await db.update(partners).set({
-        passwordHash: hash,
-        updatedAt: new Date(),
-      }).where(eq(partners.id, input.partnerId));
 
       // Build the credentials email
       const html = `
@@ -1777,7 +1627,7 @@ export const partnerRouter = router({
     <!-- Content -->
     <div style="background:#111827;padding:32px;border:1px solid #1e3a5f;border-top:none;">
       <h2 style="font-size:20px;color:#ffffff;margin:0 0 8px;">Willkommen im Partner-Programm!</h2>
-      <p style="font-size:14px;color:#94a3b8;margin:0 0 24px;line-height:1.6;">Hallo ${partner.name},<br><br>hier sind deine Zugangsdaten f\u00fcr das 369 Research Partner Portal:</p>
+      <p style="font-size:14px;color:#94a3b8;margin:0 0 24px;line-height:1.6;">Hallo ${escapeHtml(partner.name)},<br><br>hier sind deine Zugangsdaten f\u00fcr das 369 Research Partner Portal:</p>
 
       <!-- Credentials Box -->
       <div style="background:#0a0f1a;border:1px solid #1e3a5f;border-radius:12px;padding:24px;margin-bottom:24px;">
@@ -1788,11 +1638,11 @@ export const partnerRouter = router({
           </tr>
           <tr>
             <td style="padding:12px 0;color:#64748b;font-size:13px;text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid #1c2433;">Partnernummer</td>
-            <td style="padding:12px 0;text-align:right;color:#3b82f6;font-weight:700;font-family:monospace;font-size:16px;border-bottom:1px solid #1c2433;">${partner.partnerNumber}</td>
+            <td style="padding:12px 0;text-align:right;color:#3b82f6;font-weight:700;font-family:monospace;font-size:16px;border-bottom:1px solid #1c2433;">${escapeHtml(partner.partnerNumber)}</td>
           </tr>
           <tr>
             <td style="padding:12px 0;color:#64748b;font-size:13px;text-transform:uppercase;letter-spacing:1px;">Passwort</td>
-            <td style="padding:12px 0;text-align:right;color:#ffffff;font-weight:700;font-family:monospace;font-size:16px;">${input.password}</td>
+            <td style="padding:12px 0;text-align:right;color:#ffffff;font-weight:700;font-family:monospace;font-size:16px;">${escapeHtml(input.password)}</td>
           </tr>
         </table>
       </div>
@@ -1803,7 +1653,7 @@ export const partnerRouter = router({
         <table style="width:100%;border-collapse:collapse;">
           <tr>
             <td style="padding:8px 0;color:#94a3b8;font-size:14px;">Dein Rabattcode</td>
-            <td style="padding:8px 0;text-align:right;color:#10b981;font-weight:700;font-family:monospace;font-size:16px;">${partner.code}</td>
+            <td style="padding:8px 0;text-align:right;color:#10b981;font-weight:700;font-family:monospace;font-size:16px;">${escapeHtml(partner.code)}</td>
           </tr>
           <tr>
             <td style="padding:8px 0;color:#94a3b8;font-size:14px;">Kundenrabatt</td>
@@ -1834,34 +1684,15 @@ export const partnerRouter = router({
 </body>
 </html>`;
 
-      // Send email via Resend
-      const apiKey = process.env.RESEND_API_KEY;
-      if (!apiKey) throw new Error("E-Mail-Service nicht konfiguriert (RESEND_API_KEY fehlt)");
-
-      const response = await fetch("https://api.resend.com/emails", {
+      return setupAndSendPartnerCredentials(input.partnerId, hash, () => fetch("https://api.resend.com/emails", {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-        },
+        signal: AbortSignal.timeout(15_000),
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
         body: JSON.stringify({
-          from: PARTNER_SUPPORT_CONTACT.from,
-          reply_to: PARTNER_SUPPORT_CONTACT.replyTo,
-          to: [partner.email],
-          subject: `Deine Zugangsdaten – 369 Research Partner Portal`,
-          html,
+          from: PARTNER_SUPPORT_CONTACT.from, reply_to: PARTNER_SUPPORT_CONTACT.replyTo,
+          to: [partner.email], subject: "Deine Zugangsdaten – 369 Research Partner Portal", html,
         }),
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.warn(`[Partners] Failed to send credentials email (${response.status}):`, errorText);
-        throw new Error(`E-Mail konnte nicht gesendet werden: ${response.status}`);
-      }
-
-      const result = await response.json();
-      console.log(`[Partners] Credentials email sent to ${partner.email}, id: ${result.id}`);
-      return { success: true, message: `Zugangsdaten an ${partner.email} gesendet` };
+      }));
     }),
 
   // ─── ADMIN: Reconciliation gate ────────────────────────────────────────────

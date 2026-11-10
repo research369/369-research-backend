@@ -1,4 +1,7 @@
+import {ensurePriorityOrderIntegritySchema,isPriorityOrderIntegrityReady} from './priorityOrderIntegrity.js';
+import { ensureAccountSecuritySchema, isAccountSecuritySchemaReady } from "./accountSecuritySchema.js";
 import {customerCreationActivity} from './customerCreationMaintenance.js';
+import { allHardeningSchemasReady, releaseHardeningReadiness } from './releaseHardeningReadiness.js';
 // Zeitzone auf Deutschland setzen (muss vor allen anderen Imports stehen)
 process.env.TZ = "Europe/Berlin";
 
@@ -8,6 +11,7 @@ process.env.TZ = "Europe/Berlin";
  */
 import express from "express";
 import cors from "cors";
+import { allowedBrowserOrigins, guardCookieOrigin, retiredMailRelay } from "./requestSecurity.js";
 import rateLimit from "express-rate-limit";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { ENV } from "./env.js";
@@ -35,6 +39,7 @@ import { ensureDiscountProvenanceSchema } from "./discountProvenanceSchema.js";
 import { ensureShipmentLabelOverrideConfig } from "./shipmentLabelOverrideConfig.js";
 import { ensurePartnerAddressRequestSchema } from "./partnerAddressRequestSchema.js";
 import { ensurePartnerProgramSchema } from "./partnerProgramSchema.js";
+import { ensurePartnerFinancialSchema, isPartnerFinancialSchemaReady } from "./partnerFinancialSchema.js";
 import { ensureFollowUpTermsSchema } from "./followUpTermsSchema.js";
 import { qrRedirectRouter } from "./qrRedirectRouter.js";
 import { ensurePeps4petsCheckoutSchema, isPeps4petsCheckoutSchemaReady } from "./peps4petsCheckoutSchema.js";
@@ -46,9 +51,11 @@ import { ensureCustomerDataChangeSchema } from "./customerDataChangeService.js";
 import { ensureCommunicationLanguageSchema } from "./communicationLanguageService.js";
 import { ensureWawiPerformanceIndexes } from "./wawiPerformanceSchema.js";
 import { ensureSwissCustomsSchema } from "./swissCustomsSchema.js";
+import { ensureDhlRelabelSchema, isDhlRelabelSchemaReady } from "./dhlRelabelSchema.js";
 import { ensureOrderCommunicationPhoneSchema } from "./orderCommunicationPhoneService.js";
 import { ensureKwkDemoSchema } from "./kwkDemoService.js";
 import { ensureAdminChangeLogSchema } from "./adminChangeLogService.js";
+import { ensurePermissionsSchema, isPermissionsSchemaReady } from "./permissionsSchema.js";
 
 import {jarvyOrderRouter} from "./jarvyOrderRouter.js";
 import { jarvyReadRouter } from "./jarvyReadRouter.js";
@@ -57,6 +64,9 @@ import {pepgptOffersRouter} from './pepgptOffersRouter.js';
 import {operationsRouter} from './operationsRouter.js';
 
 const app = express();
+// Trust only private reverse-proxy peers, not client-supplied first XFF values.
+// Express walks the chain from the socket and stops at the first untrusted peer.
+app.set("trust proxy", "loopback, linklocal, uniquelocal");
 app.get('/_internal/customer-creation-activity',(req,res)=>{
  if(!['127.0.0.1','::1','::ffff:127.0.0.1'].includes(req.socket.remoteAddress||'')){res.sendStatus(404);return;}
  res.set('Cache-Control','no-store').json(customerCreationActivity());
@@ -69,20 +79,15 @@ let startupState: "initializing" | "ready" | "failed" = "initializing";
 const startupStartedAt = Date.now();
 
 // CORS – allow frontend domains
-const allowedOrigins = [
-  ENV.frontendUrl,
-  "https://369research.eu",
-  "https://www.369research.eu",
-  "http://localhost:3000",
-  "http://localhost:5173",
-].filter(Boolean);
+const allowedOrigins = allowedBrowserOrigins();
 
 app.use(cors({
-  origin: true, // Allow all origins (auth is via JWT Bearer token, not cookies)
+  origin: (origin, callback) => callback(null, !!origin && allowedOrigins.has(origin)),
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
 }));
+app.use(guardCookieOrigin);
 
 // Resend signs the original raw request body. The webhook must therefore be mounted
 // before the global JSON parser, otherwise its signature could not be verified safely.
@@ -120,6 +125,8 @@ app.get("/health/ready", async (_req, res) => {
     });
   }
 
+  const hardening = releaseHardeningReadiness();
+  if (!allHardeningSchemasReady(hardening)) return res.status(503).json({status:"unavailable", ...hardening});
   const database = await checkDatabaseReadiness();
   if (!database.ready) {
     return res.status(503).json({
@@ -132,6 +139,11 @@ app.get("/health/ready", async (_req, res) => {
   return res.json({
     status: "ok",
     database: "ready",
+    dhlLabelLedgerReady: isDhlRelabelSchemaReady(),
+    orderIntegrityReady: isPriorityOrderIntegrityReady(),
+    permissionsSchemaReady: isPermissionsSchemaReady(),
+    accountSecurityReady: isAccountSecuritySchemaReady(),
+    partnerFinancialLedgerReady: isPartnerFinancialSchemaReady(),
     timestamp: new Date().toISOString(),
   });
 });
@@ -139,7 +151,7 @@ app.get("/health/ready", async (_req, res) => {
 // All business routes remain unavailable until initialization completes. The
 // liveness and readiness routes above deliberately stay reachable for Railway.
 app.use((_req, res, next) => {
-  if (startupState === "ready") {
+  if (startupState === "ready" && allHardeningSchemasReady(releaseHardeningReadiness())) {
     next();
     return;
   }
@@ -178,37 +190,17 @@ app.post("/api/backup/trigger", async (req: any, res: any) => {
 
 
 // ── Rate Limiting ──────────────────────────────────────────────────
-// Helper: detect Railway-internal / server-side requests (skip rate limiting)
-const isInternalRequest = (req: any): boolean => {
-  const forwarded = (req.headers["x-forwarded-for"] as string) || "";
-  const ip = req.ip || "";
-  const userAgent = (req.headers["user-agent"] as string) || "";
-  // Skip for localhost, Railway internal network (10.x, 172.x) and Python requests (server-side scripts)
-  return (
-    ip.startsWith("127.") ||
-    ip.startsWith("::1") ||
-    ip.startsWith("10.") ||
-    ip.startsWith("172.") ||
-    forwarded.startsWith("10.") ||
-    forwarded.startsWith("172.") ||
-    userAgent.includes("python-requests") ||
-    userAgent.includes("node-fetch") ||
-    req.headers["x-internal-token"] === ENV.jwtSecret
-  );
-};
-
-// Strict limiter for login: max 10 attempts per 15 minutes per IP (external only)
+// Strict limiter for login: max 10 attempts per 15 minutes per trusted socket/IP (no bypass)
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: isInternalRequest,
   message: {
     error: "Zu viele Anmeldeversuche. Bitte versuchen Sie es in 15 Minuten erneut.",
   },
   keyGenerator: (req) => {
-    return (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.ip || "unknown";
+    return req.ip || req.socket.remoteAddress || "unknown";
   },
 });
 
@@ -218,12 +210,11 @@ const apiLimiter = rateLimit({
   max: 300,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: isInternalRequest,
   message: {
     error: "Zu viele Anfragen. Bitte versuchen Sie es später erneut.",
   },
   keyGenerator: (req) => {
-    return (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.ip || "unknown";
+    return req.ip || req.socket.remoteAddress || "unknown";
   },
 });
 
@@ -262,20 +253,7 @@ app.use(checkoutErrorRouter);
 
 
 // ─── TEST: Versandmail senden (nur für interne Tests) ────────────────────────
-app.post("/api/test-send-email", async (req: any, res: any) => {
-  const { to, subject, html } = req.body || {};
-  if (!to || !html) { res.status(400).json({ error: "to und html erforderlich" }); return; }
-  const { ENV } = await import("./env.js");
-  const apiKey = ENV.resendApiKey;
-  if (!apiKey) { res.status(500).json({ error: "RESEND_API_KEY nicht konfiguriert" }); return; }
-  const resp = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ from: "noreply@coreversand.de", reply_to: "support@369research.eu", to: [to], subject: subject || "Test", html })
-  });
-  const result = await resp.json();
-  res.json({ status: resp.status, result });
-});
+app.post("/api/test-send-email", retiredMailRelay);
 
 // ─── Packing-Foto Router (additiv, Pflichtfoto beim Packvorgang) ──────────
 app.use(packingPhotoRouter);
@@ -385,6 +363,13 @@ async function start() {
     console.log("[Server] Swiss customs declaration schema ready");
   } catch (err) {
     console.warn("[Server] Swiss customs declaration schema migration failed:", err);
+  }
+
+  // Durable DHL generations/operations: unavailable ledger fails label mutations closed.
+  try {
+    await ensureDhlRelabelSchema();
+  } catch (err) {
+    console.warn("[Server] DHL label-generation schema migration failed:", err);
   }
 
   // Persönliche Aktionscodes sind separat und nur bei einer bewussten
@@ -1326,7 +1311,18 @@ async function start() {
   } catch (err) {
     console.warn('[Server] KWK-Migration fehlgeschlagen (non-fatal):', err);
   }
+  // Required additive schema, no stats/backfill autorun. Failure keeps ready closed.
+  await ensurePermissionsSchema();
 
+  // Login/reset schema is required; never mark routes ready after a failed
+  // migration. KWK base tables have been created by the existing bootstrap.
+  await ensureAccountSecuritySchema();
+  // Priority references stock_history; base startup is now complete.
+  await ensurePriorityOrderIntegritySchema();
+
+  // Financial invariants are mandatory and run AFTER the existing KWK base tables.
+  // Duplicates fail readiness visibly; never repair historical balances automatically.
+  await ensurePartnerFinancialSchema();
 }
 
 const server = app.listen(port, "0.0.0.0", () => {

@@ -94,7 +94,8 @@ export function reconcileFreeBacWaterForShopOrder(
     const isBundleVial = item.variant?.startsWith("Bundle:") === true;
     // New 369 rule requires a real catalogue match and category, never a client type alone.
     if (is369Customer && (!article || articleCategories(article).length === 0)) return sum;
-    return isVialForm(item, article) && (is369Customer || isBundleVial || Number(item.price) >= FREE_BAC_WATER_THRESHOLD)
+    const canonicalItem = is369Customer ? { ...item, type: articleCategories(article).some(c => NON_VIAL_CATEGORIES.has(c) && c !== "Forscher-Bundles") ? "accessory" : "peptide" } : item;
+    return isVialForm(canonicalItem, article) && (is369Customer || isBundleVial || Number(item.price) >= FREE_BAC_WATER_THRESHOLD)
       ? sum + Math.max(0, Number(item.quantity) || 0)
       : sum;
   }, 0);

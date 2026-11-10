@@ -3,7 +3,6 @@ import test from "node:test";
 import type { inferRouterInputs, inferRouterOutputs } from "@trpc/server";
 import { createOrderSchema, orderRouter } from "./orderRouter.js";
 import { customerDataChangeRouter } from "./customerDataChangeRouter.js";
-import { assertLegacyQuantityPricingReady } from "./mainshopCheckoutIntegration.js";
 
 type Inputs = inferRouterInputs<typeof orderRouter>;
 type Outputs = inferRouterOutputs<typeof orderRouter>;
@@ -25,12 +24,12 @@ const basePayload = {
   discountBreakdown: [{ source: "quantity_discount", label: "Menge", amount: 0.4, percentage: 10 }],
 };
 
-test("actual Legacy schema accepts 369 quantity source but pure guard blocks unapproved prices", () => {
+test("actual Legacy schema accepts 369 quantity source; regular handler owns its amount", () => {
   assert.ok(inferenceAssertions.every(Boolean));
   const parsed = createOrderSchema.parse(basePayload);
   assert.equal(parsed.discountBreakdown?.[0]?.source, "quantity_discount");
   assert.equal(parsed.storeKey, "369research");
-  assert.throws(() => assertLegacyQuantityPricingReady(parsed), /LEGACY_QUANTITY_PRICING_NOT_APPROVED/);
+  assert.equal(parsed.discountBreakdown?.[0]?.amount, 0.4);
 });
 
 test("actual P4P schema retains rejection of new 369 quantity source", () => {

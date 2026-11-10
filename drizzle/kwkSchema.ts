@@ -11,6 +11,7 @@
  *   kwk_audit_log  – Admin-Audit-Trail
  */
 
+import { sql } from "drizzle-orm";
 import {
   pgTable,
   serial,
@@ -92,6 +93,7 @@ export const kwkAccounts = pgTable(
     loginAttempts: integer("login_attempts").notNull().default(0),
     loginLockedUntil: timestamp("login_locked_until"),
     lastLogin: timestamp("last_login"),
+    sessionVersion: integer("session_version").notNull().default(0),
 
     // Passwort-Reset
     resetToken: varchar("reset_token", { length: 128 }),
@@ -156,6 +158,10 @@ export const kwkLedger = pgTable(
     kwkIdIdx: index("kwk_ledger_kwk_id_idx").on(table.kwkId),
     orderIdIdx: index("kwk_ledger_order_id_idx").on(table.orderId),
     typeStatusIdx: index("kwk_ledger_type_status_idx").on(table.type, table.status),
+    redemptionOrderIdx: uniqueIndex("kwk_ledger_one_redemption_per_order_idx").on(table.orderId)
+      .where(sql`${table.type} = 'redeemed' AND ${table.orderId} IS NOT NULL`),
+    cancellationOwnerOrderIdx: uniqueIndex("kwk_ledger_one_cancellation_per_owner_order_idx").on(table.kwkId, table.orderId)
+      .where(sql`${table.type} = 'cancelled' AND ${table.status} = 'confirmed' AND ${table.orderId} IS NOT NULL`),
   })
 );
 

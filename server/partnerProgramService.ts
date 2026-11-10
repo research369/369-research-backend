@@ -296,7 +296,7 @@ export function isRepeatCodeUseAllowed(program: PartnerProgram): boolean {
 }
 
 export function canRedeemShopCredit(program: PartnerProgram): boolean {
-  return program.settlementMethod === "shop_credit" && program.allowSelfOrderCredit;
+  return program.active && program.settlementMethod === "shop_credit" && program.allowSelfOrderCredit;
 }
 
 export function isPayoutProgram(program: PartnerProgram): boolean {
@@ -304,21 +304,64 @@ export function isPayoutProgram(program: PartnerProgram): boolean {
 }
 
 /**
- * A Creator's own authenticated purchase converts the benefit normally split
- * between the customer discount and the Creator payout into one direct product
- * discount. It never applies to public code orders and must not create a second
- * commission afterwards. Other programs retain their established self-order
- * customer-discount rate.
+ * Canonical terms for an authenticated self-order, never a public-code order.
+ * Only an actual commission-bearing payout Creator converts commission into a
+ * direct discount. Explicit shop-credit policies keep discount and earning
+ * separate, regardless of the program key. Missing/inactive programs fail closed.
  */
+export function resolveSelfOrderTerms(
+  program: PartnerProgram | null | undefined,
+  customerDiscountPercent: number,
+  commissionPercent: number,
+): { discountPercent: number; commissionPercent: number; creditRedeemable: boolean; convertsPayoutCommission: boolean } {
+  if (!program?.active) {
+    return { discountPercent: 0, commissionPercent: 0, creditRedeemable: false, convertsPayoutCommission: false };
+  }
+  const customerDiscount = validPercentage(customerDiscountPercent, "Kundenrabatt");
+  const commission = validPercentage(commissionPercent, "Provision");
+  const commissionBearing = program.commissionPolicy !== "none" && program.settlementMethod !== "none";
+  const convertsPayoutCommission = program.key === "creator"
+    && program.settlementMethod === "payout" && commissionBearing;
+  const creditRedeemable = canRedeemShopCredit(program);
+  return {
+    discountPercent: convertsPayoutCommission
+      ? Math.min(100, Math.round((customerDiscount + commission + Number.EPSILON) * 100) / 100)
+      : customerDiscount,
+    commissionPercent: commissionBearing && !convertsPayoutCommission
+      && (program.settlementMethod !== "shop_credit" || creditRedeemable) ? commission : 0,
+    creditRedeemable,
+    convertsPayoutCommission,
+  };
+}
+
+/** Public attribution and authenticated self-order terms must never be mixed. */
+export function assertNoMixedPartnerOrderInput(input: {
+  partnerCode?: string | null; partnerNumber?: string | null; creditUsed?: number;
+}): void {
+  if (input.partnerCode?.trim() && (input.partnerNumber?.trim() || (input.creditUsed || 0) > 0)) {
+    throw new Error("PARTNER_CODE_SELBSTBESTELLUNG_AUSGESCHLOSSEN: Öffentliche Partnercodes können nicht mit einer Partnereigenbestellung oder Partnerguthaben kombiniert werden.");
+  }
+}
+
+/** Shared real/preview preflight; the ledger still repeats its locked final check. */
+export function assertPartnerShopCreditAvailable(
+  program: PartnerProgram | null | undefined,
+  amount: number,
+  balance: number,
+): void {
+  if (!Number.isFinite(amount) || amount < 0) throw new Error("Ungültiger Guthabeneinsatz");
+  if (amount === 0) return;
+  if (!program || !canRedeemShopCredit(program)) throw new Error("PARTNER_GUTHABEN_PROGRAMM_AUSGESCHLOSSEN");
+  if (!Number.isFinite(balance) || balance + 0.001 < amount) throw new Error("PARTNER_GUTHABEN_NICHT_AUSREICHEND");
+}
+
+/** Compatibility helper; all self-order callers share the canonical policy. */
 export function calculateSelfOrderDiscountPercent(
   program: PartnerProgram,
   customerDiscountPercent: number,
   commissionPercent: number,
 ): number {
-  const customerDiscount = validPercentage(customerDiscountPercent, "Kundenrabatt");
-  const commission = validPercentage(commissionPercent, "Provision");
-  if (program.key !== "creator") return customerDiscount;
-  return Math.min(100, Math.round((customerDiscount + commission + Number.EPSILON) * 100) / 100);
+  return resolveSelfOrderTerms(program, customerDiscountPercent, commissionPercent).discountPercent;
 }
 
 export function calculateProgramDiscount(subtotal: number, priorProductDiscount: number, percentage: number): number {

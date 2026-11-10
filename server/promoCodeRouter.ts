@@ -392,51 +392,15 @@ export const promoCodeRouter = router({
   // Increment usage count (called after successful order)
   incrementUsage: publicProcedure
     .input(z.object({ code: z.string() }))
-    .mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database not available");
-
-      const [promo] = await db.select({ id: promoCodes.id })
-        .from(promoCodes)
-        .where(eq(promoCodes.code, input.code.toUpperCase()))
-        .limit(1);
-      const personalAssignment = promo ? await getPersonalPromoAssignmentForCode(promo.id) : null;
-      if (personalAssignment) {
-        // The browser no longer calls this route for normal checkout completion.
-        // Keeping it from touching personal codes prevents an unauthorised legacy
-        // client from consuming a code outside the transactional checkout guard.
-        throw new Error("AKTIONSCODE_UNGUELTIG");
-      }
-
-      await db.update(promoCodes)
-        .set({
-          currentUses: sql`${promoCodes.currentUses} + 1`,
-          updatedAt: new Date(),
-        })
-        .where(eq(promoCodes.code, input.code.toUpperCase()));
-
-      return { success: true };
-    }),
+    .mutation(() => ({ success: false, retired: true })),
 
   // ─── PARTNER CODE USAGE (email-based one-time check) ──────────
 
   // Check if an email has already used a partner code
   checkPartnerCodeUsage: publicProcedure
     .input(z.object({ email: z.string().email() }))
-    .query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database not available");
-
-      const [usage] = await db.select().from(partnerCodeUsage)
-        .where(eq(partnerCodeUsage.email, input.email.toLowerCase()))
-        .limit(1);
-
-      return {
-        hasUsed: !!usage,
-        partnerCode: usage?.partnerCode || null,
-        usedAt: usage?.usedAt || null,
-      };
-    }),
+    // Compatibility-only constant response: neither identity nor usage history.
+    .query(() => ({ hasUsed: false, partnerCode: null, usedAt: null, retired: true })),
 
   // Record partner code usage (called after successful order with partner code)
   recordPartnerCodeUsage: publicProcedure
@@ -445,24 +409,5 @@ export const promoCodeRouter = router({
       partnerCode: z.string(),
       orderId: z.string(),
     }))
-    .mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database not available");
-
-      try {
-        await db.insert(partnerCodeUsage).values({
-          email: input.email.toLowerCase(),
-          partnerCode: input.partnerCode.toUpperCase(),
-          orderId: input.orderId,
-        });
-        console.log(`[PartnerCodeUsage] Recorded: ${input.email} used code ${input.partnerCode} (Order: ${input.orderId})`);
-        return { success: true };
-      } catch (err: any) {
-        // Unique constraint violation = email already used a partner code
-        if (err.code === "23505") {
-          return { success: false, reason: "E-Mail hat bereits einen Partnercode verwendet" };
-        }
-        throw err;
-      }
-    }),
+    .mutation(() => ({ success: false, retired: true })),
 });

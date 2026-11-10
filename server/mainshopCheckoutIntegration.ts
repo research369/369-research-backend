@@ -18,20 +18,3 @@ export function checkoutShippingItems<T extends ShippingCheckoutItem>(input: {
 }): T[] {
   return is369CustomerCheckout(input) ? [] : input.items;
 }
-
-/**
- * Schema compatibility is not price parity. Until the quantity -> global -> promo
- * -> partner/KWK chain is approved in Legacy, refuse a new 369 quantity-discount
- * checkout before database access. Never store/accept its browser-supplied amount.
- * Existing P4P and authenticated manual WaWi pricing remain outside this rule.
- */
-export function assertLegacyQuantityPricingReady(input: {
-  storeKey: CheckoutIntegrationStore;
-  orderSource: "shop" | "wawi_manual";
-  discountBreakdown?: readonly { source: string }[];
-}): void {
-  if (input.orderSource === "shop" && input.storeKey !== "peps4pets"
-    && input.discountBreakdown?.some((entry) => entry.source === "quantity_discount")) {
-    throw new Error("LEGACY_QUANTITY_PRICING_NOT_APPROVED: Mengenpreisvertrag noch nicht freigegeben; kein Auftrag angelegt.");
-  }
-}

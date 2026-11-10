@@ -316,7 +316,8 @@ export type DuplicateFinding = typeof duplicateFindings.$inferSelect;
  */
 export const customerCommunications = pgTable("customer_communications", {
   id: serial("id").primaryKey(),
-  customerId: integer("customer_id").notNull(),
+  customerId: integer("customer_id"),
+  customerLinkReview: integer("customer_link_review").notNull().default(0),
 
   type: communicationTypeEnum("type").notNull(),
   status: communicationStatusEnum("status").notNull().default("logged"),
@@ -547,6 +548,8 @@ export const orders = pgTable("orders", {
   creditUsed: decimal("credit_used", { precision: 10, scale: 2 }).default("0"),
   kwkCreditUsed: decimal("kwk_credit_used", { precision: 10, scale: 2 }).default("0"),
   kwkCreditRequested: decimal("kwk_credit_requested", { precision: 10, scale: 2 }).default("0"),
+  // Verified session claim at checkout only; unknown legacy owners remain NULL for review.
+  kwkCreditOwnerId: integer("kwk_credit_owner_id"),
 
   // First-party marketing QR attribution. Product/serial QR codes under `/i/*`
   // use a separate namespace and are never written into these campaign fields.
@@ -673,6 +676,7 @@ export const partners = pgTable("partners", {
 
   // Partner login credentials
   passwordHash: text("password_hash"),
+  sessionVersion: integer("session_version").notNull().default(0),
   lastLogin: timestamp("last_login"),
 
   // Active flag

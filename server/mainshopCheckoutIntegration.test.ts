@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assertLegacyQuantityPricingReady, checkoutShippingItems, is369CustomerCheckout } from "./mainshopCheckoutIntegration.js";
+import { checkoutShippingItems, is369CustomerCheckout } from "./mainshopCheckoutIntegration.js";
 import { calculateAuthoritativeShipping } from "./kwkCheckoutPricing.js";
 import { reconcileFreeBacWaterForShopOrder } from "./freeBacWaterService.js";
 import { shouldKeepClientDiscountBreakdownSource } from "./discountBreakdownRules.js";
@@ -24,16 +24,6 @@ test("369 no-cooling shipping retains main P4P/WaWi cold surcharge once per orde
     assert.equal(wawiItems, items);
     assert.equal(calculateAuthoritativeShipping({ country: "DE", items: wawiItems }), 15);
   }
-});
-
-test("quantity requests fail closed for new 369 before I/O; P4P/WaWi keep previous pricing scope", () => {
-  for (const storeKey of ["369research", "checkout-v2"] as const) {
-    for (const amount of [0, 1, 999999]) {
-      assert.throws(() => assertLegacyQuantityPricingReady({ storeKey, orderSource: "shop", discountBreakdown: [{ source: "quantity_discount", amount } as { source: string }] }), /LEGACY_QUANTITY_PRICING_NOT_APPROVED/);
-    }
-  }
-  assert.doesNotThrow(() => assertLegacyQuantityPricingReady({ storeKey: "peps4pets", orderSource: "shop", discountBreakdown: [{ source: "promotion_code" }] }));
-  assert.doesNotThrow(() => assertLegacyQuantityPricingReady({ storeKey: "369research", orderSource: "wawi_manual", discountBreakdown: [{ source: "quantity_discount" }] }));
 });
 
 test("browser quantity amount cannot survive the authoritative audit-breakdown filter", () => {

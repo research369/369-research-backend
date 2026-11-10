@@ -25,6 +25,6 @@ test("never accepts a demo token as a productive KWK token and vice versa", () =
   assert.deepEqual(verifyKwkDemoToken(demoToken), { demoAccountId: 42 });
   assert.equal(verifyKwkToken(demoToken), null);
   assert.equal(verifyToken(demoToken), null);
-  assert.deepEqual(verifyKwkToken(liveToken), { kwkId: 42 });
+  assert.deepEqual(verifyKwkToken(liveToken), { kwkId: 42, sessionVersion: 0 });
   assert.equal(verifyKwkDemoToken(liveToken), null);
 });
