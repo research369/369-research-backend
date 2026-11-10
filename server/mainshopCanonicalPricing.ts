@@ -5,8 +5,10 @@ import { PLUGPLAY_SURCHARGE, NASAL_DIY_SET_SURCHARGE } from "./checkoutFormatSur
 import { isNasalDiySetEligible, NASAL_DIY_SET_COMPONENTS } from "./nasalDiySetConfig.js";
 import type { CheckoutOrderItem } from "./freeBacWaterService.js";
 import { calculateCheckoutV2AutomaticGiftLines, type CheckoutV2Promotion2for3 } from "./checkoutV2AutomaticBenefits.js";
+import { resolveSubstitution, extractDosageMg, isSubstitutionEligible, type SubstitutionResult } from "./substitutionService.js";
+import { resolveSubstitutionProductFamily } from "./orderItemIdentity.js";
 
-export type MainshopCatalogArticle = KwkCatalogArticle & { category: string | null; categories: unknown; stock?: number | null };
+export type MainshopCatalogArticle = KwkCatalogArticle & { id: number; category: string | null; categories: unknown; stock?: number | null };
 export type MainshopLine = CheckoutOrderItem & { bundleId?: number; bundleGroup?: string; canonicalProductId?: string; canonicalVariantId?: string };
 export type MainshopBundle = { id: number; name: string; discountPercent: string; isActive: number; allowsPlugPlay: number; allowsNasalSpray: number };
 export type MainshopBundleComponent = { bundleId: number; articleSku: string; quantity: number; isFreeGift: number; fixedDosageMg: number | null };
@@ -149,7 +151,7 @@ export function canonicalizeMainshopLines(input: MainshopLine[], catalog: Mainsh
       lines: [{ ...item, shopProductId: item.canonicalProductId!, unitPrice: item.price, type: item.type === "peptide" ? "peptide" : "accessory", category: parent.category, categories: parent.categories, isPlugPlay: item.isPlugPlay === true, isNasalSpray: item.isNasalSpray === true, isNasalDiySet: item.isNasalDiySet === true }],
       promotion2for3, freeBacWaterProduct: { name: "BAC Wasser 3ml" },
     }).find(g => g.source === "promo_2for3");
-    if (derived) gifts.push({ ...item, quantity: derived.quantity, price: 0, isFreeGift: true, variant: "2für3 · servergeneriert" });
+    if (derived) gifts.push({ ...item, quantity: derived.quantity, price: 0, isFreeGift: true, variant: "2für3" });
   });
   const claimedCounts = new Map<string, number>();
   for (const gift of claimedGifts) {
@@ -166,13 +168,16 @@ export function canonicalizeMainshopLines(input: MainshopLine[], catalog: Mainsh
   items.push(...gifts); eligible.push(...gifts.map(() => false));
   return { items, quantityUnits, quantityEligible: eligible };
 }
-/** Same aggregate SKU demand before quote/create and again under inventory locks. No substitutions of confirmed selections. */
-export function assertMainshopStock(items: MainshopLine[], catalog: MainshopCatalogArticle[]): void {
+/** Pure shared fulfillment plan, checked before quote/create and under inventory locks.
+ * Canonical customer selections/prices stay unchanged; only existing Smart-Sub components may fulfill them. */
+export function assertMainshopStock(items: MainshopLine[], catalog: MainshopCatalogArticle[], substitutionEnabled = false): Map<string, SubstitutionResult> {
   const demand = new Map<string, number>();
   const add = (sku: string, count: number) => demand.set(norm(sku), (demand.get(norm(sku)) || 0) + count);
+  const trackedSkus = new Set<string>();
   const trackedComponent = (id: string, count: number) => {
     const matches = catalog.filter(a => a.isActive === 1 && norm(a.shopProductId) === norm(id));
     if (matches.length !== 1) throw Error("CHECKOUT_STOCK_COMPONENT_REQUIRED");
+    trackedSkus.add(norm(matches[0].sku));
     add(matches[0].sku, count);
   };
   for (const item of items) {
@@ -181,10 +186,47 @@ export function assertMainshopStock(items: MainshopLine[], catalog: MainshopCata
     if (item.isNasalSpray && !item.isNasalDiySet) trackedComponent("bac-wasser", item.quantity);
     if (item.isNasalDiySet) for (const c of NASAL_DIY_SET_COMPONENTS) if (c.inventoryTracked) trackedComponent(c.articleShopProductId, item.quantity);
   }
+  const active = catalog.filter(a => a.isActive === 1);
+  const available = new Map(active.map(a => [norm(a.sku), Number.isSafeInteger(a.stock) && Number(a.stock) >= 0 ? Number(a.stock) : 0]));
+  const eligible = (a: MainshopCatalogArticle) => catalogCategories(a).every(isSubstitutionEligible);
+  const pending: Array<{ article: MainshopCatalogArticle; count: number }> = [];
+  const substitutions = new Map<string, SubstitutionResult>();
+  const fail = (sku: string): never => { throw Error(`CHECKOUT_STOCK_DEMAND_NOT_COVERED: ${sku} (Bestand)`); };
+  // Reserve ALL directly fulfillable demand first, including paid/free BAC and
+  // tracked kit components. Substitution may only consume the remaining pool.
   for (const [sku, count] of demand) {
-    const matches = catalog.filter(a => a.isActive === 1 && norm(a.sku) === sku);
-    if (matches.length !== 1 || !Number.isSafeInteger(matches[0].stock) || Number(matches[0].stock) < count) throw Error(`CHECKOUT_STOCK_DEMAND_NOT_COVERED: ${sku} (Bestand)`);
+    const matches = active.filter(a => norm(a.sku) === sku);
+    if (matches.length !== 1 || !Number.isSafeInteger(count) || count <= 0 || !Number.isSafeInteger(matches[0].stock) || Number(matches[0].stock) < 0) fail(sku);
+    const article = matches[0];
+    if (Number(article.stock) >= count) available.set(sku, Number(article.stock) - count);
+    else {
+      if (substitutionEnabled !== true || trackedSkus.has(sku) || !eligible(article)) fail(sku);
+      pending.push({ article, count });
+    }
   }
+  for (const { article, count } of pending) {
+    const sku = norm(article.sku);
+    const family = resolveSubstitutionProductFamily(article.sku, [article]);
+    const selection = items.find(item => norm(item.shopProductId) === sku)!;
+    const dosageMg = extractDosageMg(selection.dosage || article.name) ?? extractDosageMg(article.sku);
+    if (!family || dosageMg === null) return fail(sku);
+    if (dosageMg <= 0 || active.some(a => a.shopProductId === family && a.shopVisible === 1 && !eligible(a))) fail(sku);
+    // Existing resolver replaces the WHOLE unavailable selection, not a partial
+    // direct/alternative mix. Do not invent a new stock or dosage fallback here.
+    const sub = resolveSubstitution(family, dosageMg, count, active.filter(a =>
+      eligible(a) && Number.isSafeInteger(a.stock) && Number(a.stock) >= 0 &&
+      active.filter(other => norm(other.sku) === norm(a.sku)).length === 1
+    ).map(a => ({ ...a, stock: available.get(norm(a.sku)) ?? 0 })));
+    if (!sub.possible) fail(sku);
+    for (const component of sub.components) {
+      const key = norm(component.sku);
+      const remaining = (available.get(key) ?? 0) - component.quantity;
+      if (remaining < 0) fail(sku);
+      available.set(key, remaining);
+    }
+    substitutions.set(sku, sub);
+  }
+  return substitutions;
 }
 /** Normalized original business selection. Browser totals/type/name are not authorities; ephemeral proofs never enter this object. */
 export function mainshopBusinessIntent(input: {

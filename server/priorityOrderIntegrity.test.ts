@@ -56,6 +56,7 @@ before(async()=>{
 beforeEach(async()=>{
  external=0;
  await pool.query(`DROP TRIGGER IF EXISTS priority_fail_item ON order_items;
+   UPDATE substitution_config SET enabled=false WHERE id=1;
    DROP TRIGGER IF EXISTS priority_fail_delete ON orders;
    DROP TRIGGER IF EXISTS priority_fail_kwk_cancel ON kwk_ledger;
    DROP TRIGGER IF EXISTS priority_fail_cache ON kwk_accounts;
@@ -74,6 +75,57 @@ beforeEach(async()=>{
 after(async()=>{await closeDb();ENV.databaseUrl='';mock.restoreAll();});
 async function count(table:string) {return Number((await pool.query(`SELECT count(*)::int AS n FROM ${table}`)).rows[0].n);}
 async function stock(id=9001) {return (await pool.query('SELECT stock FROM articles WHERE id=$1',[id])).rows[0].stock;}
+async function smartSubFixture(smallerStock:number,enabled=true) {
+ await pool.query('UPDATE substitution_config SET enabled=$1 WHERE id=1',[enabled]);
+ await pool.query('UPDATE articles SET stock=$1,variants=$2::jsonb WHERE id=9001',[smallerStock,JSON.stringify([
+   {dosage:'10 mg',sku:'SYNTHETIC-10MG',price:20},{dosage:'20 mg',sku:'SYNTHETIC-20MG',price:40},
+ ])]);
+ await pool.query(`INSERT INTO articles(id,sku,name,shop_product_id,stock,is_active,shop_visible,category,selling_price,sale_price,variants)
+   VALUES(9010,'SYNTHETIC-20MG','Synthetic (20 mg)','synthetic',0,1,0,'Peptide',40,0,'[]')`);
+ return input({items:[{...input().items[0],dosage:'20 mg',price:40}],subtotal:40,total:58});
+}
+test('ACTUAL Smart Sub: quote and create retain selected 20-mg price, consume 2x10-mg and replay without a second deduction',async()=>{
+ const payload=await smartSubFixture(2);
+ const priced=await rawCaller().quote(payload);
+ assert.equal(priced.quote.items.find((i:any)=>!i.isFreeGift)?.price,40);
+ assert.equal(priced.quote.total,58);
+ const submitted={...payload,expectedQuoteHash:priced.quote.hash};
+ const order=await rawCaller().create(submitted);
+ assert.ok('total' in order);
+ assert.equal(order.total,58); assert.equal(await stock(),0); assert.equal(await stock(9010),0); assert.equal(await stock(9004),99);
+ assert.equal(await count('orders'),1); assert.equal(await count('stock_history'),2); assert.equal(external,0);
+ const again=await rawCaller().create(submitted);
+ assert.equal(again.orderId,order.orderId); assert.equal(await stock(),0); assert.equal(await count('stock_history'),2);
+});
+test('ACTUAL Smart Sub: disabled switch or insufficient combined smaller/larger demand fails before order writes',async()=>{
+ const payload=await smartSubFixture(2,false);
+ await assert.rejects(rawCaller().quote(payload),/CHECKOUT_STOCK_DEMAND_NOT_COVERED|Bestand/);
+ await pool.query('UPDATE substitution_config SET enabled=true WHERE id=1');
+ const mixed=input({items:[payload.items[0],input().items[0]],subtotal:60,total:78});
+ await assert.rejects(rawCaller().quote(mixed),/CHECKOUT_STOCK_DEMAND_NOT_COVERED|Bestand/);
+ assert.equal(await count('orders'),0); assert.equal(await count('priority_checkout_receipts'),0); assert.equal(await count('stock_history'),0);
+ assert.equal(await stock(),2); assert.equal(await stock(9004),100); assert.equal(external,0);
+});
+test('ACTUAL Smart Sub: sufficient combined smaller/larger demand deducts each underlying unit only once',async()=>{
+ const payload=await smartSubFixture(3);
+ const mixed=input({items:[payload.items[0],input().items[0]],subtotal:60,total:78});
+ const priced=await rawCaller().quote(mixed);
+ const order=await rawCaller().create({...mixed,expectedQuoteHash:priced.quote.hash});
+ assert.ok('total' in order);
+ assert.equal(order.total,78); assert.equal(await stock(),0); assert.equal(await stock(9010),0); assert.equal(await stock(9004),98);
+ const used=await pool.query('SELECT SUM(-quantity_change)::int AS n FROM stock_history WHERE article_id=9001 AND order_id=$1',[order.orderId]);
+ assert.equal(used.rows[0].n,3); assert.equal(await count('orders'),1); assert.equal(external,0);
+});
+test('ACTUAL Smart Sub: Plug&Play uses equivalent smaller stock without granting an extra BAC gift',async()=>{
+ const payload=await smartSubFixture(2);
+ payload.items[0].isPlugPlay=true;
+ const priced=await rawCaller().quote(payload);
+ assert.equal(priced.quote.total,73); assert.equal(priced.quote.items.some((i:any)=>i.isFreeGift),false);
+ const order=await rawCaller().create({...payload,expectedQuoteHash:priced.quote.hash});
+ assert.ok('total' in order);
+ assert.equal(order.total,73); assert.equal(await stock(),0); assert.equal(await stock(9004),100); assert.equal(await count('stock_history'),1);
+ assert.equal(external,0);
+});
 async function seedOrder(orderId='RETURN',extra:any={}) {
  await db.insert(orders).values({orderId,firstName:'Synthetic',lastName:'Owner',email:'synthetic@example.test',phone:'',street:'Local',houseNumber:'1',zip:'8000',city:'Local',country:'CH',subtotal:'20',discount:'0',shipping:'18',shippingCountry:'ch',total:'38',paymentMethod:'SEPA',status:'offen',orderDate:new Date(),...extra});
  await db.insert(orderItems).values({orderId,name:'Original requested variant',type:'peptide',price:'20',quantity:1});

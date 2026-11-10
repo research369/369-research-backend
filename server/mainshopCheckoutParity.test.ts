@@ -20,11 +20,13 @@ let publicProgram: Row | null;
 let priorPaid = false, failItem = false, blockCustomer = false, existingKwkOrder = false, claimFailure = false;
 let selfProgram: Row;
 let beforeWriteTransaction: (() => void) | null = null;
+let failSubstitutionConfig = false;
 const originalUrl = ENV.databaseUrl;
 const originalSecret = ENV.jwtSecret;
 const article = (id: number, sku: string, shop: string, price: string, category = "Peptide", name = `${sku} 5 mg`): Row => ({ id, sku, shop_product_id: shop, name, selling_price: price, sale_price: null, category, categories: [category], variants: [{ dosage: "5 mg", price: Number(price), sku }], is_active: 1, shop_visible: 1, stock: 1000 });
 function result(text: string, values: any[] = [], rowMode?: string): { rows: any[]; rowCount: number } {
   calls.push(text);
+  if (/^(?:savepoint|release savepoint|rollback to savepoint)\b/i.test(text)) return { rows: [], rowCount: 0 };
   if (/^begin/i.test(text)) { readonly = /READ ONLY/i.test(text); if (!readonly) beforeWriteTransaction?.(); snapshot = structuredClone(data); return { rows: [], rowCount: 0 }; }
   if (/^commit/i.test(text)) { if (!readonly) committed++; readonly = false; snapshot = null; return { rows: [], rowCount: 0 }; }
   if (/^rollback/i.test(text)) { if (snapshot) data = snapshot; readonly = false; snapshot = null; return { rows: [], rowCount: 0 }; }
@@ -90,6 +92,7 @@ function result(text: string, values: any[] = [], rowMode?: string): { rows: any
   if (/FROM partner_transactions/i.test(text)) return { rows: (data.partner_transactions || []).filter(p => p.order_id === values[0]), rowCount: 0 };
   if (/FROM customer_order_blocks|from customer_order_blocks/i.test(text)) return { rows: blockCustomer ? [{ id: 1, is_active: 1 }] : [], rowCount: blockCustomer ? 1 : 0 };
   const table = text.match(/\bfrom\s+"?([a-z_]+)"?/i)?.[1];
+  if (table === "substitution_config" && failSubstitutionConfig) throw Error("INJECTED_SUBSTITUTION_CONFIG_FAILURE");
   let rows = structuredClone(data[table || ""] || []);
   if (table === "articles" && /"articles"\."id" = \$/.test(text)) rows = rows.filter(r => r.id === values[0]);
   if (table === "articles" && /"articles"\."shop_product_id" = \$/.test(text)) {
@@ -122,6 +125,7 @@ before(async () => {
 beforeEach(() => {
   calls = []; writes = []; readonly = false; committed = 0; fetches = 0; snapshot = null; publicProgram = null; priorPaid = false; failItem = false; blockCustomer = false; existingKwkOrder = false; claimFailure = false;
   beforeWriteTransaction = null;
+  failSubstitutionConfig = false;
   selfProgram = { key: "partner", label: "Partner", customer_discount_policy: "first_paid_code_use", commission_policy: "first_paid_code_order", settlement_method: "shop_credit", allow_self_order_credit: true, active: true };
   data = { articles: [article(1, "PEP-5MG", "pep", "100"), article(2, "ACC", "acc", "100", "Zubehör", "Zubehör"), article(3, "BAC-3ML", "bac-wasser-3ml", "5", "Zubehör", "BAC Wasser 3ml")],
     bundles: [], bundle_items: [], promo_codes: [], partners: [], orders: [], order_items: [], stock_history: [], priority_checkout_receipts: [], priority_order_tasks: [],
@@ -479,4 +483,161 @@ test("H4 scope boundary explicitly preserves legacy shared-product P4P; NOT a ve
   await assert.rejects(caller().create(payload({ storeKey: "peps4pets", discountBreakdown: [], checkoutIdempotencyKey: "p4p-stable-key" }) as any), /bereits verarbeitet/);
   assert.ok(calls.some(c => /pg_try_advisory_lock/.test(c))); assert.equal(data.orders.length, 0);
   // This reachability proves H4 still needs an approved server-verifiable P4P contract.
+});
+
+// Smart-Sub is an internal fulfillment plan, not a different customer SKU/price.
+function smartSub(doses = [50, 100], smallerStock = 2, category = "Peptide") {
+  const family = doses.map((dose, n) => ({ ...article(n === 0 ? 1 : n + 3, `PEP-${dose}MG`, "pep", String(dose), category, `Canonical (${dose} mg)`), stock: n === 0 ? smallerStock : 0, shop_visible: n === 0 ? 1 : 0, variants: n === 0 ? doses.map(d => ({ dosage: `${d} mg`, price: d, sku: `PEP-${d}MG` })) : [] }));
+  data.articles = [...family, ...data.articles.filter(a => a.id !== 1)];
+  data.substitution_config = [{ id: 1, enabled: true }];
+  return (dose = doses.at(-1)!, quantity = 1) => ({ ...payload().items[0], dosage: `${dose} mg`, quantity });
+}
+async function createQuoted(extra: Row, hash: string) {
+  return caller().create(payload({ ...extra, expectedQuoteHash: hash, checkoutIdempotencyKey: "a".repeat(64) }) as any);
+}
+for (const enabled of [true, 1]) test(`Smart-Sub enabled=${enabled}: quote and CREATE 100mg from 2x50mg keep confirmed SKU, dosage, price and free BAC`, async () => {
+  const item = smartSub(); data.substitution_config[0].enabled = enabled;
+  data.articles[0].sale_price = "40";
+  const extra = { items: [item()] }; const q = await quote(extra);
+  assert.equal(q.items[0].shopProductId, "PEP-100MG"); assert.equal(q.items[0].dosage, "100 mg"); assert.equal(q.items[0].price, 100);
+  assert.equal(q.subtotal, 100); assert.equal(q.items.at(-1)?.quantity, 1);
+  const out = await createQuoted(extra, q.hash); assert.ok("success" in out && out.success);
+  assert.equal(data.articles.find(a => a.sku === "PEP-50MG")!.stock, 0);
+  assert.equal(data.articles.find(a => a.sku === "PEP-100MG")!.stock, 0);
+  assert.equal(data.articles.find(a => a.sku === "BAC-3ML")!.stock, 999);
+  assert.equal(data.order_items[0].name, "Canonical (100 mg)"); assert.equal(data.order_items[0].dosage, "100 mg"); assert.equal(data.order_items[0].price, "100.00");
+  assert.equal(data.stock_history.length, 2); assert.match(data.stock_history[0].reason, /Smart Substitution/);
+  assert.match(data.orders[0].internal_note, /Smart Substitution/);
+  assert.ok(calls.some(c => /FROM substitution_config.*FOR SHARE/is.test(c)));
+  assert.equal(committed, 1); assert.equal(fetches, 0);
+});
+for (const disabled of [false, 0, "true", "missing", "error"]) test(`Smart-Sub ${disabled}: quote and CREATE fail closed without direct stock`, async () => {
+  const item = smartSub(); const extra = { items: [item()] }; const q = await quote(extra);
+  if (disabled === "missing") data.substitution_config = [];
+  else if (disabled === "error") failSubstitutionConfig = true;
+  else data.substitution_config[0].enabled = disabled;
+  await assert.rejects(caller().quote(payload(extra) as any), /CHECKOUT_STOCK_DEMAND_NOT_COVERED/);
+  await assert.rejects(createQuoted(extra, q.hash), /CHECKOUT_STOCK_DEMAND_NOT_COVERED/);
+  assert.equal(writes.length, 0); assert.equal(committed, 0); assert.equal(fetches, 0);
+});
+for (const shortage of ["quantity", "nonexact", "inactive", "excluded-component", "invalid-stock"]) test(`Smart-Sub ${shortage}: no invented stock or inexact dosage fulfillment`, async () => {
+  const item = smartSub(shortage === "nonexact" ? [60, 100] : [50, 100]);
+  const extra = { items: [item()] };
+  // Obtain a direct-stock quote, then require substitution in both handlers.
+  data.articles[1].stock = 1; const q = await quote(extra); data.articles[1].stock = 0;
+  if (shortage === "quantity") data.articles[0].stock = 1;
+  if (shortage === "inactive") data.articles[0].is_active = 0;
+  if (shortage === "excluded-component") data.articles[0].categories = ["Peptide", "Zubehör"];
+  if (shortage === "invalid-stock") data.articles[0].stock = 2.5;
+  await assert.rejects(caller().quote(payload(extra) as any), /CHECKOUT_STOCK_DEMAND_NOT_COVERED|CHECKOUT_CATALOG/);
+  await assert.rejects(createQuoted(extra, q.hash), /CHECKOUT_STOCK_DEMAND_NOT_COVERED|CHECKOUT_CATALOG/);
+  assert.equal(writes.length, 0); assert.equal(committed, 0); assert.equal(fetches, 0);
+});
+for (const reverse of [false, true]) test(`Smart-Sub shared smaller/larger demand reserves direct smaller SKU first, reverse=${reverse}`, async () => {
+  const item = smartSub([50, 100], 3); const items = [item(50), item(100)]; if (reverse) items.reverse();
+  const extra = { items }; const q = await quote(extra); data.articles[0].stock = 2;
+  await assert.rejects(caller().quote(payload(extra) as any), /CHECKOUT_STOCK_DEMAND_NOT_COVERED/);
+  await assert.rejects(createQuoted(extra, q.hash), /CHECKOUT_STOCK_DEMAND_NOT_COVERED/);
+  assert.equal(writes.length, 0);
+  data.articles[0].stock = 3; await createQuoted(extra, q.hash);
+  assert.equal(data.articles[0].stock, 0); assert.equal(committed, 1); assert.equal(fetches, 0);
+});
+test("Smart-Sub 20mg plus 30mg share five 10mg components, never reuse four", async () => {
+  const item = smartSub([10, 20, 30], 5); const extra = { items: [item(30), item(20)] }; const q = await quote(extra);
+  data.articles[0].stock = 4;
+  await assert.rejects(caller().quote(payload(extra) as any), /CHECKOUT_STOCK_DEMAND_NOT_COVERED/);
+  await assert.rejects(createQuoted(extra, q.hash), /CHECKOUT_STOCK_DEMAND_NOT_COVERED/); assert.equal(writes.length, 0);
+  data.articles[0].stock = 5; await createQuoted(extra, q.hash);
+  assert.equal(data.articles[0].stock, 0); assert.equal(data.articles[1].stock, 0); assert.equal(data.articles[2].stock, 0);
+  assert.equal(data.stock_history.filter(h => /Smart Substitution/.test(h.reason)).length, 2); assert.equal(fetches, 0);
+});
+for (const category of ["Kapseln / Tabletten", "Tabletten", "Kapseln", "Zubehör", "369 BeautyLine"]) test(`Smart-Sub ${category} never substitutes even with exact smaller dosage available`, async () => {
+  const item = smartSub([50, 100], 2, category); const extra = { items: [item()] };
+  data.articles[1].stock = 1; const q = await quote(extra); data.articles[1].stock = 0;
+  await assert.rejects(caller().quote(payload(extra) as any), /CHECKOUT_STOCK_DEMAND_NOT_COVERED/);
+  await assert.rejects(createQuoted(extra, q.hash), /CHECKOUT_STOCK_DEMAND_NOT_COVERED/);
+  assert.equal(writes.length, 0); assert.equal(fetches, 0);
+});
+test("Smart-Sub keeps aggregate paid plus free BAC mandatory", async () => {
+  const item = smartSub(); const extra = { items: [item(), { name: "BAC", shopProductId: "bac-wasser-3ml", quantity: 1, price: 0, type: "accessory" }] };
+  const bac = data.articles.find(a => a.sku === "BAC-3ML")!; bac.stock = 2; const q = await quote(extra); bac.stock = 1;
+  await assert.rejects(caller().quote(payload(extra) as any), /CHECKOUT_STOCK_DEMAND_NOT_COVERED/);
+  await assert.rejects(createQuoted(extra, q.hash), /CHECKOUT_STOCK_DEMAND_NOT_COVERED/); assert.equal(writes.length, 0);
+  data.articles.find(a => a.sku === "BAC-3ML")!.stock = 2; await createQuoted(extra, q.hash);
+  assert.equal(data.articles.find(a => a.sku === "BAC-3ML")!.stock, 0); assert.equal(fetches, 0);
+});
+test("Smart-Sub keeps aggregate DIY kit plus paid tracked BAC mandatory", async () => {
+  const item = smartSub(); data.articles.filter(a => a.shop_product_id === "pep").forEach(a => { a.shop_product_id = "semax"; });
+  data.articles.push({ ...article(8, "BAC-10ML", "bac-wasser", "5", "Zubehör", "BAC 10 ml"), variants: [], stock: 2 });
+  const extra = { items: [{ ...item(), shopProductId: "semax", isNasalDiySet: true }, { name: "BAC", shopProductId: "bac-wasser", quantity: 1, price: 0, type: "accessory" }] };
+  const q = await quote(extra); data.articles.at(-1)!.stock = 1;
+  await assert.rejects(caller().quote(payload(extra) as any), /CHECKOUT_STOCK_DEMAND_NOT_COVERED/);
+  await assert.rejects(createQuoted(extra, q.hash), /CHECKOUT_STOCK_DEMAND_NOT_COVERED/); assert.equal(writes.length, 0);
+  data.articles.at(-1)!.stock = 2; await createQuoted(extra, q.hash); assert.equal(data.articles.at(-1)!.stock, 0); assert.equal(fetches, 0);
+  // Stock coverage is not a claim of nasal/DIY quote/create position parity.
+});
+for (const changed of ["disabled", "component-stock"]) test(`Smart-Sub CREATE repeats ${changed} under locks before number and writes`, async () => {
+  const item = smartSub(); const extra = { items: [item()] }; const q = await quote(extra); calls = [];
+  beforeWriteTransaction = () => {
+    if (changed === "disabled") data.substitution_config[0].enabled = false;
+    else data.articles[0].stock = 1;
+  };
+  await assert.rejects(createQuoted(extra, q.hash), /CHECKOUT_STOCK_DEMAND_NOT_COVERED/);
+  assert.equal(writes.length, 0); assert.equal(committed, 0); assert.equal(data.orders.length, 0); assert.equal(fetches, 0);
+  assert.equal(calls.some(c => /next_order_id\(\)/i.test(c)), false);
+});
+test("Smart-Sub PlugPlay preserves 15 surcharge and no free BAC, replay never deducts again", async () => {
+  const item = smartSub([10, 20]); const extra = { items: [{ ...item(), isPlugPlay: true }] }; const q = await quote(extra);
+  assert.equal(q.subtotal, 35); assert.equal(q.items.length, 1);
+  const out = await createQuoted(extra, q.hash); assert.ok("success" in out && out.success);
+  assert.equal(data.articles[0].stock, 0); assert.equal(data.articles.find(a => a.sku === "BAC-3ML")!.stock, 1000);
+  assert.equal(data.order_items[0].price, "35.00"); assert.equal(data.order_items[0].is_plug_play, true);
+  const writeCount = writes.length; const replay = await createQuoted(extra, q.hash);
+  assert.equal(replay.orderId, out.orderId); assert.equal(writes.length, writeCount); assert.equal(committed, 1); assert.equal(fetches, 0);
+});
+test("Smart-Sub paid plus 2for3 selected-SKU gifts use one aggregate plan and one deduction", async () => {
+  const item = smartSub([50, 100], 6); twoForThree("include", ["pep"]);
+  const extra = { items: [item(100, 2)] }; const q = await quote(extra);
+  assert.equal(q.items.find(i => i.isFreeGift && i.shopProductId === "PEP-100MG")?.quantity, 1);
+  await createQuoted(extra, q.hash);
+  assert.equal(data.articles[0].stock, 0); assert.equal(data.articles.find(a => a.sku === "BAC-3ML")!.stock, 998);
+  assert.equal(data.stock_history.filter(h => /Smart Substitution/.test(h.reason)).length, 1); assert.equal(fetches, 0);
+});
+test("Smart-Sub retains existing exact backtracking rather than greedy inexact stock fallback", async () => {
+  const item = smartSub([15, 20, 30], 2); data.articles[1].stock = 1;
+  const extra = { items: [item(30)] }; const q = await quote(extra); await createQuoted(extra, q.hash);
+  assert.equal(data.articles[0].stock, 0); assert.equal(data.articles[1].stock, 1); assert.equal(data.articles[2].stock, 0);
+  assert.equal(data.stock_history.filter(h => /Smart Substitution/.test(h.reason)).length, 1); assert.equal(fetches, 0);
+});
+test("Smart-Sub does not mix partial direct larger stock with smaller components", async () => {
+  const item = smartSub([50, 100], 2); data.articles[1].stock = 2;
+  const extra = { items: [item(100, 2)] }; const q = await quote(extra); data.articles[1].stock = 1;
+  await assert.rejects(caller().quote(payload(extra) as any), /CHECKOUT_STOCK_DEMAND_NOT_COVERED/);
+  await assert.rejects(createQuoted(extra, q.hash), /CHECKOUT_STOCK_DEMAND_NOT_COVERED/); assert.equal(writes.length, 0);
+});
+test("Smart-Sub item failure rolls replacement stock back and same intent stays retryable", async () => {
+  const item = smartSub(); const extra = { items: [item()] }; const q = await quote(extra); failItem = true;
+  await assert.rejects(createQuoted(extra, q.hash), /INJECTED_ITEM_FAILURE|Failed query/);
+  assert.equal(data.articles[0].stock, 2); assert.equal(data.orders.length, 0); assert.equal(data.stock_history.length, 0); assert.equal(data.priority_checkout_receipts.length, 0);
+  failItem = false; await createQuoted(extra, q.hash); assert.equal(data.articles[0].stock, 0); assert.equal(committed, 1); assert.equal(fetches, 0);
+});
+for (const directStock of [false, true]) test(`Smart-Sub config read failure under transaction fails closed, directStock=${directStock}`, async () => {
+  const item = smartSub(); if (directStock) data.articles[1].stock = 1;
+  const extra = { items: [item()] }; const q = await quote(extra); calls = [];
+  beforeWriteTransaction = () => { failSubstitutionConfig = true; };
+  if (directStock) {
+    await createQuoted(extra, q.hash); assert.equal(data.articles[0].stock, 2); assert.equal(data.articles[1].stock, 0); assert.equal(committed, 1);
+  } else {
+    await assert.rejects(createQuoted(extra, q.hash), /CHECKOUT_STOCK_DEMAND_NOT_COVERED/);
+    assert.equal(writes.length, 0); assert.equal(committed, 0); assert.equal(calls.some(c => /next_order_id\(\)/i.test(c)), false);
+  }
+  assert.ok(calls.some(c => /^rollback to savepoint/i.test(c))); assert.equal(fetches, 0);
+});
+test("Smart-Sub canonical oral parent excludes even a peptide-labelled hidden inventory child", async () => {
+  const item = smartSub(); data.articles[0].category = "Tabletten"; data.articles[0].categories = ["Tabletten"];
+  const extra = { items: [item()] }; data.articles[1].stock = 1; const q = await quote(extra);
+  data.articles[1].stock = 0;
+  await assert.rejects(caller().quote(payload(extra) as any), /CHECKOUT_STOCK_DEMAND_NOT_COVERED/);
+  await assert.rejects(createQuoted(extra, q.hash), /CHECKOUT_STOCK_DEMAND_NOT_COVERED/);
+  assert.equal(writes.length, 0); assert.equal(fetches, 0);
 });

@@ -496,9 +496,11 @@ export async function createOrderFromTrustedInput(
       let mainshopCatalog: MainshopCatalogArticle[] = [];
       let mainshopPolicySnapshot: unknown = null;
       let mainshopSettingsSnapshot: Array<{ key: string; value: string | null }> = [];
+      let mainshopSubstitutionEnabled = false;
       let mainshopPromotion2for3 = { enabled: false, expiresAt: null as string | null, mode: "all" as "all" | "include" | "exclude", products: [] as string[] };
       if (!isAuthenticatedWawiManualSale) {
         const catalog = await db.select({
+          id: articles.id,
           sku: articles.sku,
           shopProductId: articles.shopProductId,
           name: articles.name,
@@ -510,6 +512,7 @@ export async function createOrderFromTrustedInput(
           category: articles.category, categories: articles.categories, stock: articles.stock,
         }).from(articles);
         if (isRegularMainshopPricing) {
+          mainshopSubstitutionEnabled = await isSubstitutionEnabled();
           const config = await db.select({ key: shopSettings.key, value: shopSettings.value }).from(shopSettings).where(inArray(shopSettings.key, ["promo_2for3_enabled", "promo_2for3_expires_at", "promo_2for3_mode", "promo_2for3_products"]));
           const values = new Map(config.map(s => [s.key, s.value || ""]));
           let valid = true; let products: string[] = [];
@@ -544,7 +547,7 @@ export async function createOrderFromTrustedInput(
               return { ...i, shopProductId: bac.sku, canonicalProductId: "bac-wasser-3ml" };
             });
             quantity = quantityPricing(input.items, [...canonical.quantityEligible, ...input.items.slice(canonical.items.length).map(() => false)], canonical.quantityUnits);
-            assertMainshopStock(input.items, catalog);
+            assertMainshopStock(input.items, catalog, mainshopSubstitutionEnabled);
           }
         }
       }
@@ -1261,7 +1264,15 @@ export async function createOrderFromTrustedInput(
         }
         if (configuredGlobalDiscount && Date.parse(configuredGlobalDiscount.expiresAt) <= Date.now()) throw new TRPCError({ code: "CONFLICT", message: "CHECKOUT_QUOTE_CHANGED" });
         if (mainshopPromotion2for3.enabled && mainshopPromotion2for3.expiresAt && Date.parse(mainshopPromotion2for3.expiresAt) <= Date.now() && input.items.some(i => i.variant === "2für3 · servergeneriert")) throw new TRPCError({ code: "CONFLICT", message: "CHECKOUT_QUOTE_CHANGED" });
-        assertMainshopStock(input.items, freshCatalog);
+        // Same global switch as isSubstitutionEnabled, now held through fulfillment.
+        // A savepoint keeps missing/erroring legacy config fail-closed without
+        // leaving the enclosing PostgreSQL transaction in an aborted state.
+        mainshopSubstitutionEnabled = await db.transaction(async configTx => {
+          const result = await configTx.execute(sql`SELECT enabled FROM substitution_config WHERE id = 1 LIMIT 1 FOR SHARE`) as any;
+          const rows = result?.rows ?? result ?? [];
+          return rows[0]?.enabled === true || rows[0]?.enabled === 1;
+        }).catch(() => false);
+        assertMainshopStock(input.items, freshCatalog, mainshopSubstitutionEnabled);
         await allocateCanonicalOrderId();
         await persistConfirmedAddress();
       }
@@ -1362,7 +1373,7 @@ export async function createOrderFromTrustedInput(
       const ambiguousVariantItems: string[] = [];
 
       // Smart Substitution: prüfen ob Feature aktiv ist
-      const substitutionActive = !isRegularMainshopPricing && input.storeKey !== "checkout-v2" && !ctx.jarvyOrder && await isSubstitutionEnabled();
+      const substitutionActive = isRegularMainshopPricing ? mainshopSubstitutionEnabled : input.storeKey !== "checkout-v2" && !ctx.jarvyOrder && await isSubstitutionEnabled();
 
       // Helper: find articles matching a shop item by direct variant SKU or canonical
       // shop product ID plus dosage. Bundle items carry the selected variant SKU; it must
@@ -1431,9 +1442,15 @@ export async function createOrderFromTrustedInput(
 
       // Map: item-Index → SubstitutionResult (für späteren Bestandsabzug)
       const substitutionMap = new Map<number, import('./substitutionService.js').SubstitutionResult>();
+      const mainshopSubstitutions = isRegularMainshopPricing ? assertMainshopStock(input.items, allArticlesForCheck, substitutionActive) : null;
 
       for (let itemIdx = 0; itemIdx < stockRelevantItems.length; itemIdx++) {
         const item = stockRelevantItems[itemIdx];
+        if (mainshopSubstitutions) {
+          const sub = mainshopSubstitutions.get(item.shopProductId!.trim().toLocaleLowerCase("de-DE"));
+          if (sub) substitutionMap.set(itemIdx, sub);
+          continue;
+        }
         if (input.storeKey === "peps4pets" || isAuthenticatedWawiManualSale) {
           if (item.type !== 'peptide') continue;
         } else if (!isRegularMainshopPricing && item.type !== 'peptide' && item.isFreeGift !== true) continue;
@@ -1542,7 +1559,12 @@ export async function createOrderFromTrustedInput(
       });
       const lockedInventory=plannedIds.size ? await db.select().from(articles).where(inArray(articles.id,[...plannedIds].sort((a,b)=>a-b))).orderBy(articles.id).for('update') : [];
       lockedInventory.forEach(fresh => {const a=allArticlesForCheck.find(a=>a.id===fresh.id);if(a)a.stock=fresh.stock;});
-      if (isRegularMainshopPricing) assertMainshopStock(input.items, allArticlesForCheck);
+      if (isRegularMainshopPricing) {
+        const lockedSubstitutions = assertMainshopStock(input.items, allArticlesForCheck, substitutionActive);
+        // Never deduct a stale/different plan. Selected families are already
+        // locked above, so an unexpected change must abort, not switch stock.
+        if (quoteHash([...lockedSubstitutions]) !== quoteHash([...mainshopSubstitutions!])) throw Error('ORDER_STOCK_PLAN_CHANGED');
+      }
       // ── Stock deduction: reduce stock for all ordered peptide items ──
       // Bei Substitution: Bestand der Ersatz-Varianten abziehen, nicht der bestellten Variante
       for (let itemIdx = 0; itemIdx < stockRelevantItems.length; itemIdx++) {
