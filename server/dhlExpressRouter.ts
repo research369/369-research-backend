@@ -36,6 +36,7 @@ import { eq } from "drizzle-orm";
 import { getUserFromRequest } from "./auth.js";
 import { validateSwissCustomsDeclaration, type SwissCustomsDeclaration } from "./swissCustomsService.js";
 import { getDhlLabelLifecycleForOrders, isDhlLabelLifecycleUsable } from "./dhlLabelLifecycleSummary.js";
+import { restoreSwissCustomsSelection, validateSwissCustomsSelection, type SwissCustomsDraftInput } from "./swissCustomsSelection.js";
 
 import { DhlRelabelService, DhlLabelError } from "./dhlRelabelService.js";
 import { PgDhlLabelStore } from "./dhlRelabelStore.js";
@@ -100,15 +101,6 @@ const alpha3ToAlpha2: Record<string, string> = {
   NOR: "NO", ISL: "IS", LIE: "LI",
 };
 
-type SwissCustomsDraftItem = {
-  orderItemId: number;
-  description: string;
-  hsCode: string;
-  countryOfOrigin: string;
-  unitWeightGrams: number;
-  unitCustomsValueEur: number;
-};
-
 function isSwissDestination(country: string | null | undefined): boolean {
   return normalizeCountryToAlpha3(String(country ?? "")) === "CHE";
 }
@@ -155,12 +147,20 @@ dhlExpressRouter.get(
     `, [orderId]);
     const savedByItem = new Map(saved.rows.filter((row) => row.order_item_id).map((row) => [Number(row.order_item_id), row]));
     const declaration = saved.rows[0];
+    const selection = restoreSwissCustomsSelection(rows, saved.rows.length > 0, new Set(savedByItem.keys()));
     res.json({
       success: true,
       orderId,
       packageWeightGrams: declaration?.package_weight_grams ? Number(declaration.package_weight_grams) : null,
       complianceConfirmed: Boolean(declaration?.compliance_confirmed_at),
-      items: rows.map((item) => {
+      excludedItems: selection.excludedItems.map((item) => ({
+        orderItemId: item.id,
+        name: item.name,
+        dosage: item.dosage,
+        variant: item.variant,
+        quantity: item.quantity,
+      })),
+      items: selection.items.map((item) => {
         const prior = savedByItem.get(item.id);
         return {
           orderItemId: item.id,
@@ -250,7 +250,7 @@ dhlExpressRouter.put(
   requireWawiAdmin,
   async (req: Request, res: Response) => {
     const orderId = String(req.params.orderId ?? "").trim();
-    const body = req.body as { packageWeightGrams?: unknown; complianceConfirmed?: unknown; items?: SwissCustomsDraftItem[] };
+    const body = (req.body ?? {}) as SwissCustomsDraftInput;
     const db = await getDb();
     const user = await getUserFromRequest(req);
     if (!db || !user) {
@@ -276,13 +276,9 @@ dhlExpressRouter.put(
     }
     const existingItems = await db.select({ id: orderItems.id, quantity: orderItems.quantity })
       .from(orderItems).where(eq(orderItems.orderId, orderId));
-    if (!Array.isArray(body.items) || body.items.length !== existingItems.length) {
-      res.status(422).json({ success: false, error: "Alle Bestellpositionen müssen genau einmal mit Zolldaten erfasst werden." });
-      return;
-    }
-    const inputById = new Map(body.items.map((item) => [Number(item.orderItemId), item]));
-    if (inputById.size !== existingItems.length || existingItems.some((item) => !inputById.has(item.id))) {
-      res.status(422).json({ success: false, error: "Die Zolldaten passen nicht exakt zu den Bestellpositionen." });
+    const selection = validateSwissCustomsSelection(existingItems, body.items, body.excludedOrderItemIds);
+    if (!selection.ok) {
+      res.status(422).json({ success: false, error: selection.error });
       return;
     }
     const draft: SwissCustomsDeclaration = {
@@ -291,18 +287,7 @@ dhlExpressRouter.put(
       shippingEur: Number(order.shipping ?? 0),
       subtotalEur: Number(order.subtotal ?? 0),
       discountEur: Number(order.discount ?? 0),
-      lines: existingItems.map((item) => {
-        const customs = inputById.get(item.id)!;
-        return {
-          orderItemId: item.id,
-          description: customs.description,
-          hsCode: customs.hsCode,
-          countryOfOrigin: customs.countryOfOrigin,
-          unitWeightGrams: Number(customs.unitWeightGrams),
-          quantity: Number(item.quantity),
-          unitCustomsValueEur: Number(customs.unitCustomsValueEur),
-        };
-      }),
+      lines: selection.lines,
     };
     const validated = validateSwissCustomsDeclaration(draft);
     if (!validated.ok) {
