@@ -33,6 +33,9 @@ export const globalAutomaticDiscountConfigSchema = z.object({
   stackWithPromotionCodes: z.boolean().default(true),
   stackWithPartnerCreatorCodes: z.boolean().default(true),
   stackWithKwk: z.boolean().default(true),
+  exclusiveCampaign: z.boolean().default(false),
+  coldShippingSurcharge: moneySchema.nullable().default(null),
+  freeBacWaterPerPaidVial: z.boolean().default(false),
   labelDe: z.string().trim().min(1).max(120),
   labelEn: z.string().trim().min(1).max(120),
 });
@@ -55,6 +58,11 @@ export const globalAutomaticDiscountConfigInputSchema = z.object({
   freeShippingRegions: z.array(globalAutomaticDiscountRegionSchema).optional(),
   stackWithPartnerCreatorCodes: z.boolean().optional(),
   stackWithKwk: z.boolean().optional(),
+  exclusiveCampaign: z.boolean().optional(),
+  coldShippingSurcharge: moneySchema.nullable().optional(),
+  freeBacWaterPerPaidVial: z.boolean().optional(),
+  labelDe: z.string().trim().min(1).max(120).optional(),
+  labelEn: z.string().trim().min(1).max(120).optional(),
 }).strict();
 
 export type GlobalAutomaticDiscountConfigInput = z.infer<typeof globalAutomaticDiscountConfigInputSchema>;
@@ -67,6 +75,10 @@ export type ActiveGlobalAutomaticDiscount = {
   stackWithPromotionCodes: boolean;
   stackWithPartnerCreatorCodes: boolean;
   stackWithKwk: boolean;
+  exclusiveCampaign: boolean;
+  coldShippingSurcharge: number | null;
+  freeBacWaterPerPaidVial: boolean;
+  startsAt: string | null;
   labelDe: string;
   labelEn: string;
   expiresAt: string;
@@ -97,6 +109,9 @@ export const defaultGlobalAutomaticDiscountConfig: GlobalAutomaticDiscountConfig
   stackWithPromotionCodes: true,
   stackWithPartnerCreatorCodes: true,
   stackWithKwk: true,
+  exclusiveCampaign: false,
+  coldShippingSurcharge: null,
+  freeBacWaterPerPaidVial: false,
   labelDe: "Dauerrabatt",
   labelEn: "Automatic discount",
 };
@@ -108,6 +123,7 @@ export const defaultGlobalAutomaticDiscountConfig: GlobalAutomaticDiscountConfig
  * record fails closed instead.
  */
 function hasValidStoredConfiguration(config: GlobalAutomaticDiscountConfig): boolean {
+  if (!globalAutomaticDiscountConfigSchema.safeParse(config).success) return false;
   if (config.enabled && !config.expiresAt) return false;
   if (config.startsAt && config.expiresAt
     && Date.parse(config.startsAt) >= Date.parse(config.expiresAt)) return false;
@@ -155,8 +171,9 @@ export function parseGlobalAutomaticDiscountConfig(value?: string | null): Globa
 
 /**
  * Resolves the two global benefits from server-owned eligibility facts. A
- * configured non-stacking explicit benefit wins; no promotion/partner/KWK code
- * is changed or invalidated by this resolver.
+ * In legacy mode a configured non-stacking explicit benefit wins. In strict
+ * exclusive mode the campaign always wins: separate policy guards reject code
+ * and credit attempts instead of letting them bypass the global campaign.
  */
 export function resolveGlobalAutomaticDiscountBenefits(
   activeConfig: ActiveGlobalAutomaticDiscount | null,
@@ -171,7 +188,7 @@ export function resolveGlobalAutomaticDiscountBenefits(
     || (facts.hasPartnerCreatorCode && !activeConfig.stackWithPartnerCreatorCodes)
     || (facts.hasKwk && !activeConfig.stackWithKwk),
   );
-  if (blockedByExplicitBenefit) {
+  if (blockedByExplicitBenefit && !activeConfig.exclusiveCampaign) {
     return { globalDiscountApplies: false, globalFreeShippingApplies: false };
   }
 
@@ -195,7 +212,8 @@ export function getActiveGlobalAutomaticDiscount(
   if (!hasValidStoredConfiguration(config) || !config.enabled || !config.expiresAt) return null;
   if (config.startsAt && new Date(config.startsAt).getTime() > now.getTime()) return null;
   if (new Date(config.expiresAt).getTime() <= now.getTime()) return null;
-  if (config.percentage <= 0 && !config.freeShippingEnabled) return null;
+  if (config.percentage <= 0 && !config.freeShippingEnabled
+    && !config.freeBacWaterPerPaidVial && config.coldShippingSurcharge === null) return null;
   return {
     percentage: config.percentage,
     freeShippingEnabled: config.freeShippingEnabled,
@@ -204,6 +222,10 @@ export function getActiveGlobalAutomaticDiscount(
     stackWithPromotionCodes: config.stackWithPromotionCodes,
     stackWithPartnerCreatorCodes: config.stackWithPartnerCreatorCodes,
     stackWithKwk: config.stackWithKwk,
+    exclusiveCampaign: config.exclusiveCampaign,
+    coldShippingSurcharge: config.coldShippingSurcharge,
+    freeBacWaterPerPaidVial: config.freeBacWaterPerPaidVial,
+    startsAt: config.startsAt,
     labelDe: config.labelDe,
     labelEn: config.labelEn,
     expiresAt: config.expiresAt,

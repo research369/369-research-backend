@@ -1,3 +1,5 @@
+import type { ActiveGlobalAutomaticDiscount } from "./globalAutomaticDiscountConfig.js";
+
 export const FREE_BAC_WATER_THRESHOLD = 50;
 export const FREE_BAC_WATER_PRODUCT_ID = "bac-wasser-3ml";
 
@@ -74,6 +76,11 @@ function isGeneratedFreeBacWater(item: CheckoutOrderItem): boolean {
     && normalise(item.name) === "bac wasser 3ml (gratis)";
 }
 
+function isCampaignExcludedForm(item: CheckoutOrderItem, article: BacEligibilityArticle | undefined): boolean {
+  const formDescription = [item.name, item.variant, ...articleCategories(article)].join(" ");
+  return /nasal|nasenspray|plug\s*[&+]?\s*play|fertigpen|forscherpen|patrone|beautyline|kosmetik|cosmetic|serum|kapsel|tablette/i.test(formDescription);
+}
+
 /**
  * Reconciles the auto-generated 3 ml BAC gift against the authoritative product catalogue.
  * The customer may receive one only per qualifying peptide vial. Cosmetics, pens, nasal
@@ -85,13 +92,22 @@ function isGeneratedFreeBacWater(item: CheckoutOrderItem): boolean {
 export function reconcileFreeBacWaterForShopOrder(
   items: CheckoutOrderItem[],
   catalog: BacEligibilityArticle[],
+  activeCampaign: ActiveGlobalAutomaticDiscount | null = null,
 ): CheckoutOrderItem[] {
   const normalItems = items.filter((item) => !isGeneratedFreeBacWater(item));
+  const campaignPerPaidVial = activeCampaign?.freeBacWaterPerPaidVial === true;
   const eligibleUnits = normalItems.reduce((sum, item) => {
     const article = findArticleForItem(item, catalog);
     const isBundleVial = item.variant?.startsWith("Bundle:") === true;
-    return isVialForm(item, article) && (isBundleVial || Number(item.price) >= FREE_BAC_WATER_THRESHOLD)
-      ? sum + Math.max(0, Number(item.quantity) || 0)
+    const price = Number(item.price);
+    const quantity = Number(item.quantity);
+    // Campaign entitlement is catalogue-confirmed and paid only. Call AFTER
+    // server repricing; the browser must never supply the qualifying price.
+    const qualifies = campaignPerPaidVial
+      ? Boolean(article) && Number.isFinite(price) && price > 0 && !isCampaignExcludedForm(item, article)
+      : isBundleVial || price >= FREE_BAC_WATER_THRESHOLD;
+    return isVialForm(item, article) && qualifies && Number.isInteger(quantity) && quantity > 0
+      ? sum + quantity
       : sum;
   }, 0);
 

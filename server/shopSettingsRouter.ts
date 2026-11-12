@@ -25,6 +25,12 @@ import {
   globalAutomaticDiscountConfigInputSchema,
   upsertGlobalAutomaticDiscountConfig,
 } from "./globalAutomaticDiscountConfig.js";
+import {
+  getPromotionPresets,
+  savePromotionPreset,
+  promotionPresetSchema,
+  GLOBAL_AUTOMATIC_DISCOUNT_PRESETS_KEY,
+} from "./promotionPresets.js";
 
 const WHATSAPP_CHANNEL_CONFIG_KEY = "whatsapp_channel_config";
 const PACKING_AUTOMATION_CONFIG_KEY = "packing_automation_config";
@@ -216,6 +222,13 @@ export const shopSettingsRouter = router({
     })),
 
   // ─── ADMIN: Globale Dauerrabatt-Aktion ─────────────────────────
+  getGlobalAutomaticDiscountPresets: adminProcedure
+    .query(async () => ({ presets: await getPromotionPresets() })),
+
+  saveGlobalAutomaticDiscountPreset: adminProcedure
+    .input(promotionPresetSchema)
+    .mutation(async ({ input }) => ({ presets: await savePromotionPreset(input) })),
+
   getGlobalAutomaticDiscountAdmin: adminProcedure
     .query(async () => ({
       config: await getGlobalAutomaticDiscountConfig(),
@@ -335,8 +348,8 @@ export const shopSettingsRouter = router({
   set: adminProcedure
     .input(z.object({ key: z.string(), value: z.string() }))
     .mutation(async ({ input }) => {
-      if (input.key === "global_automatic_discount") {
-        throw new Error("Die globale Dauerrabatt-Aktion darf nur über setGlobalAutomaticDiscount geändert werden");
+      if (input.key === "global_automatic_discount" || input.key === GLOBAL_AUTOMATIC_DISCOUNT_PRESETS_KEY) {
+        throw new Error("Aktionskonfiguration und Vorlagen dürfen nur über die jeweiligen Aktions-Endpunkte geändert werden");
       }
       const db = await getDb();
       if (!db) throw new Error("Database not available");

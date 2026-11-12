@@ -23,6 +23,7 @@ import { getDb, getPool } from "./db.js";
 import { partners, partnerAddressRequests, partnerTransactions, orders, orderItems, partnerCodeUsage, customers } from "../drizzle/schema.js";
 import { ENV } from "./env.js";
 import { bookPaidPartnerCommission, redeemPartnerCreditForOrder } from "./partnerCreditService.js";
+import { assertNoExclusiveCampaignBenefitFromDb } from "./exclusiveCampaignPolicy.js";
 import { updatePartnerTransactionStatus, recordPartnerPayout, previewHistoricalPartnerClaim, bookHistoricalPartnerClaim } from "./partnerFinancialAdminService.js";
 import { buildPartnerSettlementReport } from "./partnerSettlementReport.js";
 import type { Request } from "express";
@@ -761,6 +762,7 @@ export const partnerRouter = router({
   validateCode: publicProcedure
     .input(z.object({ code: z.string(), customerEmail: z.string().optional() }))
     .query(async ({ input }) => {
+      await assertNoExclusiveCampaignBenefitFromDb();
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
@@ -1369,6 +1371,7 @@ export const partnerRouter = router({
       orderId: z.string(),
     }))
     .mutation(async ({ ctx, input }) => {
+      await assertNoExclusiveCampaignBenefitFromDb();
       const partner = (ctx as any).partner;
       const db = await getDb();
       if (!db) throw new Error("Database not available");
@@ -1404,6 +1407,7 @@ export const partnerRouter = router({
       description: z.string().optional(),
     }))
     .mutation(async ({ input, ctx }) => {
+      await assertNoExclusiveCampaignBenefitFromDb();
       await enforceAuthRateLimit(ctx.req, "partner.login", input.partnerNumber);
       const db = await getDb();
       if (!db) throw new Error("Database not available");
