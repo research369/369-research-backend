@@ -20,7 +20,7 @@ import {orderHash} from "./jarvyOrderContract.js";
 import { eq, desc, inArray, and, or, getTableColumns } from "drizzle-orm";
 import { router, publicProcedure, adminProcedure, scopedOperationsReadProcedure, scopedOrderCleanupProcedure } from "./trpc.js";
 import { getDb, getPool } from "./db.js";
-import { orders, orderItems, articles, stockHistory, customers, customerCommunications, promoCodes } from "../drizzle/schema.js";
+import { orders, orderItems, articles, stockHistory, customers, customerCommunications, promoCodes, shopSettings } from "../drizzle/schema.js";
 import { getIncomingPayments, matchPaymentToOrder, intelligentMatch, type MatchResult } from "./bunqService.js";
 import { sendOrderConfirmationEmail, sendShippingNotificationEmail, sendAdminOrderNotification, sendPackingNotificationEmail } from "./emailService.js";
 import { getReleasedBankTransferInstructions } from "./paymentInstructionsConfig.js";
@@ -78,6 +78,10 @@ import {
   type ResolvedPartnerCode,
 } from "./partnerProgramService.js";
 import { isFinanciallyPaidStatus } from "./paidFinancialStatus.js";
+import { assertExclusiveCampaignAllowsBenefits, isStrictExclusiveCampaign } from "./exclusiveCampaignPolicy.js";
+import { resolveTrustedColdShippingItems, normalizePublicCheckoutPricingOptions } from "./coldShippingCatalog.js";
+import { getColdShippingAvailability } from "./coldShippingAvailability.js";
+import { authorizePublicGiftLines, type MultiBuyGiftConfig } from "./publicGiftAuthorization.js";
 import { reconcileFreeBacWaterForShopOrder } from "./freeBacWaterService.js";
 import { refreshCustomerOrderMetrics } from "./customerMetricsService.js";
 import { isCommercialOrder, isCompletedCommercialOrder } from "./commercialOrderMetrics.js";
@@ -210,6 +214,8 @@ const createOrderSchema = z.object({
   // Nur für authentifizierte WaWi-Aufträge: optionaler Kühlversand für
   // temperaturempfindliche Sendungen ohne Plug&Play- oder Nasenspray-Pflicht.
   coldShippingRequested: z.boolean().optional(),
+  // Effective only for authenticated manual WaWi sales. Public requests cannot grant free shipping.
+  freeBaseShippingRequested: z.boolean().optional(),
   total: z.number(),
   paymentMethod: z.enum(["bunq", "creditCard", "wise", "SEPA", "Bar", "Kreditkarte", "PayPal", "Crypto", "Guthaben", "Sonstige"]),
   date: z.string(),
@@ -275,6 +281,9 @@ export const orderRouter = router({
 
       const isRequestedWawiManualSale = input.orderSource === "wawi_manual";
       const isAuthenticatedWawiManualSale = isRequestedWawiManualSale && Boolean(ctx.user);
+      // Existing manual pickup is shipment-free; a public label cannot opt out of shipping.
+      const isAuthenticatedWawiPickup = isAuthenticatedWawiManualSale
+        && input.shippingCountry.trim().toLowerCase() === "abholung";
       // The manual workflow records discounts in discountBreakdown; labels such
       // as "25%" or "Kostenloser Versand" must never enter promo-code lookup.
       input.discountCode = normalizeDiscountCodeForOrderSource(input.orderSource, input.discountCode);
@@ -301,6 +310,18 @@ export const orderRouter = router({
         || requestedKwkCredit > 0
         || (input.kwkDiscount || 0) > 0;
       const configuredGlobalDiscount = await getActiveGlobalAutomaticDiscountFromDb();
+      const strictExclusiveCampaign = isStrictExclusiveCampaign(configuredGlobalDiscount);
+      // Guard before any code validation, wallet redemption, customer/order/stock write.
+      // The active campaign wins: a stale code cannot disable it to obtain another benefit.
+      assertExclusiveCampaignAllowsBenefits(configuredGlobalDiscount, {
+        discountCode: input.discountCode,
+        partnerCode: input.partnerCode,
+        kwkCode: input.kwkCode,
+        creditUsed: input.creditUsed,
+        kwkCreditUsed: input.kwkCreditUsed,
+        partnerDiscount: input.partnerDiscount,
+        kwkDiscount: input.kwkDiscount,
+      });
 
       // A public Creator/Partner code is a server-authoritative commercial term.
       // Its customer discount is never accepted from the browser. Creator codes
@@ -370,7 +391,7 @@ export const orderRouter = router({
       // A partner number identifies an authenticated self-order. Its monetary
       // terms are resolved below from the session-owned partner row; a public
       // code or any browser-provided percentage can never authorize this route.
-      const requiresPartnerSession = Boolean(input.partnerNumber?.trim()) || (input.creditUsed || 0) > 0;
+      const requiresPartnerSession = !strictExclusiveCampaign && (Boolean(input.partnerNumber?.trim()) || (input.creditUsed || 0) > 0);
       const authenticatedPartner = requiresPartnerSession
         ? ctx.operationsPreview?.partnerId
           ? (await db.select().from(partners).where(and(eq(partners.id,ctx.operationsPreview.partnerId),eq(partners.isActive,1))).limit(1))[0]??null
@@ -413,7 +434,7 @@ export const orderRouter = router({
           Number(authenticatedPartner.customerDiscountPercent || 0),
           Number(authenticatedPartner.commissionPercent || 0),
         );
-        selfOrderDiscountPercent = authenticatedSelfOrderTerms.discountPercent;
+        selfOrderDiscountPercent = strictExclusiveCampaign ? 0 : authenticatedSelfOrderTerms.discountPercent;
       }
 
       // Shared real/preview preflight, before pricing can clamp a requested
@@ -436,22 +457,28 @@ export const orderRouter = router({
       if (authenticatedPartner && resolvedPromoCode) {
         throw new Error("PARTNER_AKTIONSCODE_AUSGESCHLOSSEN: Partnerbestellungen können nur den zentralen Shop-Dauerrabatt kombinieren.");
       }
-      // The browser may show a free 3 ml BAC line for qualifying peptide vials,
-      // but it must never create one for cosmetics or other non-vial products.
-      // Rebuild that one generated gift from the catalogue before every public
-      // checkout is priced, stocked or persisted. Manual WaWi lines remain a
-      // separate, explicitly controlled workflow.
+      // A requested cold service is valid in public checkout too, but only after
+      // a server-owned destination check. A client cannot disable mandatory cooling.
+      const coldShippingRequested = !isAuthenticatedWawiPickup && input.coldShippingRequested === true;
+      const coldShippingCatalog = await db.select({
+        sku: articles.sku, shopProductId: articles.shopProductId, name: articles.name,
+        category: articles.category, categories: articles.categories, shopVisible: articles.shopVisible, isActive: articles.isActive,
+      }).from(articles);
       if (!isAuthenticatedWawiManualSale) {
-        const bacEligibilityCatalog = await db.select({
-          sku: articles.sku,
-          shopProductId: articles.shopProductId,
-          category: articles.category,
-          categories: articles.categories,
-        }).from(articles);
-        input.items = reconcileFreeBacWaterForShopOrder(input.items, bacEligibilityCatalog);
+        input.items = normalizePublicCheckoutPricingOptions(input.items, coldShippingCatalog);
       }
-      const coldShippingRequestedByWawi = isAuthenticatedWawiManualSale
-        && input.coldShippingRequested === true;
+      const trustedColdShippingItems = resolveTrustedColdShippingItems(input.items, coldShippingCatalog);
+      const mandatoryColdShipping = trustedColdShippingItems.some(requiresColdChainShipping);
+      if (!isAuthenticatedWawiPickup && (coldShippingRequested || mandatoryColdShipping)) {
+        const eligibility = await getColdShippingAvailability({
+          country: input.customer.country, zip: input.customer.zip, city: input.customer.city,
+        });
+        if (!eligibility.eligible) {
+          throw new Error(eligibility.status === "island"
+            ? "KUEHLVERSAND_INSEL_AUSGESCHLOSSEN: Gekühlter Versand und kühlpflichtige Artikel sind an Inseladressen nicht möglich. Bitte entferne die betroffenen Positionen oder ändere die Lieferadresse."
+            : "KUEHLVERSAND_ZIEL_UNGEKLAERT: Für diese Lieferadresse konnte gekühlter Versand nicht sicher freigegeben werden. Nicht kühlpflichtige Artikel bleiben mit Standardversand bestellbar.");
+        }
+      }
       // Der Shop-Checkout versendet wie bisher automatisch. Im manuellen
       // WaWi-Workflow ist Versand an den Kunden eine bewusste Einzelfreigabe;
       // der Browserwert ist erst nach erfolgreicher WaWi-Authentifizierung
@@ -475,9 +502,46 @@ export const orderRouter = router({
           isActive: articles.isActive,
           shopVisible: articles.shopVisible,
         }).from(articles);
+        const nonBacGifts = input.items.some((item) => item.isFreeGift && !["bac-wasser-3ml", "bac-water-3ml"].includes((item.shopProductId || "").trim().toLowerCase()));
+        let multiBuy: MultiBuyGiftConfig = { enabled: false, expiresAt: null, mode: "all", products: [] };
+        if (nonBacGifts && !strictExclusiveCampaign) {
+          const rows = await db.select({ key: shopSettings.key, value: shopSettings.value }).from(shopSettings)
+            .where(inArray(shopSettings.key, ["promo_2for3_enabled", "promo_2for3_expires_at", "promo_2for3_mode", "promo_2for3_products"]));
+          const settings = new Map(rows.map((row) => [row.key, row.value]));
+          let products: string[] = [];
+          try { const parsed = JSON.parse(settings.get("promo_2for3_products") || "[]"); if (Array.isArray(parsed)) products = parsed.filter((value) => typeof value === "string"); } catch { /* fail closed for malformed filtering */ }
+          const mode = settings.get("promo_2for3_mode");
+          multiBuy = { enabled: settings.get("promo_2for3_enabled") === "true", expiresAt: settings.get("promo_2for3_expires_at") || null, mode: mode === "include" || mode === "exclude" ? mode : "all", products };
+        }
+        authorizePublicGiftLines(input.items, catalog, multiBuy, strictExclusiveCampaign);
         const repriced = repricePublicCheckoutItems(input.items, catalog);
         input.items = repriced.items;
         input.subtotal = repriced.subtotal;
+      }
+      // The browser may show a free 3 ml BAC line for qualifying peptide vials,
+      // but it must never create one for cosmetics or other non-vial products.
+      // Rebuild that one generated gift from the catalogue before every public
+      // checkout is priced, stocked or persisted. Manual WaWi lines remain a
+      // separate, explicitly controlled workflow.
+      if (!isAuthenticatedWawiManualSale) {
+        const bacEligibilityCatalog = await db.select({
+          sku: articles.sku,
+          shopProductId: articles.shopProductId,
+          category: articles.category,
+          categories: articles.categories,
+        }).from(articles);
+        const physicalBacForms = resolveTrustedColdShippingItems(input.items, coldShippingCatalog);
+        const qualifiedBacItems = input.items.map((item, index) => ({ ...item,
+          isPlugPlay: physicalBacForms[index].isPlugPlay,
+          isNasalSpray: physicalBacForms[index].isNasalSpray,
+          isNasalDiySet: physicalBacForms[index].isNasalDiySet,
+        }));
+        // Physical forms forbid BAC with fixed ready cartridges; restore billable
+        // options before any later canonical KWK repricing to avoid another +15.
+        input.items = normalizePublicCheckoutPricingOptions(
+          reconcileFreeBacWaterForShopOrder(qualifiedBacItems, bacEligibilityCatalog, configuredGlobalDiscount),
+          coldShippingCatalog,
+        );
       }
       // A standalone public code's minimum order is evaluated only after the
       // server owns every item price and the pre-discount merchandise subtotal.
@@ -514,8 +578,11 @@ export const orderRouter = router({
       if (!isAuthenticatedWawiManualSale) {
         input.shipping = calculateAuthoritativeShipping({
           country: input.customer.country,
-          items: input.items,
+          items: trustedColdShippingItems,
           promoDescription: resolvedPromoCode?.description,
+          coldChainRequested: coldShippingRequested,
+          coldShippingSurcharge: configuredGlobalDiscount?.coldShippingSurcharge ?? undefined,
+          freeBaseShipping: globalBenefitResolution.globalFreeShippingApplies,
         });
         input.shippingCountry = resolveShippingRegion(input.customer.country);
       } else if (resolvedPromoCode) {
@@ -529,14 +596,20 @@ export const orderRouter = router({
         assertPromotionMinimumOrder(Number(promo.minOrder || 0), input.subtotal);
         input.shipping = calculateAuthoritativeShipping({
           country: input.customer.country,
-          items: input.items,
+          items: trustedColdShippingItems,
           promoDescription: resolvedPromoCode.description,
-          coldChainRequested: coldShippingRequestedByWawi,
+          coldChainRequested: coldShippingRequested,
+          coldShippingSurcharge: configuredGlobalDiscount?.coldShippingSurcharge ?? undefined,
+          freeBaseShipping: globalBenefitResolution.globalFreeShippingApplies,
         });
         input.shippingCountry = resolveShippingRegion(input.customer.country);
       }
-      if (globalBenefitResolution.globalFreeShippingApplies) {
-        input.shipping = 0;
+      if (globalBenefitResolution.globalFreeShippingApplies && !isAuthenticatedWawiPickup) {
+        input.shipping = calculateAuthoritativeShipping({
+          country: input.customer.country, items: trustedColdShippingItems,
+          coldChainRequested: coldShippingRequested, freeBaseShipping: true,
+          coldShippingSurcharge: configuredGlobalDiscount?.coldShippingSurcharge ?? undefined,
+        });
         input.shippingCountry = resolveShippingRegion(input.customer.country);
       }
       // The catalog-backed subtotal is available now. Every public shop term is
@@ -589,35 +662,29 @@ export const orderRouter = router({
       // mitgesendete Betrag wird ausschließlich dazu genutzt, die übrigen
       // bewusst gewährten Rabattanteile unverändert zu isolieren.
 
-        // Kühlversand darf nur einmal pro Auftrag berechnet werden. Plug&Play
-        // und fertig gemischte Nasensprays aktivieren ihn verpflichtend; ein
-        // authentifizierter WaWi-Auftrag kann ihn für andere Sendungen bewusst
-        // ergänzen. Ein bereits gewährter Gratisversand (0 €) bleibt erhalten.
-        const hasColdShippingService = coldShippingRequestedByWawi
-          || input.items.some(requiresColdChainShipping);
-        if (hasColdShippingService) {
-          (input as any)._coldShippingNote = coldShippingRequestedByWawi
-            ? "Kühlversand aktiv (manuell gewählt oder Plug&Play)"
-            : "Kühlversand aktiv (pflichtig durch Plug&Play/Nasenspray)";
-        }
-        const serverBaseShipping = calculateAuthoritativeShipping({
-          country: input.customer.country,
-          items: [],
-        });
-        const serverColdShipping = calculateAuthoritativeShipping({
-          country: input.customer.country,
-          items: input.items,
-          coldChainRequested: coldShippingRequestedByWawi,
-        });
-        if (
-          hasColdShippingService
-          && input.shipping >= serverBaseShipping
-          && Math.abs(input.shipping - serverColdShipping) > 0.02
-        ) {
-          input.shipping = serverColdShipping;
+      // Public prices were already rebuilt above; manual quotes keep their
+      // deliberate base price, but may never omit or duplicate a cold surcharge.
+      const hasColdShippingService = !isAuthenticatedWawiPickup && (coldShippingRequested || mandatoryColdShipping);
+      if (hasColdShippingService) {
+        (input as any)._coldShippingNote = mandatoryColdShipping
+          ? "Kühlversand aktiv (pflichtig durch Plug&Play/Nasenspray)"
+          : "Kühlversand aktiv (gewählt)";
+        if (isAuthenticatedWawiManualSale) {
+          input.shipping = calculateAuthoritativeShipping({
+            country: input.customer.country, items: trustedColdShippingItems,
+            promoDescription: resolvedPromoCode?.description,
+            coldChainRequested: coldShippingRequested,
+            freeBaseShipping: globalBenefitResolution.globalFreeShippingApplies || input.freeBaseShippingRequested === true || input.shipping === 0,
+            coldShippingSurcharge: configuredGlobalDiscount?.coldShippingSurcharge ?? undefined,
+          });
           input.shippingCountry = resolveShippingRegion(input.customer.country);
         }
+      }
 
+      if (isAuthenticatedWawiPickup) {
+        input.shipping = 0;
+        input.shippingCountry = "Abholung";
+      }
         const lineSubtotal = roundMoney(input.items.reduce((sum, item) => sum + item.price * item.quantity, 0));
       if (!hasKwkRequest && Math.abs(lineSubtotal - roundMoney(input.subtotal)) > 0.02) {
         throw new Error("Bestellsumme stimmt nicht mit den Artikelpositionen überein");
@@ -728,13 +795,12 @@ export const orderRouter = router({
         });
         input.shipping = calculateAuthoritativeShipping({
           country: input.customer.country,
-          items: input.items,
+          items: trustedColdShippingItems,
           promoDescription: promoDefinition?.description,
-          coldChainRequested: coldShippingRequestedByWawi,
+          coldChainRequested: coldShippingRequested,
+          freeBaseShipping: globalBenefitResolution.globalFreeShippingApplies,
+          coldShippingSurcharge: configuredGlobalDiscount?.coldShippingSurcharge ?? undefined,
         });
-        if (globalBenefitResolution.globalFreeShippingApplies) {
-          input.shipping = 0;
-        }
         input.shippingCountry = resolveShippingRegion(input.customer.country);
         const authoritative = calculateAuthoritativeKwkOrder({
           subtotal: input.subtotal,
@@ -761,7 +827,7 @@ export const orderRouter = router({
         const authoritativeWawiPricing = calculateAuthoritativeWawiManualOrder({
           subtotal: input.subtotal,
           shipping: input.shipping,
-          submittedDiscount: input.discount,
+          submittedDiscount: strictExclusiveCampaign ? submittedAutomaticGlobalDiscount : input.discount,
           submittedAutomaticGlobalDiscount,
           authoritativeAutomaticGlobalDiscount: automaticGlobalDiscountAmount,
         });
@@ -846,6 +912,18 @@ export const orderRouter = router({
           amount: authoritativePartnerCredit,
           percentage: undefined,
         });
+      }
+      if (!isAuthenticatedWawiManualSale) {
+        // All canonical repricing is complete. Persist trusted ready-form flags,
+        // but never feed fixed cartridge flags back into option pricing.
+        const physicalForms = resolveTrustedColdShippingItems(input.items, coldShippingCatalog);
+        input.items = input.items.map((item, index) => ({ ...item,
+          isPlugPlay: physicalForms[index].isPlugPlay,
+          isNasalSpray: physicalForms[index].isNasalSpray,
+          // The billable DIY option also owns kit-component insertion. A fixed
+          // catalogue DIY item must not generate a second component kit.
+          isNasalDiySet: item.isNasalDiySet,
+        }));
       }
       const submittedDiscountBreakdownTotal = roundMoney(
         submittedDiscountBreakdown.reduce((sum, entry) => sum + entry.amount, 0),
@@ -1057,8 +1135,8 @@ export const orderRouter = router({
       }
 
       // ── Partner logic: validate attribution and financial authorization ──
-      let partnerCode = input.partnerCode || null;
-      let partnerNumber = input.partnerNumber || null;
+      let partnerCode = strictExclusiveCampaign ? null : input.partnerCode || null;
+      let partnerNumber = strictExclusiveCampaign ? null : input.partnerNumber || null;
       let partnerDiscountAmount = roundMoney(input.partnerDiscount || 0);
       let partnerCommissionAmount = 0;
       let creditUsed = input.creditUsed || 0;
@@ -1068,7 +1146,7 @@ export const orderRouter = router({
       let partnerCommissionPercentSnapshot: number | null = resolvedPublicPartnerCode?.commissionPercent || null;
       let partnerCommissionBaseSnapshot: number | null = null;
 
-      if (authenticatedPartner) {
+      if (authenticatedPartner && !strictExclusiveCampaign) {
         if (partnerNumber && partnerNumber !== authenticatedPartner.partnerNumber) {
           throw new Error("PARTNER_GUTHABEN_PARTNER_MISMATCH");
         }
@@ -1098,7 +1176,7 @@ export const orderRouter = router({
 
       // Case 2: authenticated partner self-order. The session-owned partner is
       // the only authority for both direct discount and commission snapshots.
-      if (partnerNumber && authenticatedPartner) {
+      if (partnerNumber && authenticatedPartner && !strictExclusiveCampaign) {
         await resolvePartnerForOrder({ id: authenticatedPartner.id, code: null }, "Eigenbestellung");
         partnerProgram = authenticatedSelfOrderProgram;
         // Actual payout Creator conversion earns zero; explicit shop-credit

@@ -14,9 +14,9 @@ export function projectOffers(articles:OfferArticle[],promos:any[],globalValue:s
   const selectedCode=input.promotion?.mode==='explicit_code'?input.promotion.code.trim().toUpperCase():null;
   const auto=input.promotion?.mode==='bot_approved';
   const eligiblePromos=auto?promos.filter(p=>p.bot_auto_apply===true):promos;
-  const rules=projectDiscountRules(eligiblePromos,[],now).codes.filter(c=>(auto||!!selectedCode&&c.code.toUpperCase()===selectedCode)&&c.active&&(auto||c.customer_limit===0));
-  if(selectedCode&&!rules.length)throw Error('promotion_not_eligible');
   const global=getActiveGlobalAutomaticDiscount(parseGlobalAutomaticDiscountConfig(globalValue),now);
+  const rules=global?.exclusiveCampaign?[]:projectDiscountRules(eligiblePromos,[],now).codes.filter(c=>(auto||!!selectedCode&&c.code.toUpperCase()===selectedCode)&&c.active&&(auto||c.customer_limit===0));
+  if(selectedCode&&!rules.length)throw Error('promotion_not_eligible');
   const offers:any[]=[];
   for(const {a} of selected){
     const configured=Array.isArray(a.variants)&&a.variants.length?a.variants:[{dosage:a.name,inventoryArticleId:a.id,price:a.sale_price??a.selling_price}];
@@ -44,14 +44,14 @@ export function projectOffers(articles:OfferArticle[],promos:any[],globalValue:s
       const subtotal=unitPrice===null?null:roundMoney(unitPrice*input.quantity);
       const standardGlobalBenefits=subtotal===null?{globalDiscountApplies:false,globalFreeShippingApplies:false}:resolveGlobalAutomaticDiscountBenefits(global,{merchandiseSubtotal:subtotal,shippingRegion:resolveShippingRegion(input.country)});
       const automatic=subtotal===null||!standardGlobalBenefits.globalDiscountApplies?0:calculateAutomaticGlobalDiscount(subtotal,global?.percentage??0);
-      const standardShipping=standardGlobalBenefits.globalFreeShippingApplies?0:calculateAuthoritativeShipping({country:input.country,items:[{name:a.name,variant:label}]});
+      const standardShipping=calculateAuthoritativeShipping({country:input.country,items:[{name:a.name,variant:label}],freeBaseShipping:standardGlobalBenefits.globalFreeShippingApplies,coldShippingSurcharge:global?.coldShippingSurcharge??undefined});
       const promotions=subtotal===null?[]:rules.flatMap(rule=>{
         if(subtotal<rule.min_order)return[];
         const rawPromo=promos.find(p=>p.code===rule.code);if(!rawPromo)return[];
         const promotionGlobalBenefits=resolveGlobalAutomaticDiscountBenefits(global,{merchandiseSubtotal:subtotal,shippingRegion:resolveShippingRegion(input.country),hasPromotionCode:true});
         const preceding=promotionGlobalBenefits.globalDiscountApplies?calculateAutomaticGlobalDiscount(subtotal,global?.percentage??0):0;
         const discount=calculatePromoDiscount({subtotal,items:[item],precedingProductDiscount:preceding,promo:{discountType:rawPromo.discount_type,percentage:Number(rawPromo.percentage||0),fixedAmount:Number(rawPromo.fixed_amount||0),description:rawPromo.description}});
-        const shipping=promotionGlobalBenefits.globalFreeShippingApplies?0:calculateAuthoritativeShipping({country:input.country,items:[{name:a.name,variant:label}],promoDescription:rawPromo.description});
+        const shipping=calculateAuthoritativeShipping({country:input.country,items:[{name:a.name,variant:label}],promoDescription:rawPromo.description,freeBaseShipping:promotionGlobalBenefits.globalFreeShippingApplies,coldShippingSurcharge:global?.coldShippingSurcharge??undefined});
         if(discount<=0&&shipping>=standardShipping)return[];
         const productTotal=roundMoney(subtotal-preceding-discount);
         // Keinen Code als Vorteil nennen, wenn er einen höheren Endpreis verursacht.

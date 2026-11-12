@@ -173,10 +173,15 @@ function productMatchesRestriction(productId: string, restriction: string): bool
 
 export function calculateAutomaticGlobalDiscount(subtotal: number, percentage: number): number {
   const normalizedSubtotal = roundMoney(Math.max(0, subtotal));
-  return roundMoney(Math.min(
-    normalizedSubtotal,
-    normalizedSubtotal * Math.max(0, Math.min(100, percentage)) / 100,
-  ));
+  const rate = Math.max(0, Math.min(100, percentage));
+  const basisPoints = Math.round(rate * 100);
+  // Round from integer cents/basis points without first dividing a fractional
+  // euro amount. 215 EUR * 36.9% is 79.335: the discount must be 79.34, not 79.33.
+  // Preserve legacy rates with more than two decimal places.
+  const discount = Math.abs(rate * 100 - basisPoints) < 1e-8
+    ? Math.round(Math.round(normalizedSubtotal * 100) * basisPoints / 10000) / 100
+    : Math.round(normalizedSubtotal * rate) / 100;
+  return roundMoney(Math.min(normalizedSubtotal, discount));
 }
 
 /**

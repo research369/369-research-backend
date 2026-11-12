@@ -7,6 +7,7 @@
  */
 
 import { z } from "zod";
+import { getColdShippingAvailability } from "./coldShippingAvailability.js";
 import { eq } from "drizzle-orm";
 import { router, publicProcedure, adminProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
@@ -92,6 +93,11 @@ function parsePackingAutomationConfig(value: string | undefined): PackingAutomat
 }
 
 export const shopSettingsRouter = router({
+  // Read-only: no customer identity, address persistence or paid geocoder calls.
+  // Explicit partial mode; the rejected all-postcode policy is NOT activated.
+  getColdShippingEligibility: publicProcedure
+    .input(z.object({ country: z.string().max(100), zip: z.string().max(20), city: z.string().max(180) }).strict())
+    .query(({ input }) => getColdShippingAvailability(input)),
   // Kontodaten werden niemals über diesen öffentlichen Checkout-Vertrag geliefert.
   // Nach erfolgreicher Bestellung werden sie ausschließlich in der Antwort von order.create freigegeben.
   getBankTransferPresentation: publicProcedure
