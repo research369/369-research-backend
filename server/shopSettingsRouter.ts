@@ -94,7 +94,7 @@ function parsePackingAutomationConfig(value: string | undefined): PackingAutomat
 
 export const shopSettingsRouter = router({
   // Read-only: no customer identity, address persistence or paid geocoder calls.
-  // Explicit partial mode; the rejected all-postcode policy is NOT activated.
+  // Partial territory + reviewed island-only postcodes; no centroid geography.
   getColdShippingEligibility: publicProcedure
     .input(z.object({ country: z.string().max(100), zip: z.string().max(20), city: z.string().max(180) }).strict())
     .query(({ input }) => getColdShippingAvailability(input)),

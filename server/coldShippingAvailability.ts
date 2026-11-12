@@ -1,11 +1,12 @@
 import { COLD_SHIPPING_COUNTRIES } from "./coldShippingDestinationCountries.js";
+import { findIslandPostalRule } from "./islandPostalRules.js";
 
 export type ColdShippingAvailabilityInput = { country: string; zip: string; city: string };
 export type ColdShippingAvailability = {
   eligible: boolean;
   status: "mainland" | "island" | "unknown";
   reason: string;
-  policyMode: "island-territories-only";
+  policyMode: "reviewed-island-postcodes";
 };
 // ISO territories entirely on islands. NOT every island worldwide and NOT a
 // mainland whitelist. See docs/BLACK_FRIDAY_RELEASE.md for the explicit gap.
@@ -20,19 +21,20 @@ export const ISLAND_TERRITORIES = new Set([
   "UM", "VC", "VG", "VI", "VU", "WF", "WS", "YT",
 ]);
 /**
- * Explicitly PARTIAL production stage. The requested all-islands postcode
- * policy is NOT activated: it incorrectly denies known mainland destinations.
+ * Explicitly PARTIAL production stage. Whole-island territories and reviewed
+ * island-only postal jurisdictions are denied. No postal centroid or coastal
+ * buffer is used; mixed jurisdictions cannot be blocked by these rules.
  * Other territories retain their existing cold shipping availability; unknown
  * is not proof of mainland. Never advertise complete island-address detection.
  */
 export async function getColdShippingAvailability(input: ColdShippingAvailabilityInput): Promise<ColdShippingAvailability> {
   const key = input.country.trim().normalize("NFKC").toLocaleUpperCase("de-DE").replace(/\s+/g, " ");
   const country = COLD_SHIPPING_COUNTRIES[key];
-  if (country && ISLAND_TERRITORIES.has(country)) {
+  if (country && (ISLAND_TERRITORIES.has(country) || findIslandPostalRule(country, input.zip))) {
     return {
-      eligible: false, status: "island", policyMode: "island-territories-only",
+      eligible: false, status: "island", policyMode: "reviewed-island-postcodes",
       reason: "Gekühlter Versand und kühlpflichtige Artikel sind an Inseladressen nicht möglich. Bitte entferne die betroffenen Positionen oder ändere die Lieferadresse.",
     };
   }
-  return { eligible: true, status: "unknown", policyMode: "island-territories-only", reason: "" };
+  return { eligible: true, status: "unknown", policyMode: "reviewed-island-postcodes", reason: "" };
 }
