@@ -111,7 +111,7 @@ test("catalog prices and option surcharges are authoritative", () => {
 test("shipping comes from the delivery country and is never discounted by KWK", () => {
   assert.equal(calculateAuthoritativeShipping({ country: "Deutschland", items: [] }), 8);
   assert.equal(calculateAuthoritativeShipping({ country: "Schweiz", items: [{ isPlugPlay: true }] }), 25);
-  assert.equal(calculateAuthoritativeShipping({ country: "Deutschland", items: [{ isPlugPlay: true }], promoDescription: 'Aktion | {"freeShipping":["de"]}' }), 0);
+  assert.equal(calculateAuthoritativeShipping({ country: "Deutschland", items: [{ isPlugPlay: true }], promoDescription: 'Aktion | {"freeShipping":["de"]}' }), 7);
 });
 
 test("cold-chain shipping is added once per order for required or manual WaWi selections", () => {
@@ -139,4 +139,29 @@ test("finished nasal sprays always require cold-chain shipping, including legacy
     country: "Deutschland",
     items: [{ name: "Selank (10 mg)", variant: "Bundle: Mind X Bundle (Nasenspray)" }],
   }), 15);
+});
+
+test("campaign cold shipping is configurable, once per shipment, without changing item option pricing", () => {
+  const input = { country: "Deutschland", items: [{ isPlugPlay: true }, { isNasalSpray: true }], coldChainRequested: true };
+  assert.equal(calculateAuthoritativeShipping({ ...input, coldShippingSurcharge: 15 }), 23);
+  assert.equal(calculateAuthoritativeShipping({ ...input, coldShippingSurcharge: 14.98 }), 22.98);
+  assert.equal(calculateAuthoritativeShipping({ ...input, coldShippingSurcharge: 14.98, freeBaseShipping: true }), 14.98);
+  assert.equal(calculateAuthoritativeShipping({ ...input, coldShippingSurcharge: 15, promoDescription: 'BF | {"freeShipping":["de"]}' }), 15);
+  assert.equal(calculateAuthoritativeShipping({ ...input, coldShippingSurcharge: null }), 15);
+  for (const value of [-1, NaN, Infinity]) assert.equal(calculateAuthoritativeShipping({ ...input, coldShippingSurcharge: value }), 15);
+});
+
+test("free base shipping never changes noncold or standard regional shipping fees", () => {
+  for (const [country, base] of [["Deutschland",8],["Frankreich",15],["Schweiz",18]] as const) {
+    assert.equal(calculateAuthoritativeShipping({country,items:[],coldShippingSurcharge:15}),base);
+    assert.equal(calculateAuthoritativeShipping({country,items:[],freeBaseShipping:true,coldShippingSurcharge:15}),0);
+    assert.equal(calculateAuthoritativeShipping({country,items:[{isNasalSpray:true}],freeBaseShipping:true}),7);
+  }
+});
+
+test("legacy cooled cartridge/nasal detection excludes pens and DIY sets", () => {
+  assert.equal(requiresColdChainShipping({name:"Selank [Plug&Play Patrone]"}),true);
+  assert.equal(requiresColdChainShipping({variant:"Bundle: Nasal spray"}),true);
+  assert.equal(requiresColdChainShipping({name:"Plug&Play Pen"}),false);
+  assert.equal(requiresColdChainShipping({name:"DIY Nasenspray-Set",isNasalDiySet:true}),false);
 });

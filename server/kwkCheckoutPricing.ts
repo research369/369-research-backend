@@ -136,25 +136,33 @@ export const COLD_CHAIN_SHIPPING_SURCHARGE = 7;
  */
 export function requiresColdChainShipping(item: ShippingCheckoutItem): boolean {
   if (item.isPlugPlay === true) return true;
+  const descriptor = `${item.name || ""} ${item.variant || ""}`.toLowerCase();
+  if (/plug\s*(?:&|and|und)?\s*play/.test(descriptor) && /patrone|cartridge/.test(descriptor)) return true;
   if (item.isNasalDiySet === true) return false;
   if (item.isNasalSpray === true) return true;
-  const descriptor = `${item.name || ""} ${item.variant || ""}`.toLowerCase();
-  return descriptor.includes("nasenspray") && !descriptor.includes("diy");
+  return /nasenspray|nasal\s*spray/.test(descriptor) && !descriptor.includes("diy");
 }
 
 export function calculateAuthoritativeShipping(input: {
   country: string;
   items: ShippingCheckoutItem[];
   promoDescription?: string | null;
-  /** Explicit operator request for an otherwise non-cold manual WaWi shipment. */
+  /** Waives base only; cold-chain service must remain payable. */
+  freeBaseShipping?: boolean;
+  /** Pass only from the currently active authoritative campaign snapshot. */
+  coldShippingSurcharge?: number | null;
+  /** Explicit request, validated against destination eligibility by the caller. */
   coldChainRequested?: boolean;
 }): number {
   const region = resolveShippingRegion(input.country);
   const { freeShipping } = parsePromoMetadata(input.promoDescription);
-  if (freeShipping.some((entry) => entry.toLowerCase() === region)) return 0;
-  const base = region === "de" ? 8 : region === "ch" ? 18 : 15;
+  const waiveBase = input.freeBaseShipping === true || freeShipping.some((entry) => entry.toLowerCase() === region);
+  const base = waiveBase ? 0 : region === "de" ? 8 : region === "ch" ? 18 : 15;
   const hasColdChainService = input.coldChainRequested === true || input.items.some(requiresColdChainShipping);
-  return base + (hasColdChainService ? COLD_CHAIN_SHIPPING_SURCHARGE : 0);
+  const configuredCold = input.coldShippingSurcharge;
+  const cold = typeof configuredCold === "number" && Number.isFinite(configuredCold) && configuredCold >= 0
+    ? configuredCold : COLD_CHAIN_SHIPPING_SURCHARGE;
+  return roundMoney(base + (hasColdChainService ? cold : 0));
 }
 
 function productMatchesRestriction(productId: string, restriction: string): boolean {
