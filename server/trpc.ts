@@ -79,6 +79,7 @@ function scopedOperationsProcedure(capability: OperationsCapability) {
 export const scopedOperationsReadProcedure = scopedOperationsProcedure(OPERATIONS_CAPABILITIES.read);
 export const scopedPartnerCreditProcedure = scopedOperationsProcedure(OPERATIONS_CAPABILITIES.partnerCredit);
 export const scopedOrderCleanupProcedure = scopedOperationsProcedure(OPERATIONS_CAPABILITIES.orderCleanup);
+export const scopedCampaignProcedure = scopedOperationsProcedure(OPERATIONS_CAPABILITIES.campaignSettings);
 
 // Product Manager: role = "admin" OR role = "product_manager"
 // Kein Zugriff auf orders, customers, invoices, payments, checkout, users, migrations

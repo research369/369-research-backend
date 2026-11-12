@@ -9,7 +9,7 @@
 import { z } from "zod";
 import { getColdShippingAvailability } from "./coldShippingAvailability.js";
 import { eq } from "drizzle-orm";
-import { router, publicProcedure, adminProcedure } from "./trpc.js";
+import { router, publicProcedure, adminProcedure, scopedCampaignProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
 import { shopSettings } from "../drizzle/schema.js";
 import {
@@ -228,19 +228,19 @@ export const shopSettingsRouter = router({
     })),
 
   // ─── ADMIN: Globale Dauerrabatt-Aktion ─────────────────────────
-  getGlobalAutomaticDiscountPresets: adminProcedure
+  getGlobalAutomaticDiscountPresets: scopedCampaignProcedure
     .query(async () => ({ presets: await getPromotionPresets() })),
 
-  saveGlobalAutomaticDiscountPreset: adminProcedure
+  saveGlobalAutomaticDiscountPreset: scopedCampaignProcedure
     .input(promotionPresetSchema)
     .mutation(async ({ input }) => ({ presets: await savePromotionPreset(input) })),
 
-  getGlobalAutomaticDiscountAdmin: adminProcedure
+  getGlobalAutomaticDiscountAdmin: scopedCampaignProcedure
     .query(async () => ({
       config: await getGlobalAutomaticDiscountConfig(),
     })),
 
-  setGlobalAutomaticDiscount: adminProcedure
+  setGlobalAutomaticDiscount: scopedCampaignProcedure
     .input(globalAutomaticDiscountConfigInputSchema)
     .mutation(async ({ input }) => {
       const current = await getGlobalAutomaticDiscountConfig();
