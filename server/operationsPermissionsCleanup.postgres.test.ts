@@ -80,8 +80,14 @@ after(async () => { assert.equal(external, 0); await closeDb(); ENV.databaseUrl 
 
 test('mandatory schema grants exactly account 2; audit reason retained; migration replay never unrevokes', async () => {
   const grants = (await pool.query('SELECT * FROM operations_account_capability_grants ORDER BY capability')).rows;
-  assert.equal(grants.length, 3);
-  assert(grants.every((g: any) => g.user_id === 2 && g.username === 'product_manager' && g.required_role === 'product_manager' && /2026-11-09 Userauthorize.*Pakko/.test(g.grant_reason)));
+  assert.equal(grants.length, 4);
+  assert(grants.every((g: any) => g.user_id === 2 && g.username === 'product_manager' && g.required_role === 'product_manager'));
+  const oldGrants = grants.filter((g: any) => ['operations_read', 'partner_credit_adjust', 'order_cleanup'].includes(g.capability));
+  assert.equal(oldGrants.length, 3);
+  assert(oldGrants.every((g: any) => /2026-11-09 Userauthorize.*Pakko/.test(g.grant_reason)));
+  const campaignGrants = grants.filter((g: any) => g.capability === 'campaign_settings');
+  assert.equal(campaignGrants.length, 1);
+  assert(/2026-11-12 Userauthorize at 13:42:36.*Pakko/.test(campaignGrants[0].grant_reason));
   await pool.query("UPDATE operations_account_capability_grants SET revoked_at=NOW() WHERE capability='order_cleanup'");
   await ensurePermissionsSchema();
   assert((await pool.query("SELECT revoked_at FROM operations_account_capability_grants WHERE capability='order_cleanup'")).rows[0].revoked_at);
@@ -222,7 +228,8 @@ test('actual admin unchanged: bypass grants, can read and clean up; no accidenta
 });
 
 test('actual authenticated partner 10/10 shop-credit checkout: goods 284, shipping 25, credit 12.06; no Creator 20%', async () => {
-  await pool.query("UPDATE articles SET selling_price=284 WHERE id=9001");
+  // A cooled catalogue product, not a browser-only nasal flag on a vial.
+  await pool.query("UPDATE articles SET selling_price=284,name='Synthetic Nasenspray (10 mg)',category='Nasensprays' WHERE id=9001");
   await pool.query("INSERT INTO articles(id,sku,name,shop_product_id,stock,is_active,shop_visible,category,selling_price,variants) VALUES(9002,'BAC-10ML','Synthetic BAC','bac-wasser',10,1,1,'Zubehör',5,'[]')");
   const customer = { firstName: 'Synthetic', lastName: 'Owner', email: 'synthetic@fixture.invalid', phone: '+41790000000', street: 'Local', houseNumber: '1', zip: '8000', city: 'Local', country: 'CH' };
   const publicCaller = orderRouter.createCaller({ ...ctx(null), req: { headers: { authorization: `Bearer ${createPartnerToken(9001)}` } } });
