@@ -249,3 +249,112 @@ test("unknown/inactive public references are not authorized by option normalizat
   assert.equal(normalized.isPlugPlay, false);
   assert.throws(() => resolveAuthoritativeItemPrice(normalized, inactive), /KWK_ARTIKEL_NICHT_GEFUNDEN/);
 });
+
+// Regression: category membership is not an ordered, ready-made product form.
+const nasalTaggedVials = [
+  ...["bronchogen", "cardiogen", "cartalax"].map((id) => ({
+    sku: `${id.toUpperCase()}-20MG`, shopProductId: id, name: `${id} (20 mg)`,
+    category: "Bio-Regulatoren", categories: ["Bio-Regulatoren", "Longevity & Mitochondrien", "Regeneration & Heilung", "Nasensprays"],
+    shopVisible: 1, isActive: 1, sellingPrice: 39, salePrice: null, variants: [],
+  })),
+  ...["semax", "selank"].map((id) => ({
+    sku: `${id.toUpperCase()}-10MG`, shopProductId: id, name: `${id} (10 mg)`,
+    category: "Cognitive & Neuroprotective", categories: ["Cognitive & Neuroprotective", "Nasensprays"],
+    shopVisible: 1, isActive: 1, sellingPrice: 100, salePrice: null, variants: [],
+  })),
+];
+
+for (const article of nasalTaggedVials) {
+  test(`${article.shopProductId}: secondary Nasensprays tag and unvalidated nasal flags never select a spray`, () => {
+    for (const id of [article.shopProductId, article.sku]) {
+      for (const flags of [{}, { isNasalSpray: false, isNasalDiySet: false }, { isNasalSpray: true, variant: "Nasenspray" }]) {
+        const input = line(id, flags);
+        const [pricing] = normalizePublicCheckoutPricingOptions([input], [article]);
+        const [shipping] = resolveTrustedColdShippingItems([pricing], [article]);
+        assert.equal(pricing.isNasalSpray, false);
+        assert.equal(pricing.isNasalDiySet, false);
+        assert.equal(pricing.isPlugPlay, false);
+        assert.equal(shipping.isNasalSpray, false);
+        assert.equal(shipping.isNasalDiySet, false);
+        assert.equal(requiresColdChainShipping(shipping), false);
+        assert.equal(resolveAuthoritativeItemPrice(pricing, [article]), article.sellingPrice);
+        assert.equal(calculateAuthoritativeShipping({ country: "DE", items: [shipping], coldShippingSurcharge: 15 }), 8);
+      }
+    }
+    if (["bronchogen", "cardiogen", "cartalax"].includes(article.shopProductId)) {
+      const [pricing] = normalizePublicCheckoutPricingOptions([
+        line(article.shopProductId, { isNasalSpray: true, isNasalDiySet: true, variant: "Nasenspray" }),
+      ], [article]);
+      assert.equal(pricing.isNasalSpray, false);
+      assert.equal(pricing.isNasalDiySet, false);
+      assert.equal(catalogueRequiresColdShipping([pricing], [article]), false);
+    }
+  });
+}
+
+for (const id of ["semax", "selank"]) {
+  test(`${id}: explicitly chosen allowlisted DIY remains +7, unprepared and non-cold despite nasal tag`, () => {
+    const article = nasalTaggedVials.find((a) => a.shopProductId === id)!;
+    for (const reference of [id, article.sku]) {
+      const input = line(reference, { isNasalSpray: true, isNasalDiySet: true, isPlugPlay: true });
+      const [pricing] = normalizePublicCheckoutPricingOptions([input], [article]);
+      const [shipping] = resolveTrustedColdShippingItems([pricing], [article]);
+      assert.equal(pricing.isNasalSpray, true); // compatibility flag; DIY wins display/cooling
+      assert.equal(pricing.isNasalDiySet, true);
+      assert.equal(pricing.isPlugPlay, false); // existing explicit exclusion remains
+      assert.equal(shipping.isNasalDiySet, true);
+      assert.equal(requiresColdChainShipping(shipping), false);
+      assert.equal(resolveAuthoritativeItemPrice(pricing, [article]), 107);
+    }
+  });
+}
+
+test("actual catalogue nasal name or primary nasal form remains cold and cannot be relabelled DIY", () => {
+  for (const article of [
+    { ...catalog[1], category: "Peptide", categories: ["Peptide"] },
+    { ...catalog[1], name: "Fixed prepared product", categories: [] },
+  ]) {
+    const [pricing] = normalizePublicCheckoutPricingOptions([
+      line(article.shopProductId, { name: "Vial", isNasalSpray: false, isNasalDiySet: true }),
+    ], [article]);
+    const [shipping] = resolveTrustedColdShippingItems([pricing], [article]);
+    assert.equal(pricing.isNasalSpray, true);
+    assert.equal(pricing.isNasalDiySet, false);
+    assert.equal(requiresColdChainShipping(shipping), true);
+    assert.equal(resolveAuthoritativeItemPrice(pricing, [article]), 115);
+  }
+});
+
+test("secondary nasal tag preserves an existing eligible explicitly selected Plug&Play option", () => {
+  const article = nasalTaggedVials[0];
+  const [pricing] = normalizePublicCheckoutPricingOptions([line(article.shopProductId, { isPlugPlay: true, isNasalDiySet: true })], [article]);
+  const [shipping] = resolveTrustedColdShippingItems([pricing], [article]);
+  assert.equal(pricing.isPlugPlay, true);
+  assert.equal(pricing.isNasalSpray, false);
+  assert.equal(pricing.isNasalDiySet, false);
+  assert.equal(resolveAuthoritativeItemPrice(pricing, [article]), 54);
+  assert.equal(requiresColdChainShipping(shipping), true);
+});
+
+test("all other non-vial secondary category exclusions remain intact beside a nasal tag", () => {
+  for (const category of ["Fertigpens", "Forscherpens", "Kapseln / Tabletten", "Tabletten", "Kapseln", "369 BeautyLine", "Forscher-Bundles", "Zubehör"]) {
+    const article = { ...nasalTaggedVials[3], categories: ["Nasensprays", category] };
+    const [pricing] = normalizePublicCheckoutPricingOptions([line("semax", { isPlugPlay: true, isNasalSpray: true, isNasalDiySet: true })], [article]);
+    assert.equal(pricing.isPlugPlay, false, category);
+    assert.equal(pricing.isNasalSpray, false, category);
+    assert.equal(pricing.isNasalDiySet, false, category);
+  }
+});
+
+test("pens, empty bottles and fixed DIY products with secondary nasal tag still do not require cooling", () => {
+  for (const base of [catalog[3], catalog[4], catalog[5], catalog[6]]) {
+    const article = { ...base, categories: ["Nasensprays"] };
+    const [pricing] = normalizePublicCheckoutPricingOptions([line(article.shopProductId, { isPlugPlay: true, isNasalSpray: true, isNasalDiySet: true })], [article]);
+    const [shipping] = resolveTrustedColdShippingItems([pricing], [article]);
+    assert.equal(pricing.isPlugPlay, false);
+    assert.equal(pricing.isNasalSpray, false);
+    assert.equal(pricing.isNasalDiySet, false);
+    assert.equal(requiresColdChainShipping(shipping), false);
+    assert.equal(resolveAuthoritativeItemPrice(pricing, [article]), article.sellingPrice);
+  }
+});

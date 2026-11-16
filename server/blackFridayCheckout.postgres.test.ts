@@ -14,6 +14,16 @@ test("real checkout handler: BF prices, no-code enforcement, island refusal, exp
   for (const [sku, name, price, category] of [["BF-VIAL", "Synthetic Vial (10 mg)", 200, "Peptide"], ["BF-NASAL", "Synthetic Nasenspray (10 mg)", 200, "Nasensprays"], ["BF-PEN", "Synthetic Plug&Play Pen", 30, "Zubehör"], ["BF-READY", "Synthetic Plug&Play Patrone (10 mg)", 115, "Peptide"], ["bac-wasser-3ml", "BAC Wasser 3ml", 3, "Zubehör"]] as const) {
     await pool.query("INSERT INTO articles(sku,name,stock,shop_product_id,shop_visible,selling_price,category,is_active) VALUES($1,$2,100,$1,1,$3,$4,1)", [sku, name, price, category]);
   }
+  const taggedBioIds = ["bronchogen", "cardiogen", "cartalax"];
+  for (const id of [...taggedBioIds, "semax", "selank"]) {
+    const isBio = taggedBioIds.includes(id);
+    const category = isBio ? "Bio-Regulatoren" : "Cognitive & Neuroprotective";
+    const categories = isBio
+      ? [category, "Longevity & Mitochondrien", "Regeneration & Heilung", "Nasensprays"]
+      : [category, "Nasensprays"];
+    await pool.query("INSERT INTO articles(sku,name,stock,shop_product_id,shop_visible,selling_price,category,categories,is_active) VALUES($1,$2,100,$3,1,$4,$5,$6::jsonb,1)",
+      [`${id.toUpperCase()}-${isBio ? "20" : "10"}MG`, `Synthetic ${id} (${isBio ? "20" : "10"} mg)`, id, isBio ? 39 : 100, category, JSON.stringify(categories)]);
+  }
   await pool.query("INSERT INTO shop_settings(key,value) VALUES('address_validation_enabled','false') ON CONFLICT(key) DO UPDATE SET value='false'");
   await upsert(base);
   const caller = orderRouter.createCaller({ req: { headers: {} }, res: {}, user: null, operationsPreview: {} } as any);
@@ -33,6 +43,44 @@ test("real checkout handler: BF prices, no-code enforcement, island refusal, exp
     assert.equal(result.operationsPreview.discount, 73.8);
     assert.equal(result.operationsPreview.shipping, 0);
     assert.equal(result.operationsPreview.total, 126.2);
+    const taggedCart = {
+      ...make("bronchogen"),
+      items: taggedBioIds.map((id) => ({ ...make(id).items[0], name: `Synthetic ${id}`, dosage: "20 mg", variant: "20 mg", isNasalDiySet: false })),
+    };
+    const tagged: any = await withReadOnlyDatabase(() => caller.create(taggedCart));
+    assert.equal(tagged.operationsPreview.subtotal, 117);
+    assert.equal(tagged.operationsPreview.shipping, 8); // below 150: base only, never +15 cooling
+    assert.equal(tagged.operationsPreview.items.filter((line: any) => taggedBioIds.includes(line.shopProductId)).length, 3);
+    assert(tagged.operationsPreview.items.every((line: any) => line.price === 39));
+    const manipulated: any = await withReadOnlyDatabase(() => caller.create({
+      ...taggedCart, items: taggedCart.items.map((line) => ({ ...line, isNasalSpray: true, isNasalDiySet: true })),
+    }));
+    assert.equal(manipulated.operationsPreview.subtotal, 117);
+    assert.equal(manipulated.operationsPreview.shipping, 8);
+    // An availability tag must not activate cooling even on an island route.
+    const taggedIsland: any = await withReadOnlyDatabase(() => caller.create({
+      ...taggedCart, customer: make("bronchogen", "GB", "SW1A 1AA", "London").customer,
+    }));
+    assert.equal(taggedIsland.operationsPreview.subtotal, 117);
+    assert.equal(taggedIsland.operationsPreview.shipping, 15);
+    const taggedFreeBase: any = await withReadOnlyDatabase(() => caller.create({
+      ...taggedCart, items: taggedCart.items.map((line) => ({ ...line, quantity: 2 })),
+    }));
+    assert.equal(taggedFreeBase.operationsPreview.subtotal, 234);
+    assert.equal(taggedFreeBase.operationsPreview.shipping, 0); // no forced cold fee above threshold either
+    for (const id of ["semax", "selank"]) {
+      const plain: any = await withReadOnlyDatabase(() => caller.create(make(id)));
+      assert.equal(plain.operationsPreview.subtotal, 100);
+      assert.equal(plain.operationsPreview.shipping, 8);
+      const diy: any = await withReadOnlyDatabase(() => caller.create({
+        ...make(id), items: [{ ...make(id).items[0], isNasalSpray: true, isNasalDiySet: true, isPlugPlay: true }],
+      }));
+      assert.equal(diy.operationsPreview.subtotal, 107); // only existing allowlisted +7 DIY option
+      assert.equal(diy.operationsPreview.shipping, 8); // unmixed kit, not a ready spray
+    }
+    const readyNasal: any = await withReadOnlyDatabase(() => caller.create(make("BF-NASAL")));
+    assert.equal(readyNasal.operationsPreview.subtotal, 200);
+    assert.equal(readyNasal.operationsPreview.shipping, 15); // true catalogue spray is still mandatory cold
     await assert.rejects(withReadOnlyDatabase(() => caller.create({ ...make("BF-VIAL"), items: [...make("BF-VIAL").items, { ...make("BF-VIAL").items[0], price: 0, isFreeGift: true }] })), /SHOP_GRATISPOSITION_NICHT_AUTORISIERT/);
     const pen: any = await withReadOnlyDatabase(() => caller.create(make("BF-PEN")));
     assert.equal(pen.operationsPreview.subtotal, 30);

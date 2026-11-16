@@ -44,23 +44,28 @@ function findArticle(item: CatalogCheckoutItem, catalog: readonly ColdShippingCa
 }
 
 function resolveForms(item: CatalogCheckoutItem, article: ColdShippingCatalogArticle) {
+  const primaryCategory = normalize(article.category);
   const categories = [article.category, ...(Array.isArray(article.categories) ? article.categories : [])]
     .map(normalize).filter(Boolean);
   const descriptor = `${normalize(article.name)} ${categories.join(" ")}`;
-  const fixedDiy = descriptor.includes("diy");
+  // Secondary categories are shop filters / option availability, not a selected
+  // preparation. Only the catalogue name or primary form may identify a spray.
+  const formDescriptor = `${normalize(article.name)} ${primaryCategory}`;
+  const fixedDiy = formDescriptor.includes("diy");
   const accessory = accessoryPattern.test(article.name) || categories.includes("zubehör");
   // Use the same cartridge requirement as the canonical shipping helper.
   // Suppressing its nasal branch isolates Plug&Play form recognition.
   const fixedPlugPlay = !accessory && !fixedDiy
     && requiresColdChainShipping({ name: article.name, isNasalDiySet: true });
   const fixedNasal = !accessory && !fixedDiy
-    && /nasenspray|nasal\s*spray/i.test(descriptor)
-    && requiresColdChainShipping({ name: descriptor });
+    && /nasenspray|nasal\s*spray/i.test(formDescriptor)
+    && requiresColdChainShipping({ name: formDescriptor });
   const ids = [article.shopProductId, article.sku].map(normalize);
   const includedVial = ids.some((id) => plugPlayIncludedIds.has(id));
   const ordinaryVial = !fixedDiy && !fixedPlugPlay && !fixedNasal && !accessory
     && !/patrone|cartridge|kapsel|tablett|beautyline|kosmetik|cosmetic|\bserum\b|bac[\s-]*(?:wasser|water)/i.test(descriptor)
     && !categories.some((category) => nonVialCategories.has(category)
+      && !(category === "nasensprays" && primaryCategory !== "nasensprays")
       && !(includedVial && category === "forscher-bundles"));
   const plugPlayEligible = ordinaryVial && !ids.some((id) => plugPlayExcludedIds.has(id));
   const legacyVariant = String(item.variant ?? "");
