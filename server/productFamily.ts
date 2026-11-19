@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { TRPCError } from "@trpc/server";
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, getTableColumns, getTableName, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import { articles, articleSeo, articleMerchant, articleTranslations, articleFaq,
-  articleUseCases, useCases, productAuditLog } from "../drizzle/schema.js";
+  articleUseCases, useCases, productAuditLog, stockHistory } from "../drizzle/schema.js";
 import { getDb } from "./db.js";
 import { applyStockMovement } from "./stockMovementService.js";
 import { validateProductData } from "./productValidation.js";
@@ -105,6 +105,66 @@ function assertParsed<T>(schema: z.ZodType<T, any, any>, value: unknown, label: 
   if (!parsed.success) fail(`${label}: ${parsed.error.issues.map(i => i.message).join("; ")}`);
   return parsed.data;
 }
+
+// Only these fixed product relations are inspected. No caller-supplied SQL,
+// schema names, credentials, row contents or unrelated catalog metadata.
+const mandatoryProductTables = { articles, article_seo: articleSeo, article_merchant: articleMerchant,
+  article_translations: articleTranslations, article_faq: articleFaq,
+  product_audit_log: productAuditLog, stock_history: stockHistory };
+type ProductTableName = keyof typeof mandatoryProductTables | "use_cases" | "article_use_cases";
+type ProductSchemaStatus = { tables: Record<ProductTableName, boolean>; missingRequiredFields: string[] };
+type ProductSchema = { status: ProductSchemaStatus; columns: Record<ProductTableName, Map<string, number>> };
+async function inspectProductSchema(db: ProductDb): Promise<ProductSchema> {
+  const result = await db.execute<{ name: ProductTableName; present: boolean; fields: Array<{ name: string; type: number }> }>(sql`
+    WITH known(name) AS (VALUES ('articles'), ('article_seo'), ('article_merchant'),
+      ('article_translations'), ('article_faq'), ('article_use_cases'), ('use_cases'),
+      ('product_audit_log'), ('stock_history')),
+    relations AS (SELECT name, to_regclass(name) AS oid FROM known)
+    SELECT r.name, r.oid IS NOT NULL AS present,
+      COALESCE(jsonb_agg(jsonb_build_object('name', a.attname, 'type', a.atttypid::int)
+        ORDER BY a.attnum) FILTER (WHERE a.attname IS NOT NULL), '[]'::jsonb) AS fields
+    FROM relations r LEFT JOIN pg_attribute a
+      ON a.attrelid = r.oid AND a.attnum > 0 AND NOT a.attisdropped
+    GROUP BY r.name, r.oid ORDER BY r.name`);
+  const tables = {} as ProductSchemaStatus["tables"], columns = {} as ProductSchema["columns"];
+  for (const row of result.rows) {
+    tables[row.name] = row.present;
+    columns[row.name] = new Map(row.fields.map(f => [f.name, f.type]));
+  }
+  // Existing SELECT/RETURNING operations use the full declared mandatory rows.
+  // Report only those known field names, never arbitrary live schema fields.
+  const missingRequiredFields = Object.values(mandatoryProductTables).flatMap(table => {
+    const name = getTableName(table) as ProductTableName;
+    return Object.values(getTableColumns(table)).filter(c => !columns[name].has(c.name))
+      .map(c => `${name}.${c.name}`);
+  }).sort();
+  return { status: { tables, missingRequiredFields }, columns };
+}
+function requireProductSchema(schema: ProductSchema, fields = schema.status.missingRequiredFields) {
+  if (fields.length) fail(`Produkt-Schema unvollständig: ${fields.join(", ")}`, "CONFLICT");
+}
+function canReadUseCases(schema: ProductSchema) {
+  const c = schema.columns.use_cases;
+  // Integer IDs and text/varchar slugs match the existing data model.
+  return schema.status.tables.use_cases && c.get("id") === 23 && [25, 1043].includes(c.get("slug") ?? 0);
+}
+function canLinkUseCases(schema: ProductSchema) {
+  const c = schema.columns.article_use_cases;
+  return canReadUseCases(schema) && schema.status.tables.article_use_cases
+    && ["id", "article_id", "use_case_id"].every(name => c.get(name) === 23);
+}
+async function readAvailableUseCases(db: ProductDb, schema: ProductSchema) {
+  if (!canReadUseCases(schema)) return [] as Array<{ id: number; slug: string; visible?: number | boolean }>;
+  const rows = await db.select({ id: useCases.id, slug: useCases.slug,
+    // Row JSON avoids referencing an obsolete optional column in SQL.
+    visible: sql<unknown>`to_jsonb(${useCases})->'visible'` }).from(useCases).orderBy(asc(useCases.slug));
+  return rows.map(row => {
+    const item: { id: number; slug: string; visible?: number | boolean } = { id: row.id, slug: row.slug };
+    if (schema.columns.use_cases.has("visible") && (row.visible === 0 || row.visible === 1 || typeof row.visible === "boolean"))
+      item.visible = row.visible;
+    return item;
+  });
+}
 async function lock(tx: Tx, key: string) {
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`product-family:${key}`}, 0))`);
 }
@@ -128,12 +188,16 @@ async function audit(tx: Tx, articleId: number, action: string, requestKey: stri
 }
 
 export async function readFamily(db: ProductDb, shopProductId: string, forUpdate = false) {
+  const schema = await inspectProductSchema(db), productSchemaStatus = schema.status;
+  requireProductSchema(schema, ["articles.id", "articles.shop_product_id"].filter(field => productSchemaStatus.missingRequiredFields.includes(field)));
+  const existing = db.select({ id: articles.id }).from(articles).where(eq(articles.shopProductId, shopProductId));
+  const exists = await (forUpdate ? existing.for("update") : existing);
+  if (exists.length) requireProductSchema(schema);
+  const availableUseCases = await readAvailableUseCases(db, schema);
+  if (!exists.length) return { shopProductId, masterArticleId: null, master: null, articles: [], variants: [],
+    seo: null, merchant: null, translations: [], faqs: [], useCases: [], availableUseCases, validation: null, productSchemaStatus };
   const query = db.select().from(articles).where(eq(articles.shopProductId, shopProductId)).orderBy(asc(articles.id));
   const family = await (forUpdate ? query.for("update") : query);
-  const availableUseCases = await db.select({ id: useCases.id, slug: useCases.slug, visible: useCases.visible })
-    .from(useCases).orderBy(asc(useCases.slug));
-  if (!family.length) return { shopProductId, masterArticleId: null, master: null, articles: [], variants: [],
-    seo: null, merchant: null, translations: [], faqs: [], useCases: [], availableUseCases, validation: null };
   const masters = family.filter(a => Array.isArray(a.variants) && a.variants.length > 0);
   if (masters.length !== 1) fail("Familie benötigt genau einen eindeutigen Master mit Varianten", "CONFLICT");
   const master = masters[0];
@@ -142,17 +206,19 @@ export async function readFamily(db: ProductDb, shopProductId: string, forUpdate
   const merchant = await db.select().from(articleMerchant).where(inArray(articleMerchant.articleId, ids)).orderBy(asc(articleMerchant.id));
   const translations = await db.select().from(articleTranslations).where(inArray(articleTranslations.articleId, ids)).orderBy(asc(articleTranslations.lang), asc(articleTranslations.id));
   const faqs = await db.select().from(articleFaq).where(inArray(articleFaq.articleId, ids)).orderBy(asc(articleFaq.sortOrder), asc(articleFaq.id));
-  const links = await db.select({ id: articleUseCases.id, articleId: articleUseCases.articleId,
-    useCaseId: articleUseCases.useCaseId, slug: useCases.slug, sortOrder: articleUseCases.sortOrder, isPrimary: articleUseCases.isPrimary })
+  const links = canLinkUseCases(schema) ? await db.select({ id: articleUseCases.id, articleId: articleUseCases.articleId,
+    useCaseId: articleUseCases.useCaseId, slug: useCases.slug,
+    ...(schema.columns.article_use_cases.has("sort_order") ? { sortOrder: articleUseCases.sortOrder } : {}),
+    ...(schema.columns.article_use_cases.has("is_primary") ? { isPrimary: articleUseCases.isPrimary } : {}) })
     .from(articleUseCases).innerJoin(useCases, eq(articleUseCases.useCaseId, useCases.id))
-    .where(inArray(articleUseCases.articleId, ids)).orderBy(asc(useCases.slug), asc(articleUseCases.id));
+    .where(inArray(articleUseCases.articleId, ids)).orderBy(asc(useCases.slug), asc(articleUseCases.id)) : [];
   if (seo.length !== 1 || merchant.length !== 1 || [...seo, ...merchant, ...translations, ...faqs, ...links].some(r => r.articleId !== master.id)
     || new Set(translations.map(t => t.lang)).size !== translations.length)
     fail("Familien-Metadaten fehlen, sind mehrdeutig oder liegen auf einem Kindartikel", "CONFLICT");
   const de = translations.find(t => t.lang === "de");
   return { shopProductId, masterArticleId: master.id, master, articles: family,
     variants: master.variants as unknown[], seo: seo[0], merchant: merchant[0], translations, faqs,
-    useCases: links, availableUseCases, validation: validateProductData(master, seo[0], merchant[0], de) };
+    useCases: links, availableUseCases, validation: validateProductData(master, seo[0], merchant[0], de), productSchemaStatus };
 }
 
 // Shared exact-master validation for creation and publication; no LIMIT 1 or fallback.
@@ -212,6 +278,10 @@ function validateFamily(family: Awaited<ReturnType<typeof readFamily>>) {
 export async function createProductFamily(db: Db, input: CreateFamilyInput, actor: string) {
   // First variant owns the canonical source; its stock is never a family sum.
   return db.transaction(async tx => {
+    const schema = await inspectProductSchema(tx);
+    requireProductSchema(schema);
+    if (input.useCaseSlugs.length && !canLinkUseCases(schema))
+      fail("Use-Case-Slugs können nicht verknüpft werden: optionale use_cases/article_use_cases Tabellen oder ID-/Slug-Felder fehlen oder sind inkompatibel");
     await lock(tx, `request:${input.requestKey}`);
     await lock(tx, `family:${input.shopProductId}`);
     for (const sku of input.variants.map(v => v.sku).sort()) await lock(tx, `sku:${sku}`);
@@ -223,8 +293,10 @@ export async function createProductFamily(db: Db, input: CreateFamilyInput, acto
       fail("SKU existiert bereits", "CONFLICT");
     if ((await tx.select({ id: articleSeo.id }).from(articleSeo).where(eq(articleSeo.slug, input.shopProductId))).length)
       fail("SEO-Slug existiert bereits", "CONFLICT");
-    const selectedUseCases = input.useCaseSlugs.length ? await tx.select().from(useCases).where(inArray(useCases.slug, input.useCaseSlugs)) : [];
-    if (selectedUseCases.length !== input.useCaseSlugs.length) fail("Use-Case-Slug existiert nicht");
+    const selectedUseCases = input.useCaseSlugs.length ? await tx.select({ id: useCases.id, slug: useCases.slug })
+      .from(useCases).where(inArray(useCases.slug, input.useCaseSlugs)) : [];
+    if (selectedUseCases.length !== input.useCaseSlugs.length || new Set(selectedUseCases.map(u => u.slug)).size !== input.useCaseSlugs.length)
+      fail("Use-Case-Slug existiert nicht oder ist mehrdeutig");
     const articleIds: number[] = [];
     const variants: FamilyVariant[] = [];
     for (const v of input.variants) {
@@ -253,7 +325,7 @@ export async function createProductFamily(db: Db, input: CreateFamilyInput, acto
       await tx.insert(articleTranslations).values({ articleId: masterArticleId, ...t });
     await tx.insert(articleFaq).values(input.faqs.map((f, index) => ({ articleId: masterArticleId, ...f, sortOrder: index + 1, isVisible: 1 })));
     for (const u of selectedUseCases.sort((a, b) => a.slug.localeCompare(b.slug)))
-      await tx.insert(articleUseCases).values({ articleId: masterArticleId, useCaseId: u.id });
+      await tx.execute(sql`INSERT INTO article_use_cases (article_id, use_case_id) VALUES (${masterArticleId}, ${u.id})`);
     const created = await readFamily(tx, input.shopProductId);
     if (created.articles.some(a => a.shopVisible !== 0 || a.publishedAt !== null)) fail("Neuanlage muss vollständig verborgen sein");
     const validation = validateFamily(created);
@@ -272,6 +344,7 @@ type PublishResponse = { success: true; shopProductId: string; masterArticleId: 
 
 export async function publishProductFamily(db: Db, input: PublishFamilyInput, actor: string) {
   return db.transaction(async tx => {
+    requireProductSchema(await inspectProductSchema(tx));
     await lock(tx, `request:${input.requestKey}`);
     await lock(tx, `family:${input.shopProductId}`);
     const prior = await replay<PublishResponse>(tx, input.requestKey, "PUBLISH_FAMILY", input);

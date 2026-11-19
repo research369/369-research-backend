@@ -22,8 +22,23 @@ let networkCalls = 0;
 const productTables = ["articles", "article_seo", "article_merchant", "article_translations", "article_faq", "article_use_cases", "stock_history", "product_audit_log", "use_cases"];
 async function snapshot() {
   const result: Record<string, unknown> = {};
-  for (const table of productTables) result[table] = (await pool.query(`SELECT * FROM ${table} ORDER BY id`)).rows;
+  for (const table of productTables) result[table] = (await pool.query("SELECT to_regclass($1) AS oid", [table])).rows[0].oid
+    ? (await pool.query(`SELECT * FROM ${table} ORDER BY id`)).rows : null;
   return result;
+}
+async function articleSequence() {
+  // PostgreSQL sequences do not roll back: an unchanged sequence proves that
+  // rejection happened before any attempted article insertion, not just rollback.
+  return (await pool.query("SELECT last_value, is_called FROM articles_id_seq")).rows[0];
+}
+async function withSchemaChange(statement: string, work: () => Promise<void>) {
+  await pool.query(statement);
+  try { await work(); } finally {
+    // Restore only our secret-free disposable schema, including CASCADE'd FKs.
+    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
+    await pool.query(readFileSync(`${socket}/../schema.sql`, "utf8"));
+    await seedFixture();
+  }
 }
 function payload(shopProductId = "local-eloralintide") {
   return { requestKey: randomUUID(), shopProductId, name: "Eloralintide", category: "Vials",
@@ -62,12 +77,13 @@ before(async () => {
   const local = await getPool(); assert(local); pool = local;
   assert.equal((await pool.query("SELECT current_user")).rows[0].current_user, "family_local");
 });
-beforeEach(async () => {
+async function seedFixture() {
   await pool.query("TRUNCATE article_seo,article_merchant,article_translations,article_faq,article_use_cases,stock_history,product_audit_log,articles,use_cases RESTART IDENTITY CASCADE");
   await pool.query("INSERT INTO use_cases(slug,visible) VALUES('metabolic-research',0),('fat-loss',1)");
   await pool.query("INSERT INTO articles(sku,name,shop_product_id,selling_price,stock,shop_visible,is_active,purity) VALUES('EXISTING-SKU','Unrelated sentinel (20 mg)','unrelated-existing',123.45,7,1,1,'99%')");
   await pool.query("INSERT INTO article_seo(article_id,slug,seo_title) VALUES(1,'unrelated-existing','Untouched SEO'); INSERT INTO article_merchant(article_id,brand) VALUES(1,'Untouched brand'); INSERT INTO stock_history(article_id,change_type,quantity_before,quantity_change,quantity_after,reason) VALUES(1,'wareneingang',0,7,7,'sentinel'); INSERT INTO product_audit_log(article_id,action,changed_by,new_value) VALUES(1,'SENTINEL','fixture','untouched')");
-});
+}
+beforeEach(seedFixture);
 after(async () => {
   assert.equal(networkCalls, 0);
   console.log("Isolation evidence: external HTTP calls=0; dedicated family_local PostgreSQL fixture; external credentials erased.");
@@ -314,4 +330,168 @@ test("manager is allowed, customers/packing/unauthenticated are denied on all th
   const serviceSource = readFileSync(new URL("./productFamily.ts", import.meta.url), "utf8");
   assert(!/\b(customers|orders|payments|invoices|users)\b/.test(serviceSource));
   assert(!/ALTER TABLE|CREATE TABLE|ensure.*Schema|saleActive|limit\(1\)/.test(serviceSource));
+});
+
+test("schema status exposes only fixed product table booleans and required field names without writes", async () => {
+  const stable = await snapshot(), sequence = await articleSequence();
+  const result = await caller().getFamily({ shopProductId: "does-not-exist" });
+  assert.deepEqual(Object.keys(result.productSchemaStatus).sort(), ["missingRequiredFields", "tables"]);
+  assert.deepEqual(Object.keys(result.productSchemaStatus.tables).sort(), [...productTables].sort());
+  assert(Object.values(result.productSchemaStatus.tables).every(value => value === true));
+  assert.deepEqual(result.productSchemaStatus.missingRequiredFields, []);
+  await assert.rejects(caller().getFamily({ shopProductId: "does-not-exist", sql: "SELECT 1" } as any));
+  assert.deepEqual(await snapshot(), stable); assert.deepEqual(await articleSequence(), sequence);
+});
+
+test("dropped optional tables: absent read, hidden creation, exact metadata/FAQ/stock, publication and final read succeed without links", async () => {
+  for (const statement of ["DROP TABLE article_use_cases; DROP TABLE use_cases CASCADE", "DROP TABLE article_use_cases", "DROP TABLE use_cases CASCADE"]) {
+    await withSchemaChange(statement, async () => {
+      const input = payload(); input.useCaseSlugs = [];
+      const old: any = await snapshot(), absent = await caller().getFamily({ shopProductId: input.shopProductId });
+      assert.equal(absent.master, null); assert.deepEqual(absent.productSchemaStatus.missingRequiredFields, []);
+      assert.equal(absent.productSchemaStatus.tables.use_cases, old.use_cases !== null);
+      assert.equal(absent.productSchemaStatus.tables.article_use_cases, old.article_use_cases !== null);
+      assert.deepEqual(absent.useCases, []);
+      assert.equal(absent.availableUseCases.length, old.use_cases === null ? 0 : 2);
+      assert.deepEqual(await snapshot(), old);
+      const created = await caller().createFamily(input), hidden = await caller().getFamily({ shopProductId: input.shopProductId });
+      assert(hidden.articles.every(a => a.shopVisible === 0 && a.publishedAt === null));
+      assert.deepEqual(hidden.useCases, []); assert.equal(hidden.validation?.score, 100);
+      assert.equal(hidden.seo?.canonical, input.seo.canonical); assert.equal(hidden.seo?.faqEnabled, 1);
+      assert.equal(hidden.merchant?.merchantTitle, input.merchant.merchantTitle);
+      assert.equal(hidden.merchant?.merchantDescription, input.merchant.merchantDescription);
+      assert.equal(hidden.translations.length, 1); assert.equal(hidden.translations[0].merchantDescription, input.merchant.merchantDescription);
+      assert.deepEqual(hidden.faqs.map(f => ({ lang: f.lang, question: f.question, answer: f.answer })), input.faqs);
+      assert(hidden.faqs.every(f => f.articleId === created.masterArticleId && f.isVisible === 1));
+      assert.deepEqual(hidden.articles.map(a => [a.sellingPrice, a.stock]), [["64.00", 9], ["115.00", 9]]);
+      const stocks = (await pool.query("SELECT article_id,change_type,quantity_before,quantity_change,quantity_after,reason FROM stock_history WHERE article_id=ANY($1::int[]) ORDER BY article_id", [created.articleIds])).rows;
+      assert.deepEqual(stocks, created.articleIds.map(articleId => ({ article_id: articleId, change_type: "wareneingang", quantity_before: 0, quantity_change: 9, quantity_after: 9, reason: "Produktanlage" })));
+      const beforePublish: any = await snapshot();
+      const publish = pub(created); assert.equal((await caller().publishFamily(publish)).shopVisible, true);
+      const family = await caller().getFamily({ shopProductId: input.shopProductId });
+      assert.equal(family.master?.shopVisible, 1); assert(family.master?.publishedAt); assert.equal(family.articles[1].shopVisible, 0);
+      assert.equal(family.articles[1].publishedAt, null); assert.deepEqual(family.useCases, []);
+      assert.deepEqual(family.seo, hidden.seo); assert.deepEqual(family.merchant, hidden.merchant);
+      assert.deepEqual(family.faqs, hidden.faqs); assert.deepEqual(family.translations, hidden.translations);
+      const now: any = await snapshot();
+      assert.deepEqual(now.stock_history, beforePublish.stock_history);
+      for (const table of ["articles", "article_seo", "article_merchant", "stock_history", "product_audit_log"])
+        assert.deepEqual(now[table].filter((r: any) => r.id === 1), old[table]);
+      assert.deepEqual(now.use_cases, old.use_cases);
+      assert.deepEqual(now.product_audit_log.filter((r: any) => r.article_id === created.masterArticleId).map((r: any) => r.action), ["CREATE_FAMILY", "PUBLISH_FAMILY"]);
+      const published = await snapshot(); await caller().publishFamily(publish); assert.deepEqual(await snapshot(), published);
+    });
+  }
+});
+
+test("explicit slugs with missing/incompatible optional relations reject clearly before any insert; unknown slugs do not create global use cases", async () => {
+  for (const statement of ["DROP TABLE article_use_cases; DROP TABLE use_cases CASCADE", "DROP TABLE article_use_cases", "DROP TABLE use_cases CASCADE",
+    "ALTER TABLE use_cases DROP COLUMN slug", "ALTER TABLE article_use_cases DROP COLUMN use_case_id",
+    "ALTER TABLE use_cases ALTER COLUMN slug TYPE integer USING id"]) {
+    await withSchemaChange(statement, async () => {
+      const stable = await snapshot(), sequence = await articleSequence();
+      await assert.rejects(caller().createFamily(payload()), (e: any) => e.code === "BAD_REQUEST" && /Use-Case-Slugs.*fehlen oder sind inkompatibel/.test(e.message));
+      assert.deepEqual(await snapshot(), stable); assert.deepEqual(await articleSequence(), sequence);
+      const noLinks = payload(); noLinks.useCaseSlugs = [];
+      const created = await caller().createFamily(noLinks); await caller().publishFamily(pub(created));
+      assert.deepEqual((await caller().getFamily({ shopProductId: noLinks.shopProductId })).useCases, []);
+    });
+  }
+  const unknown = payload(); unknown.useCaseSlugs = ["not-existing"];
+  const stable = await snapshot(), sequence = await articleSequence();
+  await assert.rejects(caller().createFamily(unknown), (e: any) => e.code === "BAD_REQUEST" && /Use-Case-Slug existiert nicht/.test(e.message));
+  assert.deepEqual(await snapshot(), stable); assert.deepEqual(await articleSequence(), sequence);
+});
+
+test("obsolete visible column and missing nonessential link fields do not break read/create/publish or assume visibility", async () => {
+  await withSchemaChange("ALTER TABLE use_cases DROP COLUMN visible; ALTER TABLE use_cases DROP COLUMN image_url; ALTER TABLE article_use_cases DROP COLUMN sort_order; ALTER TABLE article_use_cases DROP COLUMN is_primary", async () => {
+    const absent = await caller().getFamily({ shopProductId: "does-not-exist" });
+    assert.deepEqual(absent.availableUseCases.map(u => u.slug), ["fat-loss", "metabolic-research"]);
+    assert(absent.availableUseCases.every(u => !Object.hasOwn(u, "visible")));
+    assert.deepEqual(absent.productSchemaStatus.missingRequiredFields, []);
+    const input = payload(), created = await caller().createFamily(input);
+    await caller().publishFamily(pub(created));
+    const family = await caller().getFamily({ shopProductId: input.shopProductId });
+    assert.equal(family.useCases[0].slug, "metabolic-research"); assert.equal(family.useCases[0].articleId, created.masterArticleId);
+    assert(!Object.hasOwn(family.useCases[0], "sortOrder")); assert(!Object.hasOwn(family.useCases[0], "isPrimary"));
+    assert(family.availableUseCases.every(u => !Object.hasOwn(u, "visible")));
+  });
+});
+
+test("nullable unknown visibility is omitted and actual boolean visibility remains explicit", async () => {
+  await withSchemaChange("UPDATE use_cases SET visible=NULL WHERE slug='metabolic-research'; ALTER TABLE use_cases ALTER COLUMN visible DROP DEFAULT; ALTER TABLE use_cases ALTER COLUMN visible TYPE boolean USING visible=1", async () => {
+    const result = await caller().getFamily({ shopProductId: "does-not-exist" });
+    assert.equal(result.availableUseCases[0].visible, true);
+    assert(!Object.hasOwn(result.availableUseCases[1], "visible"));
+    const created = await caller().createFamily(payload()); await caller().publishFamily(pub(created));
+  });
+});
+
+test("missing mandatory metadata/audit/stock tables are reported for absent families and reject creation/publication before inserts", async () => {
+  for (const table of ["article_seo", "article_merchant", "article_translations", "article_faq", "product_audit_log", "stock_history"]) {
+    const created = await caller().createFamily(payload());
+    await withSchemaChange(`DROP TABLE ${table} CASCADE`, async () => {
+      const stable = await snapshot(), sequence = await articleSequence();
+      const missing = await caller().getFamily({ shopProductId: "does-not-exist" });
+      assert.equal(missing.master, null); assert.equal(missing.productSchemaStatus.tables[table as keyof typeof missing.productSchemaStatus.tables], false);
+      assert(missing.productSchemaStatus.missingRequiredFields.includes(`${table}.id`));
+      const clear = (e: any) => e.code === "CONFLICT" && e.message.includes("Produkt-Schema unvollständig:") && e.message.includes(`${table}.id`);
+      await assert.rejects(caller().getFamily({ shopProductId: created.shopProductId }), clear);
+      const input = payload("other-family"); input.useCaseSlugs = [];
+      await assert.rejects(caller().createFamily(input), clear);
+      await assert.rejects(caller().publishFamily(pub(created)), clear);
+      assert.deepEqual(await snapshot(), stable); assert.deepEqual(await articleSequence(), sequence);
+    });
+  }
+});
+
+test("missing required FAQ/translation/article fields are detected before insert, while missing articles table fails clearly", async () => {
+  for (const [table, column] of [["article_faq", "lang"], ["article_faq", "is_visible"], ["article_translations", "merchant_description"], ["articles", "purity"]]) {
+    const created = await caller().createFamily(payload());
+    await withSchemaChange(`ALTER TABLE ${table} DROP COLUMN ${column}`, async () => {
+      const stable = await snapshot(), sequence = await articleSequence();
+      const result = await caller().getFamily({ shopProductId: "does-not-exist" });
+      assert.equal(result.productSchemaStatus.tables[table as keyof typeof result.productSchemaStatus.tables], true);
+      assert.deepEqual(result.productSchemaStatus.missingRequiredFields, [`${table}.${column}`]);
+      const clear = (e: any) => e.code === "CONFLICT" && e.message.includes(`${table}.${column}`);
+      await assert.rejects(caller().createFamily(payload("other-family")), clear);
+      await assert.rejects(caller().getFamily({ shopProductId: created.shopProductId }), clear);
+      await assert.rejects(caller().publishFamily(pub(created)), clear);
+      assert.deepEqual(await snapshot(), stable); assert.deepEqual(await articleSequence(), sequence);
+    });
+  }
+  await withSchemaChange("DROP TABLE articles CASCADE", async () => {
+    const stable = await snapshot(), clear = (e: any) => e.code === "CONFLICT" && e.message.includes("articles.id");
+    await assert.rejects(caller().getFamily({ shopProductId: "does-not-exist" }), clear);
+    await assert.rejects(caller().createFamily(payload()), clear);
+    assert.deepEqual(await snapshot(), stable);
+  });
+});
+
+test("legacy FAQ active is not silently treated as the mandatory is_visible field", async () => {
+  await withSchemaChange("ALTER TABLE article_faq RENAME COLUMN is_visible TO active", async () => {
+    const stable = await snapshot(), sequence = await articleSequence();
+    const result = await caller().getFamily({ shopProductId: "does-not-exist" });
+    assert.equal(result.productSchemaStatus.tables.article_faq, true);
+    assert.deepEqual(result.productSchemaStatus.missingRequiredFields, ["article_faq.is_visible"]);
+    const input = payload(); input.useCaseSlugs = [];
+    await assert.rejects(caller().createFamily(input), (e: any) => e.code === "CONFLICT" && e.message.includes("article_faq.is_visible"));
+    assert.deepEqual(await snapshot(), stable); assert.deepEqual(await articleSequence(), sequence);
+  });
+});
+
+test("compatible optional relations do not swallow permission errors as empty use cases", async () => {
+  await pool.query("CREATE ROLE family_schema_probe; GRANT USAGE ON SCHEMA public TO family_schema_probe; GRANT SELECT ON articles TO family_schema_probe");
+  const { drizzle } = await import("drizzle-orm/node-postgres");
+  const { readFamily } = await import("./productFamily.js");
+  const client = await pool.connect();
+  try {
+    await client.query("SET ROLE family_schema_probe");
+    await client.query("BEGIN READ ONLY");
+    await assert.rejects(readFamily(drizzle(client), "does-not-exist"), (e: any) => e.cause?.code === "42501");
+    await client.query("ROLLBACK");
+  } finally {
+    await client.query("RESET ROLE"); client.release();
+    await pool.query("RESET ROLE; DROP OWNED BY family_schema_probe; DROP ROLE family_schema_probe");
+  }
 });
