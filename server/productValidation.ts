@@ -1,8 +1,10 @@
 import { requiresResearchOnlyValidation } from "./productValidationPolicy.js";
+import { getSingleBlendComposition, hasNoCommonBlendChemistry } from "./singleBlendComposition.js";
 export function validateProductData(a: any, seoRow: any, merchantRow: any, translationRow: any) {
     const article = [a], seo = [seoRow], merchant = [merchantRow], deTranslation = [translationRow];
     const issues: string[] = [];
     const warnings: string[] = [];
+    const validBlend = !!getSingleBlendComposition(a) && hasNoCommonBlendChemistry(a);
     // === PFLICHTFELDER (blockieren Speicherung) ===
     if (!article[0].name)
         issues.push("Produktname fehlt");
@@ -49,14 +51,14 @@ export function validateProductData(a: any, seoRow: any, merchantRow: any, trans
         warnings.push("Verfügbarkeit nicht gesetzt (Standard: in_stock)");
     if (!merchant[0]?.productType)
         warnings.push("Product Type fehlt (Google Shopping)");
-    if (!merchant[0]?.googleProductCategory)
+    if (!merchant[0]?.googleProductCategory && !(validBlend && merchant[0]?.googleProductCategory === null))
         warnings.push("Google Product Category fehlt");
     // === KATEGORIE ===
     const cats = article[0].categories as unknown[];
     if (!article[0].category && (!cats || cats.length === 0)) {
         warnings.push("Keine Kategorie gesetzt");
     }
-    const requiresResearchOnlyMetadata = requiresResearchOnlyValidation({
+    const requiresResearchOnlyMetadata = validBlend || requiresResearchOnlyValidation({
         category: article[0].category,
         categories: cats,
     });
@@ -65,9 +67,14 @@ export function validateProductData(a: any, seoRow: any, merchantRow: any, trans
     const descText = values(article[0].description).toLowerCase();
     const shortDesc = (article[0].shortDescription ?? "").toLowerCase();
     const allText = descText + " " + shortDesc;
+    // Only this approved, explicit disclaimer is excluded, and only for the
+    // valid narrow blend. All affirmative claims and legacy guards remain.
+    const complianceText = validBlend
+        ? allText.replace(/\bkeine dosierungs-, zubereitungs- oder anwendungsempfehlung\./g, "")
+        : allText;
     const forbiddenPhrases = ["dosierung", "einnahme", "nehmen sie", "täglich einnehmen", "heilt", "behandelt", "therapie", "heilmittel"];
     for (const phrase of forbiddenPhrases) {
-        if (allText.includes(phrase)) {
+        if (complianceText.includes(phrase)) {
             warnings.push(`Möglicher Human-Use Hinweis: "${phrase}" – bitte prüfen`);
         }
     }
@@ -75,7 +82,7 @@ export function validateProductData(a: any, seoRow: any, merchantRow: any, trans
     if (requiresResearchOnlyMetadata && !hasResearchNote)
         warnings.push("Research Use Only Hinweis fehlt im Produkttext");
     // === OPTIONALE EMPFEHLUNGEN ===
-    if (requiresResearchOnlyMetadata && !article[0].casNumber)
+    if (requiresResearchOnlyMetadata && !article[0].casNumber && !validBlend)
         warnings.push("CAS-Nummer fehlt (empfohlen für Peptide)");
     if (!article[0].shortDescription)
         warnings.push("Kurzbeschreibung fehlt");

@@ -6,7 +6,10 @@ import { ENV } from "./env.js";
 import { closeDb, getPool } from "./db.js";
 import { productAdminRouter } from "./productAdminRouter.js";
 import { router, adminProcedure } from "./trpc.js";
-import { getPublicShopVariants } from "./articleRouter.js";
+import { articleRouter, getPublicShopVariants } from "./articleRouter.js";
+import { createFamilyInput, createSingleBlendInput } from "./productFamily.js";
+import { singleBlendCompositionSchema } from "./singleBlendComposition.js";
+import { validateProductData } from "./productValidation.js";
 
 // Never skips; must run under our secret-free disposable PostgreSQL wrapper.
 const socket = process.env.FAMILY_TEST_PG_SOCKET;
@@ -14,7 +17,7 @@ if (!socket?.startsWith("/tmp/369-product-family.") || !socket.endsWith("/socket
   || process.env.DATABASE_URL || process.env.RAILWAY_DB_URL
   || process.env.DOTENV_CONFIG_PATH !== "/dev/null" || process.env.FAMILY_TEST_SANITIZED !== "1")
   throw Error("DEDICATED_LOCAL_SECRET_FREE_FIXTURE_REQUIRED");
-const app = router({ productAdmin: productAdminRouter });
+const app = router({ productAdmin: productAdminRouter, article: articleRouter });
 const manager = { id: 2, username: "local_product_manager", role: "product_manager", name: null, email: null };
 const caller = (user: any = manager) => app.createCaller({ req: { headers: {} }, res: {}, user } as any).productAdmin;
 let pool: NonNullable<Awaited<ReturnType<typeof getPool>>>;
@@ -58,7 +61,7 @@ function payload(shopProductId = "local-eloralintide") {
 }
 const conflict = (e: any) => e.code === "CONFLICT";
 const denied = (e: any) => ["FORBIDDEN", "UNAUTHORIZED"].includes(e.code);
-const pub = (created: { shopProductId: string; masterArticleId: number }, requestKey = randomUUID()) =>
+const pub = <S extends string>(created: { shopProductId: S; masterArticleId: number }, requestKey = randomUUID()) =>
   ({ shopProductId: created.shopProductId, masterArticleId: created.masterArticleId, requestKey });
 async function failAudit(action: string, work: () => Promise<unknown>) {
   await pool.query(`CREATE FUNCTION local_fail_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action='${action}' THEN RAISE EXCEPTION 'LOCAL_AUDIT_FAILURE'; END IF; RETURN NEW; END $$;
@@ -608,4 +611,313 @@ test("compatible optional relations do not swallow permission errors as empty us
     await client.query("RESET ROLE"); client.release();
     await pool.query("RESET ROLE; DROP OWNED BY family_schema_probe; DROP ROLE family_schema_probe");
   }
+});
+
+// Additive SOMATIDE coverage: the 29 existing multi-family cases above stay intact.
+const composition = () => ({ version: 1 as const, kind: "blend" as const, basis: "single-vial" as const, totalMassMg: 15 as const,
+  components: [{ id: "tesamorelin", name: "Tesamorelin", massMg: 10 }, { id: "ipamorelin", name: "Ipamorelin", massMg: 5 }] });
+function blendPayload() {
+  const p = payload("somatide");
+  return { ...p, name: "SOMATIDE", categories: ["Vials"], casNumber: null, molecularWeight: null,
+    composition: composition(), badge: "369 Research Blend",
+    shortDescription: "10 mg Tesamorelin + 5 mg Ipamorelin. Research Use Only. Nicht für Menschen oder Tiere.",
+    description: { kurztext: "SOMATIDE ist ein Blend mit 15 mg Gesamtpeptidgehalt.",
+      wirkung: "Literatur zu GHRH- und Ghrelin-Rezeptorwegen der Einzelbestandteile; kein Blend-Synergienachweis.",
+      fazit: "10 mg Tesamorelin + 5 mg Ipamorelin pro Vial.",
+      risiko: "Research Use Only. Ausschließlich für Forschungszwecke. Nicht für die Anwendung an Menschen oder Tieren. Keine Dosierungs-, Zubereitungs- oder Anwendungsempfehlung. Die Reinheitsgarantie ist eine Betreiberzusage; kein unabhängiger HPLC-/COA-Nachweis.",
+      highlights: ["99% garantiert – Betreiberzusage"] },
+    variants: [{ label: "15 mg", sku: "SOMATIDE-15MG", price: 70, stock: 19, imageUrl: "https://example.invalid/somatide-15mg.png" }],
+    seo: { ...p.seo, seoTitle: "SOMATIDE 15 mg | Tesamorelin + Ipamorelin | 369 Research",
+      seoDescription: "SOMATIDE 15 mg: 10 mg Tesamorelin + 5 mg Ipamorelin. Nur für Forschungszwecke.",
+      imageAlt: "SOMATIDE Research-Vial 15 mg, 10 mg Tesamorelin + 5 mg Ipamorelin" },
+    merchant: { merchantTitle: "369 Research SOMATIDE 15 mg – Tesamorelin + Ipamorelin",
+      merchantDescription: "1 Vial SOMATIDE: 10 mg Tesamorelin + 5 mg Ipamorelin. Ausschließlich für Forschungszwecke; nicht für Menschen oder Tiere.",
+      brand: "369 Research", googleProductCategory: null, productType: "Forschungsmaterialien > Peptid-Blends > Vials" } };
+}
+const publicCaller = () => app.createCaller({ req: { headers: {} }, res: {}, user: null } as any).article;
+async function failProductInsert(table: string, work: () => Promise<void>, replacement?: string) {
+  assert(["articles", "article_faq", "article_seo", "article_merchant", "article_translations", "stock_history"].includes(table));
+  const body = replacement ?? "RAISE EXCEPTION 'LOCAL_SINGLE_BLEND_INSERT_FAILURE';";
+  await pool.query(`CREATE FUNCTION local_single_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN ${body} RETURN NEW; END $$;
+    CREATE TRIGGER local_single_failure BEFORE INSERT ON ${table} FOR EACH ROW EXECUTE FUNCTION local_single_failure()`);
+  try { await work(); } finally { await pool.query(`DROP TRIGGER local_single_failure ON ${table}; DROP FUNCTION local_single_failure()`); }
+}
+
+test("single blend hidden create has exactly one master/vial, canonical composition, null chemistry, 0->19 once and mandatory audit", async () => {
+  const input = blendPayload(), old: any = await snapshot();
+  // Proof of stock=0 at the first insert, not merely inferred from its journal.
+  await failProductInsert("articles", async () => {
+    const created = await caller().createSingleBlend(input as any);
+    assert.equal(created.articleIds.length, 1); assert.equal(created.masterArticleId, created.articleIds[0]);
+    assert.equal(created.shopVisible, false); assert.deepEqual(created.composition, composition());
+    const family = await caller().getFamily({ shopProductId: "somatide" }); assert(family.master);
+    assert.equal(family.articles.length, 1); assert.equal(family.variants.length, 1);
+    assert.deepEqual(family.composition, composition()); assert.deepEqual((family.master.description as any).composition, composition());
+    assert.deepEqual(family.master.description, family.translations[0].description);
+    assert.equal(family.master.casNumber, null); assert.equal(family.master.molecularWeight, null); assert.equal(family.master.purity, "99% garantiert");
+    assert.equal(family.master.name, "SOMATIDE (15 mg)"); assert.equal(family.master.sku, "SOMATIDE-15MG");
+    assert.equal(family.master.sellingPrice, "70.00"); assert.equal(family.master.stock, 19);
+    assert.equal(family.master.isActive, 1); assert.equal(family.master.shopVisible, 0); assert.equal(family.master.publishedAt, null);
+    assert.deepEqual(created.variants.map(v => [v.label, v.price, v.stock, v.inventoryArticleId, v.imageUrl]),
+      [["15 mg", 70, 19, created.masterArticleId, input.variants[0].imageUrl]]);
+    assert.equal(family.seo?.canonical, input.seo.canonical); assert.equal(family.merchant?.googleProductCategory, null);
+    assert.equal(family.faqs.length, 6); assert(family.faqs.every(f => f.articleId === created.masterArticleId && f.isVisible === 1));
+    assert.equal(family.useCases[0].slug, "metabolic-research");
+    assert.equal(family.validation?.isValid, true); assert.equal(family.validation?.score, 100);
+    assert.deepEqual(family.validation?.issues, []); assert.deepEqual(family.validation?.warnings, []);
+    assert.deepEqual(await caller().validateProduct({ shopProductId: "somatide" }), family.validation);
+    const logs = (await pool.query("SELECT * FROM stock_history WHERE article_id=$1", [created.masterArticleId])).rows;
+    assert.equal(logs.length, 1); assert.deepEqual([logs[0].quantity_before, logs[0].quantity_change, logs[0].quantity_after, logs[0].reason], [0, 19, 19, "Produktanlage"]);
+    const audits = (await pool.query("SELECT * FROM product_audit_log WHERE article_id=$1", [created.masterArticleId])).rows;
+    assert.equal(audits.length, 1); assert.equal(audits[0].action, "CREATE_SINGLE_BLEND");
+    assert.equal(audits[0].field_name, `request:${input.requestKey}`);
+    const stored = JSON.parse(audits[0].new_value); assert.match(stored.fingerprint, /^[a-f0-9]{64}$/);
+    assert.deepEqual(stored.response, created); assert.deepEqual(stored.details.composition, composition());
+    const now: any = await snapshot(); assert.deepEqual(now.use_cases, old.use_cases);
+    for (const table of ["articles", "article_seo", "article_merchant", "stock_history", "product_audit_log"])
+      assert.deepEqual(now[table].filter((r: any) => r.id === 1), old[table]);
+    assert.equal(await publicCaller().shopArticle({ shopProductId: "somatide" }), null);
+    assert(!(await publicCaller().shopProducts()).some(p => p.id === "somatide"));
+  }, "IF NEW.shop_product_id='somatide' AND (NEW.stock<>0 OR NEW.shop_visible<>0 OR NEW.variants IS NOT NULL) THEN RAISE EXCEPTION 'NOT_HIDDEN_ZERO_STOCK'; END IF;");
+});
+
+test("single blend publish is atomic/idempotent, public DTO uses actual master IDs, stock unchanged and original create replay persists", async () => {
+  const input = blendPayload(), created = await caller().createSingleBlend(input as any), request = pub(created), hidden: any = await snapshot();
+  await assert.rejects(caller().publishSingleBlend({ ...request, masterArticleId: 1 }), conflict);
+  await assert.rejects(caller().publishFamily(request));
+  const results = await Promise.all([caller().publishSingleBlend(request), caller().publishSingleBlend(request)]);
+  assert.deepEqual(results[0], results[1]); assert.equal(results[0].shopVisible, true);
+  const family = await caller().getFamily({ shopProductId: "somatide" }); assert(family.master?.publishedAt);
+  for (const product of [(await publicCaller().shopProducts()).find(p => p.id === "somatide"), await publicCaller().shopArticle({ shopProductId: "somatide" })]) {
+    assert(product); assert.equal(product.id, "somatide"); assert.equal(product.masterArticleId, created.masterArticleId);
+    assert.deepEqual(product.composition, composition()); assert.equal(product.purity, "99% garantiert");
+    assert.equal(product.price, 70); assert.equal(product.stock, 19); assert.equal(product.variants.length, 1);
+    assert.deepEqual(product.variants.map((v: any) => [v.label, v.sku, v.articleId, v.inventoryArticleId, v.price, v.stock]),
+      [["15 mg", "SOMATIDE-15MG", created.masterArticleId, created.masterArticleId, 70, 19]]);
+  }
+  const published: any = await snapshot(); assert.deepEqual(published.stock_history, hidden.stock_history);
+  assert.equal(published.product_audit_log.filter((a: any) => a.action === "PUBLISH_SINGLE_BLEND").length, 1);
+  assert.deepEqual(await caller().createSingleBlend(input as any), created); assert.deepEqual(await snapshot(), published);
+  await caller().publishSingleBlend(request); assert.deepEqual(await snapshot(), published);
+  await caller().publishSingleBlend(pub(created));
+  const noop: any = await snapshot(); assert.deepEqual(noop.articles, published.articles); assert.deepEqual(noop.stock_history, published.stock_history);
+  assert.equal(noop.product_audit_log.filter((a: any) => a.action === "PUBLISH_SINGLE_BLEND").length, 2);
+});
+
+test("single blend concurrent create replay and canonical object ordering never duplicate rows, stock or audits; changed payload conflicts", async () => {
+  const input = blendPayload(), results = await Promise.all(Array.from({ length: 3 }, () => caller().createSingleBlend(input as any)));
+  assert.deepEqual(results[1], results[0]); assert.deepEqual(results[2], results[0]);
+  const stable = await snapshot(), reordered: Record<string, unknown> = Object.fromEntries(Object.entries(input).reverse());
+  reordered.composition = Object.fromEntries(Object.entries(input.composition).reverse());
+  assert.deepEqual(await caller().createSingleBlend(reordered as any), results[0]);
+  await assert.rejects(caller().createSingleBlend({ ...input, badge: "changed" } as any), conflict);
+  await assert.rejects(caller().createSingleBlend({ ...input, variants: [{ ...input.variants[0], price: 71 }] } as any), conflict);
+  await assert.rejects(caller().publishSingleBlend(pub(results[0], input.requestKey)), conflict);
+  const multi = payload("another-family"); multi.requestKey = input.requestKey;
+  await assert.rejects(caller().createFamily(multi), conflict); assert.deepEqual(await snapshot(), stable);
+});
+
+test("single blend create/publish audits roll back everything and same keys succeed after failed transactions in current and legacy layouts", async () => {
+  for (const layout of ["current", "legacy"]) {
+    const run = async () => {
+      const stable = await snapshot(), input = blendPayload();
+      await failAudit("CREATE_SINGLE_BLEND", async () => { await assert.rejects(caller().createSingleBlend(input as any)); });
+      assert.deepEqual(await snapshot(), stable);
+      const created = await caller().createSingleBlend(input as any), hidden = await snapshot(), request = pub(created);
+      await failAudit("PUBLISH_SINGLE_BLEND", async () => { await assert.rejects(caller().publishSingleBlend(request)); });
+      assert.deepEqual(await snapshot(), hidden); await caller().publishSingleBlend(request);
+      const final: any = await snapshot(); assert.deepEqual(final.stock_history, (hidden as any).stock_history);
+      const family = await caller().getFamily({ shopProductId: "somatide" }); assert.equal(family.validation?.score, 100);
+      assert.equal(family.productSchemaStatus.faqLayout, layout === "current" ? "current" : "legacy-active");
+      assert.deepEqual(await caller().createSingleBlend(input as any), created);
+    };
+    if (layout === "legacy") await withSchemaChange(legacyFaqSchema, run); else { await run(); await seedFixture(); }
+  }
+});
+
+test("single blend all mandatory metadata, stock-history failures and DB-corrupted SEO/composition roll back exact product snapshot", async () => {
+  for (const table of ["article_faq", "article_seo", "article_merchant", "article_translations", "stock_history"]) {
+    const stable = await snapshot();
+    await failProductInsert(table, async () => { await assert.rejects(caller().createSingleBlend(blendPayload() as any)); });
+    assert.deepEqual(await snapshot(), stable);
+  }
+  for (const [table, replacement] of [["article_seo", "NEW.seo_title=repeat('x',61);"],
+    ["articles", "NEW.description=jsonb_set(NEW.description,'{composition,totalMassMg}','16'::jsonb);"],
+    ["article_translations", "NEW.description='{}'::jsonb;"], ["article_faq", "NEW.is_visible=0;"]]) {
+    const stable = await snapshot();
+    await failProductInsert(table, async () => { await assert.rejects(caller().createSingleBlend(blendPayload() as any)); }, replacement);
+    assert.deepEqual(await snapshot(), stable);
+  }
+});
+
+test("single blend strict schema binds exact identity, canonical component order, one vial, null common chemistry and typed price/stock", async () => {
+  const input = blendPayload(), stable = await snapshot(), c = composition();
+  const bad: any[] = [ { ...input, shopProductId: "other" }, { ...input, name: "SOMATIDE 15 mg" }, { ...input, casNumber: "218949-48-5" },
+    { ...input, molecularWeight: "5847.75 g/mol" }, { ...input, purity: "" }, { ...input, purity: null }, { ...input, mystery: true },
+    { ...input, variants: [] }, { ...input, variants: [input.variants[0], input.variants[0]] },
+    ...[{ sku: "somatide-15mg" }, { label: "15mg" }, { label: "10 mg + 5 mg" }, { price: 0 }, { price: 70.001 }, { price: Infinity },
+      { stock: -1 }, { stock: 1.5 }, { stock: 2147483648 }, { imageUrl: "http://example.invalid/a.png" },
+      { imageUrl: "https://secret:password@example.invalid/a.png" }].map(change => ({ ...input, variants: [{ ...input.variants[0], ...change }] })),
+    ...[{ totalMassMg: 16 }, { version: 2 }, { kind: "peptide" }, { basis: "pack" }, { components: [...c.components].reverse() },
+      { components: [c.components[0], c.components[0]] }, { components: [{ ...c.components[0], massMg: 9 }, c.components[1]] },
+      { components: [{ ...c.components[0], massMg: Infinity }, c.components[1]] }, { extra: 1 }].map(change => ({ ...input, composition: { ...c, ...change } })),
+    { ...input, description: { ...input.description, composition: { ...c, totalMassMg: 16 } } },
+    { ...input, merchant: { ...input.merchant, googleProductCategory: "" } },
+    { ...input, description: {} }, { ...input, faqs: input.faqs.slice(0, 3) }, { ...input, useCaseSlugs: ["not-existing"] } ];
+  for (const p of bad) { await assert.rejects(caller().createSingleBlend(p)); assert.deepEqual(await snapshot(), stable); }
+  assert.equal(singleBlendCompositionSchema.safeParse(c).success, true);
+  assert.equal(createFamilyInput.safeParse(input).success, false);
+  assert.equal(createSingleBlendInput.safeParse({ ...input, merchant: { ...input.merchant, googleProductCategory: undefined } }).success, false);
+  const identical = { ...input, description: { ...input.description, composition: c },
+    variants: [{ ...input.variants[0], price: 72.35, stock: 0 }] };
+  const created = await caller().createSingleBlend(identical as any);
+  assert.equal(created.variants[0].price, 72.35); assert.equal(created.variants[0].stock, 0);
+  const family = await caller().getFamily({ shopProductId: "somatide" }); assert.equal(family.master?.sellingPrice, "72.35");
+  assert.equal(family.merchant?.availability, "out_of_stock");
+});
+
+test("cross-family concurrent slug/SKU/request locks and independent SEO conflicts allow at most one committed operation", async () => {
+  for (const scope of ["slug", "sku", "request"]) {
+    await seedFixture(); const blend = blendPayload(), multi = payload(scope === "slug" ? "somatide" : `multi-${scope}`);
+    if (scope === "sku") multi.variants[0].sku = "SOMATIDE-15MG";
+    if (scope === "request") multi.requestKey = blend.requestKey;
+    const results = await Promise.allSettled([caller().createSingleBlend(blend as any), caller().createFamily(multi)]);
+    assert.equal(results.filter(r => r.status === "fulfilled").length, 1);
+    assert.equal(results.filter(r => r.status === "rejected" && conflict(r.reason)).length, 1);
+  }
+  await seedFixture(); await pool.query("INSERT INTO article_seo(article_id,slug) VALUES(1,'somatide')");
+  const stable = await snapshot(); await assert.rejects(caller().createSingleBlend(blendPayload() as any), conflict);
+  assert.deepEqual(await snapshot(), stable);
+  const source = readFileSync(new URL("./productFamily.ts", import.meta.url), "utf8");
+  assert.match(source, /product-family:\$\{key\}/); assert(!source.includes("product-single:"));
+});
+
+test("single blend persisted chemistry/composition/metadata/variant corruption fails publish and getFamily/validateProduct agree", async () => {
+  const corruptions = [
+    "UPDATE articles SET cas_number='218949-48-5' WHERE shop_product_id='somatide'",
+    "UPDATE articles SET molecular_weight='5847.75' WHERE shop_product_id='somatide'",
+    "UPDATE articles SET description=description-'composition' WHERE shop_product_id='somatide'",
+    "UPDATE articles SET description=jsonb_set(description,'{composition,components}',(description->'composition'->'components')-0) WHERE shop_product_id='somatide'",
+    "UPDATE articles SET variants=jsonb_set(variants,'{0,inventoryArticleId}','1'::jsonb) WHERE shop_product_id='somatide'",
+    "UPDATE articles SET variants=jsonb_set(variants,'{0,sku}','\"BAD\"'::jsonb) WHERE shop_product_id='somatide'",
+    "UPDATE articles SET selling_price=71 WHERE shop_product_id='somatide'",
+    "UPDATE articles SET purity=NULL WHERE shop_product_id='somatide'",
+    "UPDATE articles SET name='Wrong (15 mg)' WHERE shop_product_id='somatide'",
+    "UPDATE article_seo SET canonical='https://www.369research.eu.evil.invalid/product/somatide' WHERE slug='somatide'",
+    "UPDATE article_faq SET is_visible=0 WHERE article_id=(SELECT id FROM articles WHERE shop_product_id='somatide') AND sort_order=1",
+    "UPDATE article_translations SET description='{}'::jsonb WHERE article_id=(SELECT id FROM articles WHERE shop_product_id='somatide')",
+  ];
+  for (const statement of corruptions) {
+    await seedFixture(); const created = await caller().createSingleBlend(blendPayload() as any);
+    await pool.query(statement); const stable = await snapshot();
+    const family = await caller().getFamily({ shopProductId: "somatide" }); assert.equal(family.validation?.isValid, false);
+    assert.deepEqual(await caller().validateProduct({ shopProductId: "somatide" }), family.validation);
+    await assert.rejects(caller().publishSingleBlend(pub(created))); assert.deepEqual(await snapshot(), stable);
+  }
+});
+
+test("public single blend fails closed on missing composition/binding/duplicate rows and never invents purity", async () => {
+  const created = await caller().createSingleBlend(blendPayload() as any); await caller().publishSingleBlend(pub(created));
+  await pool.query("UPDATE articles SET purity=NULL WHERE shop_product_id='somatide'");
+  for (const p of [(await publicCaller().shopProducts()).find(p => p.id === "somatide"), await publicCaller().shopArticle({ shopProductId: "somatide" })]) {
+    assert(p); assert.equal(p.purity, null);
+  }
+  await pool.query("UPDATE articles SET description=description-'composition' WHERE shop_product_id='somatide'");
+  let detail = await publicCaller().shopArticle({ shopProductId: "somatide" }); assert(detail);
+  assert.equal(detail.composition, null); assert.equal(detail.masterArticleId, null); assert.deepEqual(detail.variants, []);
+  await pool.query("UPDATE articles SET description=jsonb_set(description,'{composition}',$1::jsonb) WHERE shop_product_id='somatide'", [JSON.stringify(composition())]);
+  await pool.query("INSERT INTO articles(sku,name,shop_product_id,selling_price,stock,is_active,shop_visible) VALUES('NO-SECOND-VARIANT','Wrong duplicate (5 mg)','somatide',1,0,1,0)");
+  detail = await publicCaller().shopArticle({ shopProductId: "somatide" }); assert(detail); assert.equal(detail.composition, null); assert.deepEqual(detail.variants, []);
+});
+
+test("single blend RUO/affirmative human-use/purity guards remain and ordinary products retain missing CAS/category warnings", async () => {
+  const input = blendPayload(), parsed = createSingleBlendInput.parse(input);
+  const a: any = { ...parsed, id: 2, sku: "SOMATIDE-15MG", stock: 19, sellingPrice: "70.00", mockupImageUrl: input.variants[0].imageUrl,
+    variants: [{ dosage: "15 mg", label: "15 mg", sku: "SOMATIDE-15MG", inventoryArticleId: 2 }] };
+  const seo = { ...input.seo, slug: "somatide" }, merchant = { ...input.merchant, availability: "in_stock" };
+  assert.equal(validateProductData(a, seo, merchant, input.merchant).score, 100);
+  for (const phrase of ["Dosierung täglich", "Therapie", "heilt", "behandelt", "Nehmen Sie", "Einnahme"]) {
+    const result = validateProductData({ ...a, shortDescription: `${a.shortDescription} ${phrase}` }, seo, merchant, input.merchant);
+    assert(result.warnings.some(w => w.includes("Human-Use")));
+    await assert.rejects(caller().createSingleBlend({ ...input, shortDescription: `${input.shortDescription} ${phrase}` } as any));
+  }
+  const noRuo = { ...input, shortDescription: "Ein Blend.", description: { ...input.description, risiko: "Keine Daten." } };
+  await assert.rejects(caller().createSingleBlend(noRuo as any));
+  assert(validateProductData({ ...a, purity: null }, seo, merchant, input.merchant).warnings.includes("Reinheitsangabe fehlt"));
+  const ordinary = validateProductData({ ...a, shopProductId: "not-somatide" }, seo, merchant, input.merchant);
+  assert(ordinary.warnings.includes("CAS-Nummer fehlt (empfohlen für Peptide)")); assert(ordinary.warnings.includes("Google Product Category fehlt"));
+  assert(ordinary.warnings.some(w => w.includes("dosierung")));
+});
+
+test("single blend current/legacy optional links and missing mandatory schemas use existing safe adapters", async () => {
+  await withSchemaChange(`${legacyFaqSchema}; ALTER TABLE use_cases DROP COLUMN visible; ALTER TABLE article_use_cases DROP COLUMN sort_order; ALTER TABLE article_use_cases DROP COLUMN is_primary`, async () => {
+    const created = await caller().createSingleBlend(blendPayload() as any); await caller().publishSingleBlend(pub(created));
+    const family = await caller().getFamily({ shopProductId: "somatide" });
+    assert.equal(family.validation?.score, 100); assert(family.faqs.every(f => f.updatedAt === null)); assert.equal(family.useCases[0].slug, "metabolic-research");
+  });
+  await withSchemaChange("DROP TABLE article_use_cases; DROP TABLE use_cases CASCADE", async () => {
+    const stable = await snapshot(), sequence = await articleSequence();
+    await assert.rejects(caller().createSingleBlend(blendPayload() as any)); assert.deepEqual(await snapshot(), stable); assert.deepEqual(await articleSequence(), sequence);
+    const input = blendPayload(); input.useCaseSlugs = [];
+    const created = await caller().createSingleBlend(input as any); await caller().publishSingleBlend(pub(created));
+  });
+  for (const table of ["article_faq", "article_seo", "article_merchant", "article_translations", "stock_history", "product_audit_log"]) {
+    await withSchemaChange(`DROP TABLE ${table} CASCADE`, async () => {
+      const stable = await snapshot(), sequence = await articleSequence();
+      await assert.rejects(caller().createSingleBlend(blendPayload() as any), conflict);
+      assert.deepEqual(await snapshot(), stable); assert.deepEqual(await articleSequence(), sequence);
+    });
+  }
+});
+
+test("single blend routes preserve productManagerProcedure roles: manager/admin allowed, anonymous/customer/user/packing denied", async () => {
+  const input = blendPayload(), stable = await snapshot();
+  for (const principal of [null, ...["customer", "user", "packing"].map(role => ({ ...manager, role }))]) {
+    await assert.rejects(caller(principal).createSingleBlend(input as any), denied);
+    await assert.rejects(caller(principal).publishSingleBlend({ shopProductId: "somatide", masterArticleId: 2, requestKey: randomUUID() }), denied);
+  }
+  assert.deepEqual(await snapshot(), stable);
+  const created = await caller({ ...manager, role: "admin" }).createSingleBlend(input as any);
+  await caller().publishSingleBlend(pub(created));
+  const source = readFileSync(new URL("./productAdminRouter.ts", import.meta.url), "utf8");
+  assert.match(source, /createSingleBlend: productManagerProcedure/); assert.match(source, /publishSingleBlend: productManagerProcedure/);
+});
+
+test("single blend create replay after a real local stock movement never restores initial stock or duplicates stock history", async () => {
+  const input = blendPayload(), created = await caller().createSingleBlend(input as any);
+  const { getDb } = await import("./db.js"), { applyStockMovement } = await import("./stockMovementService.js");
+  await (await getDb())!.transaction(tx => applyStockMovement(tx, { articleId: created.masterArticleId, sku: "SOMATIDE-15MG",
+    expectedStock: 19, change: -2, type: "korrektur", reason: "local synthetic stock change", actor: "fixture" }));
+  const stable = await snapshot(); assert.deepEqual(await caller().createSingleBlend(input as any), created); assert.deepEqual(await snapshot(), stable);
+  assert.equal((await pool.query("SELECT stock FROM articles WHERE id=$1", [created.masterArticleId])).rows[0].stock, 17);
+  // Existing stock service does not synchronize variants JSON; publish correctly
+  // refuses an inconsistent variant rather than restoring its initial stock.
+  await assert.rejects(caller().publishSingleBlend(pub(created))); assert.deepEqual(await snapshot(), stable);
+  await pool.query("UPDATE articles SET variants=jsonb_set(variants,'{0,stock}','17'::jsonb) WHERE id=$1", [created.masterArticleId]);
+  await caller().publishSingleBlend(pub(created));
+  const detail = await publicCaller().shopArticle({ shopProductId: "somatide" }); assert(detail); assert.equal(detail.variants[0].stock, 17);
+});
+
+
+test("multi-family 2..10 contract and scalar metadata requirements remain unchanged alongside narrow blend", async () => {
+  const p = payload();
+  assert.equal(createFamilyInput.safeParse({ ...p, merchant: { ...p.merchant, googleProductCategory: null } }).success, false);
+  assert.equal(createFamilyInput.safeParse({ ...p, casNumber: null }).success, false);
+  assert.equal(createFamilyInput.safeParse({ ...p, molecularWeight: null }).success, false);
+  assert.equal(createFamilyInput.safeParse({ ...p, variants: [p.variants[0]] }).success, false);
+  const ten = Array.from({ length: 10 }, (_, i) => ({ ...p.variants[0], label: `${i + 1} mg`, sku: `TEN-${i + 1}` }));
+  assert.equal(createFamilyInput.safeParse({ ...p, variants: ten }).success, true);
+  assert.equal(createFamilyInput.safeParse({ ...p, variants: [...ten, { ...ten[0], label: '11 mg', sku: 'TEN-11' }] }).success, false);
+  assert.equal(createFamilyInput.safeParse({ ...p, composition: composition() }).success, false);
+});
+
+test("single blend cannot avoid RUO/purity validation by selecting cosmetic categories and hidden variants have no public blend DTO", async () => {
+  const input = blendPayload(), stable = await snapshot();
+  await assert.rejects(caller().createSingleBlend({ ...input, category: "369 BeautyLine", categories: ["369 BeautyLine"],
+    shortDescription: "Ein Blend.", description: { ...input.description, risiko: "Keine weiteren Daten." } } as any));
+  assert.deepEqual(await snapshot(), stable);
+  const created = await caller().createSingleBlend(input as any); await caller().publishSingleBlend(pub(created));
+  await pool.query("UPDATE articles SET variants=jsonb_set(variants,'{0,hidden}','true'::jsonb) WHERE id=$1", [created.masterArticleId]);
+  const detail = await publicCaller().shopArticle({ shopProductId: "somatide" }); assert(detail);
+  assert.equal(detail.composition, null); assert.equal(detail.masterArticleId, null); assert.deepEqual(detail.variants, []);
 });

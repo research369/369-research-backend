@@ -8,6 +8,8 @@ import { getDb } from "./db.js";
 import { applyStockMovement } from "./stockMovementService.js";
 import { validateProductData } from "./productValidation.js";
 import { requiresResearchOnlyValidation } from "./productValidationPolicy.js";
+import { singleBlendCompositionSchema, getSingleBlendComposition, hasNoCommonBlendChemistry,
+  type SingleBlendComposition } from "./singleBlendComposition.js";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -56,8 +58,9 @@ const faqSchema = z.object({ lang, question: text(1000), answer: text(5000) }).s
 const translationSchema = z.object({ lang, name: text(200), shortDescription: text(2000),
   description, merchantTitle: text(150), merchantDescription: text(5000) }).strict();
 const variantSchema = z.object({ label: mgLabel, sku: text(50), price: money, stock, imageUrl: httpsUrl }).strict();
+const singleBlendMerchantSchema = merchantSchema.extend({ googleProductCategory: text(10).nullable() });
 
-export const createFamilyInput = z.object({
+const familyBaseInput = z.object({
   requestKey: z.string().uuid().transform(value => value.toLowerCase()),
   shopProductId: slug, name: text(160), category: text(100),
   categories: z.array(text(100)).min(1).max(20), shortDescription: text(2000),
@@ -65,7 +68,12 @@ export const createFamilyInput = z.object({
   variants: z.array(variantSchema).min(2).max(10), seo: seoSchema, merchant: merchantSchema,
   faqs: z.array(faqSchema).min(4).max(6), useCaseSlugs: z.array(slug).max(20).default([]),
   translations: z.array(translationSchema).max(10).default([]),
-}).strict().superRefine((input, ctx) => {
+}).strict();
+type SharedCreateInput = Omit<z.infer<typeof familyBaseInput>, "casNumber" | "molecularWeight" | "merchant"> & {
+  casNumber: string | null; molecularWeight: string | null;
+  merchant: z.infer<typeof singleBlendMerchantSchema>;
+};
+function refineCreate(input: SharedCreateInput, ctx: z.RefinementCtx) {
   const issue = (message: string) => ctx.addIssue({ code: "custom", message });
   if (input.seo.canonical !== canonicalFor(input.shopProductId)) issue("Canonical muss exakt zur Familien-URL passen");
   if (new Set(input.variants.map(v => v.sku)).size !== input.variants.length) issue("Doppelte SKU im Payload");
@@ -79,12 +87,30 @@ export const createFamilyInput = z.object({
   if (new Set(input.faqs.map(f => `${f.lang}:${f.question}`)).size !== input.faqs.length) issue("Doppelte FAQ");
   const de = input.translations.find(t => t.lang === "de");
   if (de && canonicalJson(de) !== canonicalJson(defaultDe(input))) issue("Optionale DE-Übersetzung muss den Basistexten entsprechen");
-});
+}
+export const createFamilyInput = familyBaseInput.superRefine(refineCreate);
+export const createSingleBlendInput = familyBaseInput.extend({
+  shopProductId: z.literal("somatide"), name: z.literal("SOMATIDE"),
+  casNumber: z.literal("").nullable(), molecularWeight: z.literal("").nullable(),
+  variants: z.tuple([variantSchema.extend({ label: z.literal("15 mg"), sku: z.literal("SOMATIDE-15MG") })]),
+  merchant: singleBlendMerchantSchema, composition: singleBlendCompositionSchema,
+}).superRefine((input, ctx) => {
+  refineCreate(input, ctx);
+  if (input.description.composition !== undefined
+    && canonicalJson(input.description.composition) !== canonicalJson(input.composition))
+    ctx.addIssue({ code: "custom", message: "Beschreibung widerspricht kanonischer Composition" });
+}).transform(input => ({ ...input, description: { ...input.description, composition: input.composition },
+  translations: input.translations.map(t => t.lang === "de"
+    ? { ...t, description: { ...t.description, composition: input.composition } } : t),
+}));
 export const getFamilyInput = z.object({ shopProductId: slug }).strict();
 export const publishFamilyInput = z.object({ shopProductId: slug, masterArticleId: z.number().int().positive(),
   requestKey: z.string().uuid().transform(value => value.toLowerCase()) }).strict();
+export const publishSingleBlendInput = publishFamilyInput.extend({ shopProductId: z.literal("somatide") });
 export type CreateFamilyInput = z.infer<typeof createFamilyInput>;
 export type PublishFamilyInput = z.infer<typeof publishFamilyInput>;
+export type CreateSingleBlendInput = z.infer<typeof createSingleBlendInput>;
+export type PublishSingleBlendInput = z.infer<typeof publishSingleBlendInput>;
 
 function canonicalFor(shopProductId: string) { return `https://www.369research.eu/product/${shopProductId}`; }
 function canonicalJson(value: unknown): string {
@@ -93,7 +119,7 @@ function canonicalJson(value: unknown): string {
     `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`).join(",")}}`;
   return JSON.stringify(value);
 }
-function defaultDe(input: CreateFamilyInput) {
+function defaultDe(input: Pick<SharedCreateInput, "name" | "shortDescription" | "description" | "merchant">) {
   return { lang: "de", name: input.name, shortDescription: input.shortDescription, description: input.description,
     merchantTitle: input.merchant.merchantTitle, merchantDescription: input.merchant.merchantDescription };
 }
@@ -219,6 +245,19 @@ async function audit(tx: Tx, articleId: number, action: string, requestKey: stri
 }
 
 export async function readFamily(db: ProductDb, shopProductId: string, forUpdate = false) {
+  const family = await readFamilyData(db, shopProductId, forUpdate);
+  if (shopProductId === "somatide" && family.validation
+    && (family.articles.length === 1 || (family.master?.sku === "SOMATIDE-15MG"
+      && Array.isArray(family.master.variants) && family.master.variants.length === 1))) {
+    try { validateFamily(family, true); } catch (error) {
+      if (!(error instanceof TRPCError)) throw error;
+      family.validation = { ...family.validation, isValid: false, score: 0,
+        issues: [...family.validation.issues, error.message] };
+    }
+  }
+  return family;
+}
+async function readFamilyData(db: ProductDb, shopProductId: string, forUpdate = false) {
   const schema = await inspectProductSchema(db), productSchemaStatus = schema.status;
   requireProductSchema(schema, ["articles.id", "articles.shop_product_id"].filter(field => productSchemaStatus.missingRequiredFields.includes(field)));
   const existing = db.select({ id: articles.id }).from(articles).where(eq(articles.shopProductId, shopProductId));
@@ -226,7 +265,7 @@ export async function readFamily(db: ProductDb, shopProductId: string, forUpdate
   if (exists.length) requireProductSchema(schema);
   const availableUseCases = await readAvailableUseCases(db, schema);
   if (!exists.length) return { shopProductId, masterArticleId: null, master: null, articles: [], variants: [],
-    seo: null, merchant: null, translations: [], faqs: [], useCases: [], availableUseCases, validation: null, productSchemaStatus };
+    composition: null, seo: null, merchant: null, translations: [], faqs: [], useCases: [], availableUseCases, validation: null, productSchemaStatus };
   const query = db.select().from(articles).where(eq(articles.shopProductId, shopProductId)).orderBy(asc(articles.id));
   const family = await (forUpdate ? query.for("update") : query);
   const masters = family.filter(a => Array.isArray(a.variants) && a.variants.length > 0);
@@ -248,16 +287,20 @@ export async function readFamily(db: ProductDb, shopProductId: string, forUpdate
     fail("Familien-Metadaten fehlen, sind mehrdeutig oder liegen auf einem Kindartikel", "CONFLICT");
   const de = translations.find(t => t.lang === "de");
   return { shopProductId, masterArticleId: master.id, master, articles: family,
+    composition: family.length === 1 ? getSingleBlendComposition(master) : null,
     variants: master.variants as unknown[], seo: seo[0], merchant: merchant[0], translations, faqs,
     useCases: links, availableUseCases, validation: validateProductData(master, seo[0], merchant[0], de), productSchemaStatus };
 }
 
 // Shared exact-master validation for creation and publication; no LIMIT 1 or fallback.
-function validateFamily(family: Awaited<ReturnType<typeof readFamily>>) {
+function validateFamily(family: Awaited<ReturnType<typeof readFamilyData>>, singleBlend = false) {
   const master = family.master;
   if (!master || !family.seo || !family.merchant || !family.validation) fail("Familie nicht gefunden", "NOT_FOUND");
   const rows = family.articles;
-  if (rows.length < 2 || rows.length > 10 || family.variants.length !== rows.length) fail("Variantenanzahl oder Lagerzuordnung ungültig");
+  if ((singleBlend ? rows.length !== 1 : rows.length < 2 || rows.length > 10)
+    || family.variants.length !== rows.length) fail("Variantenanzahl oder Lagerzuordnung ungültig");
+  if (singleBlend && (!family.composition || !hasNoCommonBlendChemistry(master)
+    || master.name !== "SOMATIDE (15 mg)")) fail("Single-Blend-Identität/Composition oder skalare Chemie ungültig");
   if (master.shopVisible !== 0 && master.shopVisible !== 1) fail("Master-Sichtbarkeit ungültig");
   if (rows.some(a => a.isActive !== 1 || (a.id !== master.id && (a.shopVisible !== 0 || a.variants !== null))))
     fail("Kindartikel müssen aktiv, verborgen und ohne variants JSON sein");
@@ -280,7 +323,7 @@ function validateFamily(family: Awaited<ReturnType<typeof readFamily>>) {
     canonical: family.seo.canonical, imageAlt: family.seo.imageAlt, ogImage: family.seo.ogImage }, "SEO");
   if (family.seo.slug !== family.shopProductId || seo.canonical !== canonicalFor(family.shopProductId)
     || family.seo.faqEnabled !== 1 || family.seo.schemaEnabled !== 1) fail("SEO-Slug/Canonical/FAQ-Konfiguration ungültig");
-  const merchant = assertParsed(merchantSchema, { merchantTitle: family.merchant.merchantTitle,
+  const merchant = assertParsed(singleBlend ? singleBlendMerchantSchema : merchantSchema, { merchantTitle: family.merchant.merchantTitle,
     merchantDescription: family.merchant.merchantDescription, brand: family.merchant.brand,
     googleProductCategory: family.merchant.googleProductCategory, productType: family.merchant.productType }, "Merchant");
   const de = family.translations.find(t => t.lang === "de");
@@ -291,8 +334,10 @@ function validateFamily(family: Awaited<ReturnType<typeof readFamily>>) {
   assertParsed(description, master.description, "Beschreibung");
   assertParsed(text(2000), master.shortDescription, "Kurzbeschreibung");
   assertParsed(text(20), master.purity, "Reinheit");
-  assertParsed(text(50), master.casNumber, "CAS");
-  assertParsed(text(50), master.molecularWeight, "Molekulargewicht");
+  if (!singleBlend) {
+    assertParsed(text(50), master.casNumber, "CAS");
+    assertParsed(text(50), master.molecularWeight, "Molekulargewicht");
+  }
   assertParsed(z.array(text(100)).min(1).max(20), master.categories, "Kategorien");
   assertParsed(text(100), master.category, "Kategorie");
   const faq = family.faqs.map(f => assertParsed(faqSchema, { lang: f.lang, question: f.question, answer: f.answer }, "FAQ"));
@@ -302,11 +347,18 @@ function validateFamily(family: Awaited<ReturnType<typeof readFamily>>) {
   if (new Set(family.useCases.map(u => u.useCaseId)).size !== family.useCases.length) fail("Doppelte Use-Case-Verknüpfung");
   if (!family.validation.isValid || family.validation.warnings.length > 0)
     fail(`Produktvalidierung fehlgeschlagen: ${[...family.validation.issues, ...family.validation.warnings].join("; ")}`);
-  if (requiresResearchOnlyValidation(master) && !family.validation.hasResearchNote) fail("Research Use Only Hinweis erforderlich");
+  if ((singleBlend || requiresResearchOnlyValidation(master)) && !family.validation.hasResearchNote) fail("Research Use Only Hinweis erforderlich");
   return family.validation;
 }
 
-export async function createProductFamily(db: Db, input: CreateFamilyInput, actor: string) {
+export async function createProductFamily(db: Db, input: CreateFamilyInput, actor: string): Promise<CreateResponse> {
+  return await createAtomicProduct(db, input, actor, false);
+}
+export async function createSingleBlend(db: Db, input: CreateSingleBlendInput, actor: string) {
+  return await createAtomicProduct(db, input, actor, true) as CreateSingleBlendResponse;
+}
+async function createAtomicProduct(db: Db, input: SharedCreateInput, actor: string, singleBlend: boolean) {
+  const action = singleBlend ? "CREATE_SINGLE_BLEND" : "CREATE_FAMILY";
   // First variant owns the canonical source; its stock is never a family sum.
   return db.transaction(async tx => {
     const schema = await inspectProductSchema(tx);
@@ -316,7 +368,7 @@ export async function createProductFamily(db: Db, input: CreateFamilyInput, acto
     await lock(tx, `request:${input.requestKey}`);
     await lock(tx, `family:${input.shopProductId}`);
     for (const sku of input.variants.map(v => v.sku).sort()) await lock(tx, `sku:${sku}`);
-    const prior = await replay<CreateResponse>(tx, input.requestKey, "CREATE_FAMILY", input);
+    const prior = await replay<CreateResponse | CreateSingleBlendResponse>(tx, input.requestKey, action, input);
     if (prior.response) return prior.response;
     if ((await tx.select({ id: articles.id }).from(articles).where(eq(articles.shopProductId, input.shopProductId))).length)
       fail("Produktfamilie existiert bereits", "CONFLICT");
@@ -357,12 +409,14 @@ export async function createProductFamily(db: Db, input: CreateFamilyInput, acto
     await insertFamilyFaqs(tx, schema, masterArticleId, input.faqs);
     for (const u of selectedUseCases.sort((a, b) => a.slug.localeCompare(b.slug)))
       await tx.execute(sql`INSERT INTO article_use_cases (article_id, use_case_id) VALUES (${masterArticleId}, ${u.id})`);
-    const created = await readFamily(tx, input.shopProductId);
+    const created = await readFamilyData(tx, input.shopProductId);
     if (created.articles.some(a => a.shopVisible !== 0 || a.publishedAt !== null)) fail("Neuanlage muss vollständig verborgen sein");
-    const validation = validateFamily(created);
-    const response: CreateResponse = { success: true, shopProductId: input.shopProductId, masterArticleId, articleIds, variants, shopVisible: false };
-    await audit(tx, masterArticleId, "CREATE_FAMILY", input.requestKey, prior.fingerprint, response, actor,
-      { articleIds, validation, initialStock: variants.map(v => ({ articleId: v.inventoryArticleId, stock: v.stock, reason: "Produktanlage" })) });
+    const validation = validateFamily(created, singleBlend);
+    const response: CreateResponse | CreateSingleBlendResponse = { success: true, shopProductId: input.shopProductId,
+      masterArticleId, articleIds, variants, shopVisible: false, ...(singleBlend ? { composition: created.composition! } : {}) };
+    await audit(tx, masterArticleId, action, input.requestKey, prior.fingerprint, response, actor,
+      { articleIds, validation, ...(singleBlend ? { composition: created.composition } : {}),
+        initialStock: variants.map(v => ({ articleId: v.inventoryArticleId, stock: v.stock, reason: "Produktanlage" })) });
     return response;
   });
 }
@@ -371,18 +425,26 @@ type FamilyVariant = { dosage: string; label: string; sku: string; price: number
   inventoryArticleId: number; image: string; imageUrl: string; images: string[] };
 type CreateResponse = { success: true; shopProductId: string; masterArticleId: number; articleIds: number[];
   variants: FamilyVariant[]; shopVisible: false };
+type CreateSingleBlendResponse = Omit<CreateResponse, "shopProductId"> & { shopProductId: "somatide"; composition: SingleBlendComposition };
 type PublishResponse = { success: true; shopProductId: string; masterArticleId: number; shopVisible: true };
 
-export async function publishProductFamily(db: Db, input: PublishFamilyInput, actor: string) {
+export function publishProductFamily(db: Db, input: PublishFamilyInput, actor: string) {
+  return publishAtomicProduct(db, input, actor, false);
+}
+export function publishSingleBlend(db: Db, input: PublishSingleBlendInput, actor: string) {
+  return publishAtomicProduct(db, input, actor, true);
+}
+async function publishAtomicProduct(db: Db, input: PublishFamilyInput, actor: string, singleBlend: boolean) {
+  const action = singleBlend ? "PUBLISH_SINGLE_BLEND" : "PUBLISH_FAMILY";
   return db.transaction(async tx => {
     requireProductSchema(await inspectProductSchema(tx));
     await lock(tx, `request:${input.requestKey}`);
     await lock(tx, `family:${input.shopProductId}`);
-    const prior = await replay<PublishResponse>(tx, input.requestKey, "PUBLISH_FAMILY", input);
-    const family = await readFamily(tx, input.shopProductId, true);
+    const prior = await replay<PublishResponse>(tx, input.requestKey, action, input);
+    const family = await readFamilyData(tx, input.shopProductId, true);
     if (!family.master) fail("Produktfamilie nicht gefunden", "NOT_FOUND");
     if (family.masterArticleId !== input.masterArticleId) fail("masterArticleId gehört nicht zum exakten Familienmaster", "CONFLICT");
-    const validation = validateFamily(family);
+    const validation = validateFamily(family, singleBlend);
     if (prior.response) {
       if (family.master.shopVisible !== 1) fail("Veröffentlichter Replay-Zustand wurde verändert", "CONFLICT");
       return prior.response;
@@ -394,8 +456,9 @@ export async function publishProductFamily(db: Db, input: PublishFamilyInput, ac
         .where(and(eq(articles.id, input.masterArticleId), eq(articles.shopProductId, input.shopProductId)));
     }
     // A new request UUID is recorded even for a no-op; exact replays add no audit.
-    await audit(tx, input.masterArticleId, "PUBLISH_FAMILY", input.requestKey, prior.fingerprint, response, actor,
-      { validation, articleIds: family.articles.map(a => a.id) }, { shopVisible: family.master.shopVisible, publishedAt: family.master.publishedAt });
+    await audit(tx, input.masterArticleId, action, input.requestKey, prior.fingerprint, response, actor,
+      { validation, articleIds: family.articles.map(a => a.id), ...(singleBlend ? { composition: family.composition } : {}) },
+      { shopVisible: family.master.shopVisible, publishedAt: family.master.publishedAt });
     return response;
   });
 }

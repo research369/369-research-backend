@@ -9,6 +9,7 @@ import { getDb, getPool } from "./db.js";
 import {applyStockMovement} from "./stockMovementService.js";
 import { articles, stockHistory, orderItems, orders, articleTranslations, articleFaq } from "../drizzle/schema.js";
 import { isBillableOrderItem, isCompletedCommercialOrder } from "./commercialOrderMetrics.js";
+import { getPublicSingleBlendComposition } from "./singleBlendComposition.js";
 
 type PublicShopVariant = {
   dosage: string;
@@ -17,6 +18,7 @@ type PublicShopVariant = {
   stock: number;
   inStock: boolean;
   articleId: number;
+  inventoryArticleId?: number;
   /** Reale Lager-SKU der Variantenzeile für Warenkorb- und Checkout-Schutz. */
   sku: string;
   hidden?: boolean;
@@ -168,10 +170,14 @@ export function getPublicShopVariants(
     stock: number;
     sellingPrice: string | null;
     shopProductId?: string | null;
+    description?: unknown;
     variants: unknown;
   },
   inventoryArticles: Array<{ id: number; sku: string; stock: number; shopProductId: string | null }> = [],
 ): PublicShopVariant[] {
+  // The new blend never falls back to inferred name/SKU amounts or missing
+  // inventory links. Legacy products retain their existing mapping below.
+  if (article.shopProductId === "somatide" && !getPublicSingleBlendComposition(article, inventoryArticles)) return [];
   const configured = Array.isArray(article.variants) ? article.variants : [];
   const fromConfigured = configured.flatMap((raw): PublicShopVariant[] => {
     if (!raw || typeof raw !== "object") return [];
@@ -206,6 +212,7 @@ export function getPublicShopVariants(
       stock,
       inStock: !explicitlyHidden && stock > 0,
       articleId: inventoryArticle?.id ?? article.id,
+      ...(article.shopProductId === "somatide" ? { inventoryArticleId: inventoryArticle!.id } : {}),
       sku: inventoryArticle?.sku ?? article.sku,
       ...(explicitlyHidden ? { hidden: true } : {}),
       ...(image ? { image } : {}),
@@ -914,7 +921,9 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
           image: a.labelImageUrl || null,
           casNumber: a.casNumber || '',
           molecularWeight: a.molecularWeight || '',
-          purity: a.purity || '99%',
+          purity: a.purity || (pid === 'somatide' ? null : '99%'),
+          ...(pid === 'somatide' ? { composition: getPublicSingleBlendComposition(a, inventoryArticles),
+            masterArticleId: getPublicSingleBlendComposition(a, inventoryArticles) ? a.id : null } : {}),
           badge: a.badge || null,
           labReportImage: a.labReportImageUrl || null,
           galleryImages: (a.galleryImages as string[]) || null,
@@ -983,7 +992,9 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
         image: first.labelImageUrl || null,
         casNumber: first.casNumber || '',
         molecularWeight: first.molecularWeight || '',
-        purity: first.purity || '99%',
+        purity: first.purity || (first.shopProductId === 'somatide' ? null : '99%'),
+        ...(first.shopProductId === 'somatide' ? { composition: getPublicSingleBlendComposition(first, allArticles),
+          masterArticleId: getPublicSingleBlendComposition(first, allArticles) ? first.id : null } : {}),
         badge: first.badge || null,
         labReportImage: first.labReportImageUrl || null,
         galleryImages: (first.galleryImages as string[]) || null,

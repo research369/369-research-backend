@@ -24,7 +24,8 @@ import {
 } from "../drizzle/schema.js";
 import {validateProductData} from "./productValidation.js";
 import { createFamilyInput, getFamilyInput, publishFamilyInput,
-  createProductFamily, readFamily, publishProductFamily } from "./productFamily.js";
+  createProductFamily, readFamily, publishProductFamily, createSingleBlendInput, publishSingleBlendInput,
+  createSingleBlend, publishSingleBlend } from "./productFamily.js";
 
 // ─────────────────────────────────────────────────────────────
 // HELPERS
@@ -83,6 +84,18 @@ export const productAdminRouter = router({
     const db = await getDb();
     if (!db) throw new Error("DB nicht verfügbar");
     return publishProductFamily(db, input, ctx.user.username || ctx.user.email || "product_manager");
+  }),
+
+  createSingleBlend: productManagerProcedure.input(createSingleBlendInput).mutation(async ({ input, ctx }) => {
+    const db = await getDb();
+    if (!db) throw new Error("DB nicht verfügbar");
+    return createSingleBlend(db, input, ctx.user.username || ctx.user.email || "product_manager");
+  }),
+
+  publishSingleBlend: productManagerProcedure.input(publishSingleBlendInput).mutation(async ({ input, ctx }) => {
+    const db = await getDb();
+    if (!db) throw new Error("DB nicht verfügbar");
+    return publishSingleBlend(db, input, ctx.user.username || ctx.user.email || "product_manager");
   }),
 
   // ─── 1. PREVIEW ────────────────────────────────────────────
@@ -601,6 +614,12 @@ export const productAdminRouter = router({
     .query(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new Error("DB nicht verfügbar");
+      if (input.shopProductId === "somatide") {
+        const family = await db.transaction(tx => readFamily(tx, input.shopProductId),
+          { isolationLevel: "repeatable read", accessMode: "read only" });
+        if (!family.master) throw new Error(`Produkt '${input.shopProductId}' nicht gefunden`);
+        return family.validation;
+      }
 
       const article = await db
         .select()
