@@ -112,7 +112,8 @@ const mandatoryProductTables = { articles, article_seo: articleSeo, article_merc
   article_translations: articleTranslations, article_faq: articleFaq,
   product_audit_log: productAuditLog, stock_history: stockHistory };
 type ProductTableName = keyof typeof mandatoryProductTables | "use_cases" | "article_use_cases";
-type ProductSchemaStatus = { tables: Record<ProductTableName, boolean>; missingRequiredFields: string[] };
+type ProductSchemaStatus = { tables: Record<ProductTableName, boolean>; missingRequiredFields: string[];
+  faqLayout?: "current" | "legacy-active" | "unavailable" };
 type ProductSchema = { status: ProductSchemaStatus; columns: Record<ProductTableName, Map<string, number>> };
 async function inspectProductSchema(db: ProductDb): Promise<ProductSchema> {
   const result = await db.execute<{ name: ProductTableName; present: boolean; fields: Array<{ name: string; type: number }> }>(sql`
@@ -131,17 +132,47 @@ async function inspectProductSchema(db: ProductDb): Promise<ProductSchema> {
     tables[row.name] = row.present;
     columns[row.name] = new Map(row.fields.map(f => [f.name, f.type]));
   }
-  // Existing SELECT/RETURNING operations use the full declared mandatory rows.
-  // Report only those known field names, never arbitrary live schema fields.
+  // Full declared mandatory rows, except the explicit FAQ visibility alias and
+  // optional updated_at. Report only known names, never arbitrary live fields.
   const missingRequiredFields = Object.values(mandatoryProductTables).flatMap(table => {
     const name = getTableName(table) as ProductTableName;
-    return Object.values(getTableColumns(table)).filter(c => !columns[name].has(c.name))
+    return Object.values(getTableColumns(table)).filter(c => !(name === "article_faq"
+      && (c.name === "updated_at" || (c.name === "is_visible" && columns[name].has("active"))))
+      && !columns[name].has(c.name))
       .map(c => `${name}.${c.name}`);
   }).sort();
-  return { status: { tables, missingRequiredFields }, columns };
+  const faqLayout = missingRequiredFields.some(f => f.startsWith("article_faq.")) ? "unavailable"
+    : columns.article_faq.has("is_visible") ? "current" : "legacy-active";
+  return { status: { tables, missingRequiredFields, faqLayout }, columns };
 }
 function requireProductSchema(schema: ProductSchema, fields = schema.status.missingRequiredFields) {
   if (fields.length) fail(`Produkt-Schema unvollständig: ${fields.join(", ")}`, "CONFLICT");
+}
+async function readFamilyFaqs(db: ProductDb, schema: ProductSchema, ids: number[]) {
+  // Identifiers come ONLY from this fixed whitelist, never from the payload.
+  const visible = sql.identifier(schema.columns.article_faq.has("is_visible") ? "is_visible" : "active");
+  const updated = schema.columns.article_faq.has("updated_at") ? sql`updated_at::text` : sql`NULL`;
+  const rows = await db.execute<{ id: number; article_id: number; lang: string; question: string;
+    answer: string; sort_order: number | null; is_visible: number | null; created_at: string; updated_at: string | null }>(sql`
+    SELECT id, article_id, lang, question, answer, sort_order, ${visible} AS is_visible,
+      created_at::text AS created_at, ${updated} AS updated_at
+    FROM article_faq WHERE article_id IN (${sql.join(ids.map(id => sql`${id}`), sql`, `)})
+    ORDER BY sort_order, id`);
+  return rows.rows.map(f => ({ id: f.id, articleId: f.article_id, lang: f.lang, question: f.question,
+    answer: f.answer, sortOrder: f.sort_order, isVisible: f.is_visible,
+    createdAt: articleFaq.createdAt.mapFromDriverValue(f.created_at),
+    updatedAt: f.updated_at === null ? null : articleFaq.updatedAt.mapFromDriverValue(f.updated_at) }));
+}
+async function insertFamilyFaqs(tx: Tx, schema: ProductSchema, masterId: number, faqs: CreateFamilyInput["faqs"]) {
+  // Only new rows; set both flags when present so the legacy public reader agrees.
+  // Omit timestamps to retain actual DB defaults, with no invented updated time.
+  const flags = (["is_visible", "active"] as const).filter(name => schema.columns.article_faq.has(name));
+  if (!flags.length) fail("Produkt-Schema unvollständig: article_faq.is_visible", "CONFLICT");
+  const columns = sql.join(flags.map(name => sql.identifier(name)), sql`, `);
+  const rows = faqs.map((f, index) => sql`(${masterId}, ${f.lang}, ${f.question}, ${f.answer}, ${index + 1},
+    ${sql.join(flags.map(() => sql`1`), sql`, `)})`);
+  await tx.execute(sql`INSERT INTO article_faq (article_id, lang, question, answer, sort_order, ${columns})
+    VALUES ${sql.join(rows, sql`, `)}`);
 }
 function canReadUseCases(schema: ProductSchema) {
   const c = schema.columns.use_cases;
@@ -205,7 +236,7 @@ export async function readFamily(db: ProductDb, shopProductId: string, forUpdate
   const seo = await db.select().from(articleSeo).where(inArray(articleSeo.articleId, ids)).orderBy(asc(articleSeo.id));
   const merchant = await db.select().from(articleMerchant).where(inArray(articleMerchant.articleId, ids)).orderBy(asc(articleMerchant.id));
   const translations = await db.select().from(articleTranslations).where(inArray(articleTranslations.articleId, ids)).orderBy(asc(articleTranslations.lang), asc(articleTranslations.id));
-  const faqs = await db.select().from(articleFaq).where(inArray(articleFaq.articleId, ids)).orderBy(asc(articleFaq.sortOrder), asc(articleFaq.id));
+  const faqs = await readFamilyFaqs(db, schema, ids);
   const links = canLinkUseCases(schema) ? await db.select({ id: articleUseCases.id, articleId: articleUseCases.articleId,
     useCaseId: articleUseCases.useCaseId, slug: useCases.slug,
     ...(schema.columns.article_use_cases.has("sort_order") ? { sortOrder: articleUseCases.sortOrder } : {}),
@@ -323,7 +354,7 @@ export async function createProductFamily(db: Db, input: CreateFamilyInput, acto
       seoTitle: input.seo.seoTitle, seoDescription: input.seo.seoDescription, imageAlt: input.seo.imageAlt });
     for (const t of input.translations.filter(t => t.lang !== "de"))
       await tx.insert(articleTranslations).values({ articleId: masterArticleId, ...t });
-    await tx.insert(articleFaq).values(input.faqs.map((f, index) => ({ articleId: masterArticleId, ...f, sortOrder: index + 1, isVisible: 1 })));
+    await insertFamilyFaqs(tx, schema, masterArticleId, input.faqs);
     for (const u of selectedUseCases.sort((a, b) => a.slug.localeCompare(b.slug)))
       await tx.execute(sql`INSERT INTO article_use_cases (article_id, use_case_id) VALUES (${masterArticleId}, ${u.id})`);
     const created = await readFamily(tx, input.shopProductId);

@@ -118,6 +118,10 @@ test("hidden creation writes linked inventory IDs, exact prices/stock, stock aud
   assert.equal(family.translations[0].merchantTitle, input.merchant.merchantTitle);
   assert.equal(family.translations[0].merchantDescription, input.merchant.merchantDescription);
   assert.equal(family.faqs.length, 6); assert(family.faqs.every(f => f.articleId === created.masterArticleId));
+  assert.equal(family.productSchemaStatus.faqLayout, "current");
+  const { getDb } = await import("./db.js"), { articleFaq } = await import("../drizzle/schema.js");
+  const { asc } = await import("drizzle-orm");
+  assert.deepEqual(family.faqs, await (await getDb())!.select().from(articleFaq).orderBy(asc(articleFaq.sortOrder), asc(articleFaq.id)));
   assert.equal(family.useCases.length, 1); assert.equal(family.useCases[0].slug, "metabolic-research");
   assert.equal(family.validation?.isValid, true); assert.equal(family.validation?.score, 100); assert.deepEqual(family.validation?.warnings, []);
   const logs = (await pool.query("SELECT * FROM stock_history WHERE article_id=ANY($1::int[]) ORDER BY article_id", [created.articleIds])).rows;
@@ -335,7 +339,8 @@ test("manager is allowed, customers/packing/unauthenticated are denied on all th
 test("schema status exposes only fixed product table booleans and required field names without writes", async () => {
   const stable = await snapshot(), sequence = await articleSequence();
   const result = await caller().getFamily({ shopProductId: "does-not-exist" });
-  assert.deepEqual(Object.keys(result.productSchemaStatus).sort(), ["missingRequiredFields", "tables"]);
+  assert.deepEqual(Object.keys(result.productSchemaStatus).sort(), ["faqLayout", "missingRequiredFields", "tables"]);
+  assert.equal(result.productSchemaStatus.faqLayout, "current");
   assert.deepEqual(Object.keys(result.productSchemaStatus.tables).sort(), [...productTables].sort());
   assert(Object.values(result.productSchemaStatus.tables).every(value => value === true));
   assert.deepEqual(result.productSchemaStatus.missingRequiredFields, []);
@@ -446,18 +451,23 @@ test("missing mandatory metadata/audit/stock tables are reported for absent fami
 });
 
 test("missing required FAQ/translation/article fields are detected before insert, while missing articles table fails clearly", async () => {
-  for (const [table, column] of [["article_faq", "lang"], ["article_faq", "is_visible"], ["article_translations", "merchant_description"], ["articles", "purity"]]) {
+  for (const [table, column] of ["id", "article_id", "lang", "question", "answer", "sort_order", "is_visible", "created_at"]
+    .map(column => ["article_faq", column]).concat([["article_translations", "merchant_description"], ["articles", "purity"]])) {
     const created = await caller().createFamily(payload());
     await withSchemaChange(`ALTER TABLE ${table} DROP COLUMN ${column}`, async () => {
-      const stable = await snapshot(), sequence = await articleSequence();
+      // Missing FAQ id has no ORDER BY id available even for the fixture snapshot.
+      const stable = column === "id" ? (await pool.query("SELECT * FROM article_faq")).rows : await snapshot();
+      const sequence = await articleSequence();
       const result = await caller().getFamily({ shopProductId: "does-not-exist" });
       assert.equal(result.productSchemaStatus.tables[table as keyof typeof result.productSchemaStatus.tables], true);
       assert.deepEqual(result.productSchemaStatus.missingRequiredFields, [`${table}.${column}`]);
+      if (table === "article_faq") assert.equal(result.productSchemaStatus.faqLayout, "unavailable");
       const clear = (e: any) => e.code === "CONFLICT" && e.message.includes(`${table}.${column}`);
       await assert.rejects(caller().createFamily(payload("other-family")), clear);
       await assert.rejects(caller().getFamily({ shopProductId: created.shopProductId }), clear);
       await assert.rejects(caller().publishFamily(pub(created)), clear);
-      assert.deepEqual(await snapshot(), stable); assert.deepEqual(await articleSequence(), sequence);
+      assert.deepEqual(column === "id" ? (await pool.query("SELECT * FROM article_faq")).rows : await snapshot(), stable);
+      assert.deepEqual(await articleSequence(), sequence);
     });
   }
   await withSchemaChange("DROP TABLE articles CASCADE", async () => {
@@ -468,15 +478,119 @@ test("missing required FAQ/translation/article fields are detected before insert
   });
 });
 
-test("legacy FAQ active is not silently treated as the mandatory is_visible field", async () => {
-  await withSchemaChange("ALTER TABLE article_faq RENAME COLUMN is_visible TO active", async () => {
-    const stable = await snapshot(), sequence = await articleSequence();
-    const result = await caller().getFamily({ shopProductId: "does-not-exist" });
-    assert.equal(result.productSchemaStatus.tables.article_faq, true);
-    assert.deepEqual(result.productSchemaStatus.missingRequiredFields, ["article_faq.is_visible"]);
-    const input = payload(); input.useCaseSlugs = [];
-    await assert.rejects(caller().createFamily(input), (e: any) => e.code === "CONFLICT" && e.message.includes("article_faq.is_visible"));
-    assert.deepEqual(await snapshot(), stable); assert.deepEqual(await articleSequence(), sequence);
+async function seedSentinelFaqs() {
+  await pool.query(`INSERT INTO article_faq(article_id,lang,question,answer,sort_order,is_visible,created_at,updated_at)
+    VALUES (1,'de','Unrelated visible?','Never change me',1,1,'2020-01-02 03:04:05.123456','2021-02-03 04:05:06.654321'),
+      (1,'de','Unrelated hidden?','Keep hidden',2,0,'2020-01-02','2021-02-03'),
+      (1,'en','Unrelated English?','Keep original',3,1,'2020-01-02','2021-02-03')`);
+}
+const legacyFaqSchema = "ALTER TABLE article_faq RENAME COLUMN is_visible TO active; ALTER TABLE article_faq DROP COLUMN updated_at";
+
+test("legacy active without updated_at supports six exact DE FAQs, minimal metabolic link, publication, stable IDs and untouched sentinel FAQs", async () => {
+  await seedSentinelFaqs();
+  await withSchemaChange(`${legacyFaqSchema}; ALTER TABLE use_cases DROP COLUMN visible; ALTER TABLE use_cases DROP COLUMN image_url;
+    ALTER TABLE article_use_cases DROP COLUMN sort_order; ALTER TABLE article_use_cases DROP COLUMN is_primary`, async () => {
+    const input = payload(), old: any = await snapshot(), sequence = await articleSequence();
+    input.faqs[0].question = "Forschungsfrage 'active; DROP TABLE article_faq' ?";
+    const absent = await caller().getFamily({ shopProductId: input.shopProductId });
+    assert.equal(absent.master, null); assert.equal(absent.productSchemaStatus.faqLayout, "legacy-active");
+    assert(Object.values(absent.productSchemaStatus.tables).every(Boolean));
+    assert.deepEqual(absent.productSchemaStatus.missingRequiredFields, []);
+    assert(absent.availableUseCases.some(u => u.slug === "metabolic-research"));
+    assert.deepEqual(await snapshot(), old); assert.deepEqual(await articleSequence(), sequence);
+    const created = await caller().createFamily(input), hidden = await caller().getFamily({ shopProductId: input.shopProductId });
+    assert.equal(hidden.productSchemaStatus.faqLayout, "legacy-active");
+    assert.deepEqual(hidden.productSchemaStatus.missingRequiredFields, []);
+    assert(hidden.articles.every(a => a.shopVisible === 0 && a.publishedAt === null));
+    assert.deepEqual(hidden.articles.map(a => [a.sellingPrice, a.stock]), [["64.00", 9], ["115.00", 9]]);
+    assert.equal(hidden.seo?.canonical, input.seo.canonical); assert.equal(hidden.merchant?.merchantTitle, input.merchant.merchantTitle);
+    assert.equal(hidden.translations[0].merchantDescription, input.merchant.merchantDescription);
+    assert.deepEqual(hidden.faqs.map(f => ({ lang: f.lang, question: f.question, answer: f.answer })), input.faqs);
+    assert(hidden.faqs.every(f => f.articleId === created.masterArticleId && f.isVisible === 1 && f.updatedAt === null && f.createdAt instanceof Date));
+    assert.deepEqual(Object.keys(hidden.faqs[0]).sort(), ["id", "articleId", "lang", "question", "answer", "sortOrder", "isVisible", "createdAt", "updatedAt"].sort());
+    assert.equal(hidden.useCases.length, 1); assert.equal(hidden.useCases[0].slug, "metabolic-research");
+    assert.equal(hidden.useCases[0].articleId, created.masterArticleId); assert(!Object.hasOwn(hidden.useCases[0], "sortOrder"));
+    assert.equal(hidden.validation?.score, 100); assert.deepEqual(hidden.validation?.warnings, []);
+    const publicFaqs = () => pool.query("SELECT * FROM article_faq WHERE article_id=ANY($1) AND active=1 ORDER BY sort_order,id", [created.articleIds]);
+    const publicHidden = (await publicFaqs()).rows;
+    assert.equal(publicHidden.length, 6); assert(publicHidden.every(f => f.article_id === created.masterArticleId && f.lang === "de"));
+    assert.deepEqual(publicHidden.map(f => [f.question, f.answer]), input.faqs.map(f => [f.question, f.answer]));
+    assert.deepEqual(hidden.faqs.map(f => f.createdAt), publicHidden.map(f => f.created_at));
+    const draft: any = await snapshot(); assert.deepEqual(await caller().createFamily(input), created); assert.deepEqual(await snapshot(), draft);
+    const publish = pub(created); await caller().publishFamily(publish);
+    const family = await caller().getFamily({ shopProductId: input.shopProductId });
+    assert.equal(family.master?.shopVisible, 1); assert(family.master?.publishedAt); assert.equal(family.articles[1].shopVisible, 0);
+    assert.deepEqual(family.faqs, hidden.faqs); assert.deepEqual(family.useCases, hidden.useCases);
+    assert.deepEqual((await publicFaqs()).rows, publicHidden);
+    const published: any = await snapshot();
+    assert.deepEqual(published.article_faq.filter((f: any) => f.article_id === 1), old.article_faq);
+    assert.deepEqual(published.stock_history, draft.stock_history); assert.equal(published.stock_history.length, 3);
+    for (const table of ["articles", "article_seo", "article_merchant", "stock_history", "product_audit_log"])
+      assert.deepEqual(published[table].filter((r: any) => r.id === 1), old[table]);
+    assert.deepEqual(await caller().createFamily(input), created); await caller().publishFamily(publish);
+    assert.deepEqual(await snapshot(), published);
+  });
+});
+
+test("legacy FAQ audit failures roll back creation and publication including all FAQ, inventory and sentinel rows", async () => {
+  await seedSentinelFaqs();
+  await withSchemaChange(legacyFaqSchema, async () => {
+    const old = await snapshot(), input = payload();
+    await failAudit("CREATE_FAMILY", async () => { await assert.rejects(caller().createFamily(input)); });
+    assert.deepEqual(await snapshot(), old);
+    const created = await caller().createFamily(input), draft = await snapshot();
+    const publish = pub(created);
+    await failAudit("PUBLISH_FAMILY", async () => { await assert.rejects(caller().publishFamily(publish)); });
+    assert.deepEqual(await snapshot(), draft);
+    await caller().publishFamily(publish);
+    assert.deepEqual(await caller().createFamily(input), created);
+  });
+});
+
+test("when both FAQ flags exist only new rows set both to one, with current DTO and untouched mismatched sentinels", async () => {
+  await seedSentinelFaqs();
+  await withSchemaChange("ALTER TABLE article_faq ADD COLUMN active integer DEFAULT 0; UPDATE article_faq SET active=1 WHERE is_visible=0", async () => {
+    const old: any = await snapshot(), input = payload(), created = await caller().createFamily(input);
+    const hidden = await caller().getFamily({ shopProductId: input.shopProductId });
+    assert.equal(hidden.productSchemaStatus.faqLayout, "current"); assert.deepEqual(hidden.productSchemaStatus.missingRequiredFields, []);
+    const publicFaqs = (await pool.query("SELECT * FROM article_faq WHERE article_id=ANY($1) AND active=1", [created.articleIds])).rows;
+    assert.equal(publicFaqs.length, 6); assert(publicFaqs.every(f => f.is_visible === 1 && f.active === 1 && f.article_id === created.masterArticleId));
+    assert(hidden.faqs.every(f => f.isVisible === 1 && f.updatedAt instanceof Date));
+    await caller().publishFamily(pub(created));
+    assert.deepEqual((await pool.query("SELECT * FROM article_faq WHERE article_id=1 ORDER BY id")).rows, old.article_faq);
+    assert.deepEqual((await caller().getFamily({ shopProductId: input.shopProductId })).faqs, hidden.faqs);
+  });
+});
+
+test("current FAQ without updated_at remains compatible and returns null rather than an invented timestamp", async () => {
+  await withSchemaChange("ALTER TABLE article_faq DROP COLUMN updated_at", async () => {
+    const input = payload(), created = await caller().createFamily(input);
+    const hidden = await caller().getFamily({ shopProductId: input.shopProductId });
+    assert.equal(hidden.productSchemaStatus.faqLayout, "current"); assert.deepEqual(hidden.productSchemaStatus.missingRequiredFields, []);
+    assert(hidden.faqs.every(f => f.updatedAt === null && f.createdAt instanceof Date));
+    await caller().publishFamily(pub(created));
+    assert.deepEqual((await caller().getFamily({ shopProductId: input.shopProductId })).faqs, hidden.faqs);
+  });
+});
+
+test("legacy FAQ alias still requires every other mandatory FAQ field and rejects invisible persisted FAQs", async () => {
+  for (const column of ["lang", "question", "answer", "sort_order", "created_at"]) {
+    await withSchemaChange(`${legacyFaqSchema}; ALTER TABLE article_faq DROP COLUMN ${column}`, async () => {
+      const stable = await snapshot(), sequence = await articleSequence();
+      const absent = await caller().getFamily({ shopProductId: "does-not-exist" });
+      assert.equal(absent.productSchemaStatus.faqLayout, "unavailable");
+      assert.deepEqual(absent.productSchemaStatus.missingRequiredFields, [`article_faq.${column}`]);
+      await assert.rejects(caller().createFamily(payload()), (e: any) => conflict(e) && e.message.includes(`article_faq.${column}`));
+      assert.deepEqual(await snapshot(), stable); assert.deepEqual(await articleSequence(), sequence);
+    });
+  }
+  await withSchemaChange(legacyFaqSchema, async () => {
+    const input = payload(), created = await caller().createFamily(input);
+    await pool.query("UPDATE article_faq SET active=0 WHERE article_id=$1 AND sort_order=1", [created.masterArticleId]);
+    const stable = await snapshot(), family = await caller().getFamily({ shopProductId: input.shopProductId });
+    assert.equal(family.faqs[0].isVisible, 0);
+    await assert.rejects(caller().publishFamily(pub(created)), (e: any) => /sichtbare FAQs/.test(e.message));
+    assert.deepEqual(await snapshot(), stable);
   });
 });
 
