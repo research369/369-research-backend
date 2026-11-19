@@ -23,6 +23,8 @@ import {
   productAuditLog,
 } from "../drizzle/schema.js";
 import {validateProductData} from "./productValidation.js";
+import { createFamilyInput, getFamilyInput, publishFamilyInput,
+  createProductFamily, readFamily, publishProductFamily } from "./productFamily.js";
 
 // ─────────────────────────────────────────────────────────────
 // HELPERS
@@ -63,6 +65,25 @@ async function writeAuditLog(
 // ─────────────────────────────────────────────────────────────
 
 export const productAdminRouter = router({
+
+  // Additive exact-family operations. Existing single-article procedures unchanged.
+  createFamily: productManagerProcedure.input(createFamilyInput).mutation(async ({ input, ctx }) => {
+    const db = await getDb();
+    if (!db) throw new Error("DB nicht verfügbar");
+    return createProductFamily(db, input, ctx.user.username || ctx.user.email || "product_manager");
+  }),
+
+  getFamily: productManagerProcedure.input(getFamilyInput).query(async ({ input }) => {
+    const db = await getDb();
+    if (!db) throw new Error("DB nicht verfügbar");
+    return db.transaction(tx => readFamily(tx, input.shopProductId), { isolationLevel: "repeatable read", accessMode: "read only" });
+  }),
+
+  publishFamily: productManagerProcedure.input(publishFamilyInput).mutation(async ({ input, ctx }) => {
+    const db = await getDb();
+    if (!db) throw new Error("DB nicht verfügbar");
+    return publishProductFamily(db, input, ctx.user.username || ctx.user.email || "product_manager");
+  }),
 
   // ─── 1. PREVIEW ────────────────────────────────────────────
   /** Vollständige Produktdaten für Preview (kein Schreiben) */
