@@ -683,10 +683,13 @@ test("single blend hidden create has exactly one master/vial, canonical composit
 
 test("single blend publish is atomic/idempotent, public DTO uses actual master IDs, stock unchanged and original create replay persists", async () => {
   const input = blendPayload(), created = await caller().createSingleBlend(input as any), request = pub(created), hidden: any = await snapshot();
+  assert.deepEqual((await publicCaller().shopAvailability()).filter((row: any) => row.shopProductId === "somatide"), []);
   await assert.rejects(caller().publishSingleBlend({ ...request, masterArticleId: 1 }), conflict);
   await assert.rejects(caller().publishFamily(request));
   const results = await Promise.all([caller().publishSingleBlend(request), caller().publishSingleBlend(request)]);
   assert.deepEqual(results[0], results[1]); assert.equal(results[0].shopVisible, true);
+  assert.deepEqual((await publicCaller().shopAvailability()).filter((row: any) => row.shopProductId === "somatide"),
+    [{ shopProductId: "somatide", inStock: true, stock: 19, name: "SOMATIDE (15 mg) (15 mg)", inventorySku: "SOMATIDE-15MG" }]);
   const family = await caller().getFamily({ shopProductId: "somatide" }); assert(family.master?.publishedAt);
   for (const product of [(await publicCaller().shopProducts()).find(p => p.id === "somatide"), await publicCaller().shopArticle({ shopProductId: "somatide" })]) {
     assert(product); assert.equal(product.id, "somatide"); assert.equal(product.masterArticleId, created.masterArticleId);
@@ -702,6 +705,8 @@ test("single blend publish is atomic/idempotent, public DTO uses actual master I
   await caller().publishSingleBlend(pub(created));
   const noop: any = await snapshot(); assert.deepEqual(noop.articles, published.articles); assert.deepEqual(noop.stock_history, published.stock_history);
   assert.equal(noop.product_audit_log.filter((a: any) => a.action === "PUBLISH_SINGLE_BLEND").length, 2);
+  await pool.query("UPDATE articles SET description=description-'composition' WHERE id=$1", [created.masterArticleId]);
+  assert.deepEqual((await publicCaller().shopAvailability()).filter((row: any) => row.shopProductId === "somatide"), []);
 });
 
 test("single blend concurrent create replay and canonical object ordering never duplicate rows, stock or audits; changed payload conflicts", async () => {
@@ -895,6 +900,8 @@ test("single blend create replay after a real local stock movement never restore
   await assert.rejects(caller().publishSingleBlend(pub(created))); assert.deepEqual(await snapshot(), stable);
   await pool.query("UPDATE articles SET variants=jsonb_set(variants,'{0,stock}','17'::jsonb) WHERE id=$1", [created.masterArticleId]);
   await caller().publishSingleBlend(pub(created));
+  assert.deepEqual((await publicCaller().shopAvailability()).filter((row: any) => row.shopProductId === "somatide"),
+    [{ shopProductId: "somatide", inStock: true, stock: 17, name: "SOMATIDE (15 mg) (15 mg)", inventorySku: "SOMATIDE-15MG" }]);
   const detail = await publicCaller().shopArticle({ shopProductId: "somatide" }); assert(detail); assert.equal(detail.variants[0].stock, 17);
 });
 

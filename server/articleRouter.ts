@@ -296,6 +296,7 @@ export const articleRouter = router({
       stock: articles.stock,
       name: articles.name,
       sellingPrice: articles.sellingPrice,
+      description: articles.description,
       variants: articles.variants,
       isActive: articles.isActive,
       shopVisible: articles.shopVisible,
