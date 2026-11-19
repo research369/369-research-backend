@@ -20,6 +20,7 @@ type PublicShopVariant = {
   /** Reale Lager-SKU der Variantenzeile für Warenkorb- und Checkout-Schutz. */
   sku: string;
   hidden?: boolean;
+  image?: string;
 };
 
 type VariantSource = {
@@ -31,6 +32,8 @@ type VariantSource = {
   stock?: unknown;
   isActive?: unknown;
   hidden?: unknown;
+  image?: unknown;
+  imageUrl?: unknown;
   /** Optionale, persistierte Zuordnung zur tatsächlichen Lagerzeile. */
   inventoryArticleId?: unknown;
 };
@@ -192,6 +195,10 @@ export function getPublicShopVariants(
     const rawStock = Number(variant.stock);
     const stock = inventoryArticle?.stock ?? (Number.isFinite(rawStock) ? rawStock : article.stock);
     const explicitlyHidden = variant.hidden === true || variant.isActive === false || variant.isActive === 0;
+    const image = [variant.imageUrl, variant.image].find((source): source is string => {
+      if (typeof source !== "string" || !/^https:\/\/[^\s/\\]+(?:[/?#][^\s\\]*)?$/i.test(source)) return false;
+      try { return new URL(source).protocol === "https:"; } catch { return false; }
+    });
     return [{
       dosage,
       label,
@@ -201,6 +208,7 @@ export function getPublicShopVariants(
       articleId: inventoryArticle?.id ?? article.id,
       sku: inventoryArticle?.sku ?? article.sku,
       ...(explicitlyHidden ? { hidden: true } : {}),
+      ...(image ? { image } : {}),
     }];
   });
 
