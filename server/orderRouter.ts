@@ -1,5 +1,8 @@
 import { checkoutFingerprint, readCheckoutReceipt, lockCheckoutIntent, persistCheckoutReceipt, queueOrderTask, runOrderTask, resultRows, getOrderIntegrityIssues } from './priorityOrderIntegrity.js';
 import { lockOrder, returnOrderStock, recordOrderAction, deleteOrderAtomically, assertOrderFinanciallyEditable } from './orderStockReturnService.js';
+import { editMoneyCents, editBreakdownShape, validateEditAmounts, matchEditItems, orderEditError } from './orderEditValidation.js';
+import { orderEditDerivedTerms } from './orderEditPartnerTerms.js';
+import { orderCleanupPreview, orderCleanupError } from './orderCleanupPreview.js';
 import { reverseOrderFinancesInTransaction } from './priorityOrderFinancialAdapter.js';
 import {nextCustomerNumber} from './customerNumberService.js';
 import {checkCustomerCreationMaintenance} from './customerCreationMaintenance.js';
@@ -2482,13 +2485,17 @@ export const orderRouter = router({
     }),
 
   // Both deletion paths preserve audit and are atomic; financial/shipping links require review.
-  deleteNoRestock: scopedOrderCleanupProcedure.input(z.object({orderId:z.string()})).mutation(async ({input,ctx}) => {
+  cleanupPreview: scopedOperationsReadProcedure.input(z.object({orderId:z.string()})).query(async ({input}) => {
     const db=await getDb(); if(!db) throw Error('Database not available');
-    return deleteOrderAtomically(db,input.orderId,false,ctx.user?.username || 'Admin');
+    return orderCleanupPreview(db,input.orderId);
   }),
-  delete: scopedOrderCleanupProcedure.input(z.object({orderId:z.string()})).mutation(async ({input,ctx}) => {
+  deleteNoRestock: scopedOrderCleanupProcedure.input(z.object({orderId:z.string(),expectedTotal:z.number().finite().nonnegative().optional(),expectedVersion:z.string().datetime().optional()})).mutation(async ({input,ctx}) => {
     const db=await getDb(); if(!db) throw Error('Database not available');
-    return deleteOrderAtomically(db,input.orderId,true,ctx.user?.username || 'Admin');
+    try { return await deleteOrderAtomically(db,input.orderId,false,ctx.user?.username || 'Admin',input); } catch(error) { orderCleanupError(error); }
+  }),
+  delete: scopedOrderCleanupProcedure.input(z.object({orderId:z.string(),expectedTotal:z.number().finite().nonnegative().optional(),expectedVersion:z.string().datetime().optional()})).mutation(async ({input,ctx}) => {
+    const db=await getDb(); if(!db) throw Error('Database not available');
+    try { return await deleteOrderAtomically(db,input.orderId,true,ctx.user?.username || 'Admin',input); } catch(error) { orderCleanupError(error); }
   }),
 
   // ADMIN: Add internal note
@@ -2517,30 +2524,36 @@ export const orderRouter = router({
         name: z.string(),
         dosage: z.string().optional(),
         variant: z.string().optional(),
-        price: z.number(),
+        price: z.number().finite().nonnegative(),
         quantity: z.number().int().positive(),
         type: z.string(),
-        articleId: z.number().optional(),
+        articleId: z.number().int().positive().optional(),
       })),
-      subtotal: z.number(),
-      discount: z.number(),
+      subtotal: z.number().finite().nonnegative(),
+      discount: z.number().finite().nonnegative(),
       discountCode: z.string().nullable().optional(),
       discountBreakdown: z.array(discountBreakdownEntrySchema).max(30).optional(),
-      shipping: z.number(),
-      total: z.number(),
+      shipping: z.number().finite().nonnegative(),
+      total: z.number().finite().nonnegative(),
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
-      return db.transaction(async tx => {
+      try { return await db.transaction(async tx => {
       const db=tx;
       const order=await lockOrder(tx,input.orderId);
-      await assertOrderFinanciallyEditable(tx,order);
-      if (order.status === 'storniert') throw Error('ORDER_CANCELLED_EDIT_REVIEW_REQUIRED');
+      validateEditAmounts(input); // Before any stock/header write AND before no-op.
       const oldItems=await tx.select().from(orderItems).where(eq(orderItems.orderId,input.orderId));
+      const itemMatch=matchEditItems(input.items,oldItems);
+      const sameAmounts=['subtotal','discount','shipping','total'].every(key => editMoneyCents((order as any)[key]) === editMoneyCents((input as any)[key]));
+      const sameCode=(order.discountCode || null) === (input.discountCode || null);
+      const sameBreakdown=input.discountBreakdown === undefined || editBreakdownShape(order.discountBreakdown) === editBreakdownShape(input.discountBreakdown);
+      if (sameAmounts && sameCode && sameBreakdown && itemMatch.unchanged) return { success:true, unchanged:true };
+      await assertOrderFinanciallyEditable(tx,order);
+      if (order.status === 'storniert' || order.cancelledAt) throw Error('ORDER_CANCELLED_EDIT_REVIEW_REQUIRED');
+      const derivedTerms=await orderEditDerivedTerms(tx,order,input);
       const history=await tx.select().from(stockHistory).where(eq(stockHistory.orderId,input.orderId));
-      if (input.items.some(i => i.id && !oldItems.some(old => old.id === i.id))) throw Error('ORDER_ITEM_ID_CONFLICT');
       const returns=resultRows(await tx.execute(sql`SELECT original_movement_id,return_movement_id FROM priority_stock_returns WHERE order_id=${input.orderId}`));
       const reversedOriginals=new Set(returns.map(r=>r.original_movement_id));
       const returnMovements=new Set(returns.map(r=>r.return_movement_id));
@@ -2567,43 +2580,46 @@ export const orderRouter = router({
           if(qty)await applyStockMovement(tx,{articleId:id,sku:article.sku,expectedStock:article.stock,change:-qty,type:'verkauf',reason:'Explicit unpaid order item edit',orderId:input.orderId,actor:'Admin'});
         }
       }
-      if (!Number.isFinite(input.total) || input.total < 0 || input.subtotal < 0 || input.discount < 0 || input.shipping < 0 || Math.abs(input.total-(input.subtotal-input.discount+input.shipping)) > 0.011 || Math.abs(input.subtotal-input.items.reduce((sum,i)=>sum+i.price*i.quantity,0)) > 0.011) throw Error('ORDER_EDIT_AMOUNTS_INVALID');
 
       // Update order financials
       await db.update(orders).set({
-        subtotal: input.subtotal.toFixed(2),
-        discount: input.discount.toFixed(2),
+        subtotal: (editMoneyCents(input.subtotal)/100).toFixed(2),
+        discount: (editMoneyCents(input.discount)/100).toFixed(2),
         discountCode: input.discountCode || null,
-        ...(input.discountBreakdown !== undefined ? { discountBreakdown: input.discountBreakdown } : {}),
-        shipping: input.shipping.toFixed(2),
-        total: input.total.toFixed(2),
+        ...(input.discountBreakdown !== undefined ? { discountBreakdown: input.discountBreakdown.map(entry=>({...entry,amount:editMoneyCents(entry.amount)/100})) } : {}),
+        shipping: (editMoneyCents(input.shipping)/100).toFixed(2),
+        total: (editMoneyCents(input.total)/100).toFixed(2),
+        ...derivedTerms,
         updatedAt: new Date(),
       }).where(eq(orders.orderId, input.orderId));
 
-      // Delete old items
-      await db.delete(orderItems).where(eq(orderItems.orderId, input.orderId));
-
-      // Insert new items
-      for (const item of input.items) {
-        await db.insert(orderItems).values({
-          orderId: input.orderId,
+      // Existing positions retain identity, flags and createdAt. Only explicit
+      // removals are deleted; new rows receive the established stock-shape flags.
+      const retained=new Set(itemMatch.matches.filter(Boolean).map(old => old.id));
+      const removed=oldItems.filter(old => !retained.has(old.id));
+      if (removed.length) await db.delete(orderItems).where(and(eq(orderItems.orderId,input.orderId),inArray(orderItems.id,removed.map(old=>old.id))));
+      for (const [index,item] of input.items.entries()) {
+        const values={
           name: item.name,
           dosage: item.dosage || null,
           variant: item.variant || null,
           type: item.type,
-          price: item.price.toFixed(2),
+          price: (editMoneyCents(item.price)/100).toFixed(2),
           quantity: item.quantity,
           articleId: item.articleId || null,
-          isNasalSpray: (oldItems.find(old => old.id === item.id) || oldItems.find(old => stockShape([old])===stockShape([item])))?.isNasalSpray || false,
-          isNasalDiySet: (oldItems.find(old => old.id === item.id) || oldItems.find(old => stockShape([old])===stockShape([item])))?.isNasalDiySet || false,
-          isPlugPlay: (oldItems.find(old => old.id === item.id) || oldItems.find(old => stockShape([old])===stockShape([item])))?.isPlugPlay || false,
-        });
+        };
+        const matched=itemMatch.matches[index];
+        if (matched) await db.update(orderItems).set(values).where(and(eq(orderItems.orderId,input.orderId),eq(orderItems.id,matched.id)));
+        else {
+          const previous=oldItems.find(old => stockShape([old])===stockShape([item]));
+          await db.insert(orderItems).values({orderId:input.orderId,...values,isNasalSpray:previous?.isNasalSpray || false,isNasalDiySet:previous?.isNasalDiySet || false,isPlugPlay:previous?.isPlugPlay || false});
+        }
       }
 
       console.log(`[Orders] Updated order ${input.orderId} – ${input.total.toFixed(2)} EUR – ${input.items.length} items`);
 
-      return { success: true };
-      });
+      return { success: true, unchanged:false };
+      }); } catch (error) { orderEditError(error); }
     }),
 
   // Send packing notification to customer (WhatsApp link + Email)

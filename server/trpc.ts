@@ -48,7 +48,8 @@ const isAdmin = middleware(({ ctx, next }) => {
 
 const auditAdminMutation = middleware(async ({ ctx, path, type, input, next }) => {
   const result = await next();
-  if (type === "mutation" && result.ok && ctx.user?.role === "admin") {
+  const unchangedOrderEdit = result.ok && ['order.update','update'].includes(path) && (result.data as any)?.unchanged === true;
+  if (type === "mutation" && result.ok && ctx.user?.role === "admin" && !unchangedOrderEdit) {
     // Storage problems must never turn a successful business action into a failed one.
     // The journal stores procedure paths and safe field names, never submitted values.
     void recordAdminMutation({

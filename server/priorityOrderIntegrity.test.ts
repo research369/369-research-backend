@@ -165,11 +165,11 @@ test('actual router: no-restock delete also rolls back item removal when header 
  await assert.rejects(caller().deleteNoRestock({orderId:'RETURN'}));assert.equal(await count('order_items'),1);
 });
 test('actual router: edit item failure rolls financial header and positions back; paid edits guarded',async()=>{
- await seedOrder();await pool.query(`CREATE TRIGGER priority_fail_item BEFORE INSERT ON order_items FOR EACH ROW EXECUTE FUNCTION priority_fail()`);
+ await seedOrder();await pool.query(`CREATE TRIGGER priority_fail_item BEFORE INSERT OR UPDATE ON order_items FOR EACH ROW EXECUTE FUNCTION priority_fail()`);
  await assert.rejects(caller().update({orderId:'RETURN',items:[{name:'Original requested variant',type:'peptide',price:30,quantity:1}],subtotal:30,discount:0,shipping:18,total:48}));
  assert.equal((await pool.query("SELECT total FROM orders WHERE order_id='RETURN'")).rows[0].total,'38.00');assert.equal(await count('order_items'),1);
  await pool.query("UPDATE orders SET paid_at=now() WHERE order_id='RETURN'");
- await assert.rejects(caller().update({orderId:'RETURN',items:[{name:'Original requested variant',type:'peptide',price:20,quantity:1}],subtotal:20,discount:0,shipping:18,total:38}),/FINANCIAL_CORRECTION_REVIEW/);
+ await assert.rejects(caller().update({orderId:'RETURN',items:[{name:'Original requested variant',type:'peptide',price:30,quantity:1}],subtotal:30,discount:0,shipping:18,total:48}),/FINANCIAL_CORRECTION_REVIEW/);
 });
 
 test('actual router: positive local correction never becomes an automatic second return',async()=>{
@@ -342,4 +342,117 @@ test('ACTUAL checkout retry: renewed customer confirmation returns existing rece
   assert.equal(await count('orders'),1);assert.equal(await count('priority_checkout_receipts'),1);assert.equal(await count('stock_history'),1);assert.equal(await count('customer_data_change_events'),1);assert.equal(await stock(),9);
   await assert.rejects(caller().create(input({customer:{...customer,street:'Another Local'},customerDataChangeConfirmationToken:second})),/CHECKOUT_INTENT_CONFLICT/);
   assert.equal(await count('orders'),1);assert.equal(await stock(),9);assert.equal(external,0);
+});
+
+// General order.edit regression coverage: actual route and disposable PostgreSQL.
+const editPayload=async(orderId:string,extra:any={})=>{
+ const o=(await pool.query('SELECT * FROM orders WHERE order_id=$1',[orderId])).rows[0];
+ const rows=(await pool.query('SELECT * FROM order_items WHERE order_id=$1 ORDER BY id',[orderId])).rows;
+ return {orderId,items:rows.map((i:any)=>({id:i.id,name:i.name,dosage:i.dosage || undefined,variant:i.variant || undefined,type:i.type,price:Number(i.price),quantity:i.quantity,articleId:i.article_id || undefined})),subtotal:Number(o.subtotal),discount:Number(o.discount),discountCode:o.discount_code,discountBreakdown:o.discount_breakdown || [],shipping:Number(o.shipping),total:Number(o.total),...extra};
+};
+const editSnapshot=async()=>{
+ await new Promise(resolve=>setTimeout(resolve,30)); // settle existing fire-and-forget audit
+ const state:any={};
+ for(const table of ['orders','order_items','articles','stock_history','priority_stock_returns','priority_order_actions','priority_order_tasks','partner_transactions','kwk_ledger','kwk_referrals','invoices','admin_change_events'])state[table]=(await pool.query(`SELECT * FROM ${table} ORDER BY 1`)).rows;
+ return state;
+};
+const conflict=(key:string)=>(error:any)=>error.code==='CONFLICT' && error.message.includes(key);
+test('ACTUAL order.update: paid/partner/KWK/invoice/shipped/cancelled no-ops preserve every row, ID, flag, timestamp and audit count',async()=>{
+ await pool.query("INSERT INTO partners(id,name,email,code,partner_number) VALUES(9,'Synthetic','p@example.test','P9','OWN9')");
+ for(const [id,extra] of [['PAID-NOOP',{status:'bezahlt',paidAt:new Date()}],['PARTNER-NOOP',{partnerSourceId:9,partnerCode:'P9',partnerCommission:'2',creditUsed:'3'}],['KWK-NOOP',{kwkCreditOwnerId:1,kwkCreditUsed:'4',kwkCreditRequested:'4'}],['INVOICE-NOOP',{}],['SHIPPED-NOOP',{status:'versendet',shippedAt:new Date()}],['CANCELLED-NOOP',{status:'storniert',cancelledAt:new Date()}]] as any){
+  await seedOrder(id,extra);await movement(id,9002,-1);await pool.query('UPDATE order_items SET is_nasal_spray=true,is_nasal_diy_set=true,is_plug_play=true WHERE order_id=$1',[id]);
+ }
+ await pool.query("INSERT INTO partner_transactions(partner_id,order_id,type,amount,balance_after,status) VALUES(9,'PARTNER-NOOP','provision',2,2,'storniert'); INSERT INTO kwk_ledger(kwk_id,order_id,type,amount,status) VALUES(1,'KWK-NOOP','redeemed',-4,'confirmed'); INSERT INTO invoices(invoice_number,order_number,date,date_iso,total_gross,html) VALUES('NOOP-INVOICE','INVOICE-NOOP','20.11.2026','2026-11-20',38,'local')");
+ const before=await editSnapshot();
+ for(const id of ['PAID-NOOP','PARTNER-NOOP','KWK-NOOP','INVOICE-NOOP','SHIPPED-NOOP','CANCELLED-NOOP'])assert.deepEqual(await caller().update(await editPayload(id)),{success:true,unchanged:true});
+ assert.deepEqual(await editSnapshot(),before);assert.equal(external,0);
+});
+test('ACTUAL order.update: legacy missing IDs, item and breakdown reordering, omitted breakdown and subcent normalization are no-op; IDs bind actual rows',async()=>{
+ await seedOrder('NORMALIZE',{status:'bezahlt',paidAt:new Date(),subtotal:'40',total:'58',discountCode:'CODE',discountBreakdown:[{source:'manual_global_amount',label:'first',amount:0},{source:'unattributed',label:'second',amount:0}]});
+ await db.insert(orderItems).values({orderId:'NORMALIZE',name:'Second',type:'peptide',price:'20',quantity:1,isPlugPlay:true});
+ const p=await editPayload('NORMALIZE');const before=await editSnapshot();
+ assert((await caller().update({...p,items:[...p.items].reverse(),discountBreakdown:[...p.discountBreakdown].reverse(),subtotal:40.0001,total:58.0001})).unchanged);
+ assert((await caller().update({...p,items:p.items.map(({id,...item}:any)=>item),discountBreakdown:undefined})).unchanged);
+ assert.deepEqual(await editSnapshot(),before);
+ const swapped=p.items.map((item:any,index:number)=>({...item,id:p.items[1-index].id}));
+ await assert.rejects(caller().update({...p,items:swapped}),conflict('ORDER_FINANCIAL_CORRECTION_REVIEW_REQUIRED'));
+ await assert.rejects(caller().update({...p,items:[{...p.items[0],id:999999},p.items[1]]}),conflict('ORDER_ITEM_ID_CONFLICT'));
+ await assert.rejects(caller().update({...p,items:p.items.map((item:any)=>({...item,id:p.items[0].id}))}),conflict('ORDER_ITEM_ID_CONFLICT'));
+ for(const change of [{discountCode:'CHANGED'},{discountBreakdown:[{source:'unattributed',label:'changed',amount:0}]},{items:[{...p.items[0],dosage:'changed'},p.items[1]]}])await assert.rejects(caller().update({...p,...change}),conflict('ORDER_FINANCIAL_CORRECTION_REVIEW_REQUIRED'));
+ assert.deepEqual(await editSnapshot(),before);
+});
+test('ACTUAL order.update: all amounts finite/nonnegative before no-op or stock writes, no one-cent tolerance; valid zero and decimal arithmetic',async()=>{
+ await seedOrder('AMOUNTS');await pool.query("UPDATE order_items SET article_id=9002 WHERE order_id='AMOUNTS'");await movement('AMOUNTS',9002,-1);
+ const p=await editPayload('AMOUNTS');const before=await editSnapshot();
+ for(const patch of [{total:38.01},{subtotal:20.01,total:38.01},{total:NaN},{subtotal:Infinity},{shipping:Infinity},{discount:-1},{items:[{...p.items[0],price:-1}]},{items:[{...p.items[0],price:Infinity}]},{items:[{...p.items[0],quantity:2}],subtotal:40,discount:0,shipping:18,total:58.01},{discountBreakdown:[{source:'unattributed',label:'bad',amount:Infinity}]}])await assert.rejects(caller().update({...p,...patch}),(e:any)=>e.code==='BAD_REQUEST');
+ assert.deepEqual(await editSnapshot(),before);
+ const zero=await caller().update({...p,discount:20,shipping:0,total:0});assert.equal(zero.unchanged,false);
+ assert.equal((await pool.query("SELECT total FROM orders WHERE order_id='AMOUNTS'")).rows[0].total,'0.00');
+ await seedOrder('DECIMAL',{subtotal:'0.30',shipping:'0.00',total:'0.30'});await pool.query("UPDATE order_items SET price=0.1,quantity=3 WHERE order_id='DECIMAL'");
+ const decimal=await editPayload('DECIMAL');assert((await caller().update({...decimal,subtotal:0.1*3,total:0.1*3})).unchanged);
+});
+test('ACTUAL order.update: unpaid unbooked metadata allows base-neutral edits; canonical snapshot commission sync, legacy missing terms explained, credit intent preserved',async()=>{
+ await seedOrder('PARTNER-EDIT',{partnerSourceId:9,partnerCode:'P9',partnerCommission:'2',partnerProgramSnapshot:'partner',partnerCommissionPolicySnapshot:'each_paid_code_order',partnerCommissionPercentSnapshot:'10',partnerCommissionBaseSnapshot:'20'});
+ let p=await editPayload('PARTNER-EDIT');await caller().update({...p,shipping:19,total:39});
+ p=await editPayload('PARTNER-EDIT');await caller().update({...p,items:[{...p.items[0],price:30}],subtotal:30,total:49});
+ const o=(await pool.query("SELECT partner_commission,partner_commission_base_snapshot,partner_discount,partner_code FROM orders WHERE order_id='PARTNER-EDIT'")).rows[0];
+ assert.deepEqual(o,{partner_commission:'3.00',partner_commission_base_snapshot:'30.00',partner_discount:'0.00',partner_code:'P9'});assert.equal(await count('partner_transactions'),0);
+ await seedOrder('LEGACY-EDIT',{partnerSourceId:9,partnerCode:'P9',partnerCommission:'2'});p=await editPayload('LEGACY-EDIT');
+ await caller().update({...p,shipping:19,total:39});
+ await assert.rejects(caller().update({...p,items:[{...p.items[0],price:30}],subtotal:30,total:48}),conflict('ORDER_PARTNER_TERMS_EDIT_REVIEW_REQUIRED'));
+ await seedOrder('KWK-INTENT',{kwkCreditRequested:'3',kwkCreditUsed:'0',kwkCreditOwnerId:1});p=await editPayload('KWK-INTENT');await caller().update({...p,shipping:19,total:39});
+ await assert.rejects(caller().update({...p,discount:3,total:35}),conflict('ORDER_CREDIT_INTENT_EDIT_REVIEW_REQUIRED'));
+ for(const key of ['creditUsed','kwkCreditUsed']){const id=`UNCLEAR-${key}`;await seedOrder(id,{[key]:'3'});p=await editPayload(id);await assert.rejects(caller().update({...p,shipping:19,total:39}),conflict('ORDER_CREDIT_INTENT_EDIT_REVIEW_REQUIRED'));}
+});
+test('ACTUAL order.update: real paid/partner/KWK/referral/external invoice and shipped/cancelled changes conflict with actionable copy; no writes',async()=>{
+ await pool.query("INSERT INTO partners(id,name,email,code,partner_number) VALUES(9,'Synthetic','p@example.test','P9','OWN9')");
+ for(const [id,extra] of [['PAID-EDIT',{status:'bezahlt',paidAt:new Date()}],['BANK-EDIT',{bunqPaymentId:'local'}],['MATCH-EDIT',{bunqMatchedAt:new Date()}],['LEDGER-EDIT',{}],['KWK-EDIT',{}],['REFERRAL-EDIT',{}],['INVOICE-EDIT',{externalOrderReference:'EXTERNAL'}],['SHIP-EDIT',{status:'versendet',shippedAt:new Date()}],['CANCEL-EDIT',{status:'storniert'}]] as any)await seedOrder(id,extra);
+ await pool.query("INSERT INTO partner_transactions(partner_id,order_id,type,amount,balance_after,status) VALUES(9,'LEDGER-EDIT','provision',0,0,'storniert'); INSERT INTO kwk_ledger(kwk_id,order_id,type,amount,status) VALUES(1,'KWK-EDIT','redeemed',0,'confirmed'); INSERT INTO kwk_referrals(kwk_id,order_id) VALUES(1,'REFERRAL-EDIT'); INSERT INTO invoices(invoice_number,order_number,date,date_iso,total_gross,html) VALUES('EDIT-INVOICE','EXTERNAL','20.11.2026','2026-11-20',0,'local')");
+ const before=await editSnapshot();for(const id of ['PAID-EDIT','BANK-EDIT','MATCH-EDIT','LEDGER-EDIT','KWK-EDIT','REFERRAL-EDIT','INVOICE-EDIT','SHIP-EDIT','CANCEL-EDIT'])await assert.rejects(caller().update(await editPayload(id,{shipping:19,total:39})),(e:any)=>e.code==='CONFLICT' && /Korrektur|Prüfung/.test(e.message));
+ assert.deepEqual(await editSnapshot(),before);
+});
+test('ACTUAL order.update: successful ordinary monetary edit keeps item IDs and all flags; replacement-stock rollback is atomic',async()=>{
+ await seedOrder('STABLE');await pool.query("UPDATE order_items SET article_id=9002,is_nasal_spray=true,is_nasal_diy_set=true,is_plug_play=true WHERE order_id='STABLE'");await movement('STABLE',9002,-1);
+ const p=await editPayload('STABLE');const old=(await pool.query("SELECT * FROM order_items WHERE order_id='STABLE'")).rows[0];
+ await caller().update({...p,items:[{...p.items[0],price:30}],subtotal:30,total:48});
+ const changed=(await pool.query("SELECT * FROM order_items WHERE order_id='STABLE'")).rows[0];assert.deepEqual({...changed,price:old.price},old);assert.equal(await count('stock_history'),1);
+ await pool.query('CREATE TRIGGER priority_fail_item BEFORE INSERT OR UPDATE ON order_items FOR EACH ROW EXECUTE FUNCTION priority_fail()');const before=await editSnapshot();
+ await assert.rejects(caller().update({...p,items:[{...p.items[0],articleId:9001,quantity:2}],subtotal:40,total:58}),/LOCAL_INJECTED|Failed query/);
+ assert.deepEqual(await editSnapshot(),before);assert.equal(external,0);
+});
+test('ACTUAL order.update: concurrent note-only addNote and paid no-op never overwrite notes or financials; auth precedes no-op',async()=>{
+ await seedOrder('NOTE-RACE',{status:'bezahlt',paidAt:new Date()});const p=await editPayload('NOTE-RACE');
+ await Promise.all([caller().addNote({orderId:'NOTE-RACE',note:'Local synthetic note'}),caller().update(p)]);
+ assert.equal((await pool.query("SELECT internal_note FROM orders WHERE order_id='NOTE-RACE'")).rows[0].internal_note,'Local synthetic note');
+ for(const user of [null,{id:2,username:'p',role:'product_manager'},{id:3,username:'packing',role:'packing'},{id:4,username:'u',role:'user'}])await assert.rejects(orderRouter.createCaller({req:{headers:{}},res:{},user} as any).update(p),(e:any)=>e.code===(!user?'UNAUTHORIZED':'FORBIDDEN'));
+});
+
+test('ACTUAL order.update: duplicate identical legacy rows compare as a multiset; no-op never fires write triggers; one-cent true delta is never rounded away',async()=>{
+ await seedOrder('DUPLICATE',{subtotal:'40',total:'58',status:'bezahlt',paidAt:new Date()});await db.insert(orderItems).values({orderId:'DUPLICATE',name:'Original requested variant',type:'peptide',price:'20',quantity:1,isPlugPlay:true});
+ const p=await editPayload('DUPLICATE');const before=await editSnapshot();
+ await pool.query('CREATE TRIGGER priority_fail_item BEFORE INSERT OR UPDATE OR DELETE ON order_items FOR EACH ROW EXECUTE FUNCTION priority_fail()');
+ assert((await caller().update({...p,items:p.items.map(({id,...i}:any)=>i)})).unchanged);assert.deepEqual(await editSnapshot(),before);
+ await assert.rejects(caller().update({...p,items:p.items.map((i:any)=>({...i,price:20.01})),subtotal:40.02,total:58.02}),conflict('ORDER_FINANCIAL_CORRECTION_REVIEW_REQUIRED'));
+ assert.deepEqual(await editSnapshot(),before);
+});
+test('ACTUAL order.update: unbooked metadata item edit with explicit ID preserves flags and ID with exact stock replacement; requested KWK base unchanged',async()=>{
+ await seedOrder('METADATA-ITEM',{partnerSourceId:9,partnerCode:'P9',kwkCreditRequested:'3',kwkCreditOwnerId:1});
+ await pool.query("UPDATE order_items SET article_id=9002,is_nasal_spray=true,is_nasal_diy_set=true,is_plug_play=true WHERE order_id='METADATA-ITEM'");await movement('METADATA-ITEM',9002,-1);
+ const p=await editPayload('METADATA-ITEM');await caller().update({...p,items:[{...p.items[0],name:'Actual new article',articleId:9001,price:10,quantity:2}]});
+ const i=(await pool.query("SELECT id,is_nasal_spray,is_nasal_diy_set,is_plug_play,article_id,quantity FROM order_items WHERE order_id='METADATA-ITEM'")).rows[0];
+ assert.equal(i.id,p.items[0].id);assert.equal(i.is_nasal_spray,true);assert.equal(i.is_nasal_diy_set,true);assert.equal(i.is_plug_play,true);assert.equal(i.article_id,9001);assert.equal(i.quantity,2);
+ assert.equal(await stock(9002),4);assert.equal(await stock(9001),8);assert.equal(await count('priority_stock_returns'),1);assert.equal(await count('partner_transactions'),0);assert.equal(await count('kwk_ledger'),0);
+ assert.equal((await pool.query("SELECT kwk_credit_requested FROM orders WHERE order_id='METADATA-ITEM'")).rows[0].kwk_credit_requested,'3.00');
+});
+test('ACTUAL order.update: derived partner discount, explicit override and protected credit breakdown need granular review; zero paid true edit still conflicts',async()=>{
+ await seedOrder('DERIVED-DISCOUNT',{partnerSourceId:9,partnerCode:'P9',partnerDiscount:'2',partnerCommission:'2',partnerProgramSnapshot:'partner',partnerCommissionPolicySnapshot:'each_paid_code_order',partnerCommissionPercentSnapshot:'10',partnerCommissionBaseSnapshot:'20'});
+ let p=await editPayload('DERIVED-DISCOUNT');await caller().update({...p,shipping:19,total:39});
+ await assert.rejects(caller().update({...p,items:[{...p.items[0],price:30}],subtotal:30,total:48}),conflict('ORDER_PARTNER_TERMS_EDIT_REVIEW_REQUIRED'));
+ await seedOrder('OVERRIDE',{partnerSourceId:9,partnerCode:'P9',partnerCommission:'2',partnerProgramSnapshot:'partner',partnerCommissionPolicySnapshot:'each_paid_code_order',partnerCommissionPercentSnapshot:'10',partnerCommissionBaseSnapshot:'20'});
+ await pool.query("INSERT INTO partner_order_credit_overrides(order_id,amount,reason,is_active) VALUES('OVERRIDE',5,'Local explicit override',1)");p=await editPayload('OVERRIDE');
+ await assert.rejects(caller().update({...p,items:[{...p.items[0],price:30}],subtotal:30,total:48}),conflict('ORDER_PARTNER_TERMS_EDIT_REVIEW_REQUIRED'));
+ await seedOrder('BREAKDOWN-CREDIT',{discountBreakdown:[{source:'kwk_credit',label:'Intent',amount:0}]});p=await editPayload('BREAKDOWN-CREDIT');
+ await assert.rejects(caller().update({...p,discountBreakdown:[]}),conflict('ORDER_CREDIT_INTENT_EDIT_REVIEW_REQUIRED'));
+ await seedOrder('PAID-ZERO',{status:'bezahlt',paidAt:new Date(),discount:'20',shipping:'0',total:'0'});p=await editPayload('PAID-ZERO');assert((await caller().update(p)).unchanged);
+ await assert.rejects(caller().update({...p,discount:19,total:1}),conflict('ORDER_FINANCIAL_CORRECTION_REVIEW_REQUIRED'));
 });

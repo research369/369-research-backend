@@ -168,7 +168,7 @@ test('actual granted PM list/get and operations account read; successful scoped 
 });
 test('actual PM deletes open 10% partner/credit intent without ledger exactly once under concurrent replay; EDIT stays strict', async () => {
   await seedOrder('INTENT', { partnerSourceId: 9001, partnerNumber: 'OWN-9001', partnerCode: 'SYNTHETIC', partnerDiscount: '2', creditUsed: '12.06', partnerCommission: '2', kwkCreditRequested: '3', kwkCreditUsed: '3' });
-  await assert.rejects(db.transaction(async (tx: any) => assertOrderFinanciallyEditable(tx, await lockOrder(tx, 'INTENT'))), /FINANCIAL_CORRECTION_REVIEW/);
+  await assert.rejects(db.transaction(async (tx: any) => assertOrderFinanciallyEditable(tx, await lockOrder(tx, 'INTENT'))), /CREDIT_INTENT_EDIT_REVIEW/);
   const result = await Promise.all([caller().order.delete({ orderId: 'INTENT' }), caller().order.delete({ orderId: 'INTENT' })]);
   assert.equal(result.filter(r => 'alreadyDeleted' in r && r.alreadyDeleted).length, 1);
   assert.equal(await stock(), 10); assert.equal(await count('orders'), 0); assert.equal(await count('order_items'), 0); assert.equal(await count('priority_stock_returns'), 1); assert.equal(await count('priority_order_actions'), 1);
@@ -240,4 +240,54 @@ test('actual authenticated partner 10/10 shop-credit checkout: goods 284, shippi
   assert.equal((await pool.query("SELECT count(*)::int n FROM partner_transactions WHERE order_id=$1 AND type='provision'", [result.orderId])).rows[0].n, 0);
   await assert.rejects(caller().order.delete({ orderId: result.orderId }), /FINANCIAL_CORRECTION_REVIEW/);
   assert.equal(external, 0);
+});
+
+const adminCaller=()=>caller({...user,id:1,username:'local-admin',role:'admin'});
+async function cleanupState(){await new Promise(r=>setTimeout(r,30));const state:any={};for(const table of ['orders','order_items','articles','stock_history','priority_stock_returns','priority_order_actions','priority_order_tasks','partner_transactions','kwk_ledger','kwk_referrals','invoices','admin_change_events'])state[table]=(await pool.query(`SELECT * FROM ${table} ORDER BY 1`)).rows;return state;}
+const cleanupConflict=(key:string)=>(e:any)=>e.code==='CONFLICT' && e.message.includes(key);
+async function seedZero(id:string,extra:any={}){await seedOrder(id,{status:'bezahlt',paidAt:new Date('2026-11-18T12:24:27Z'),subtotal:'20',discount:'20',shipping:'0',total:'0',...extra});}
+
+test('ACTUAL zero-paid cleanup: read-only non-PII preview exposes original article journal despite NULL item article, version bound atomic delete returns once and retains marker audit',async()=>{
+ await seedZero('ZERO-PAID');const before=await cleanupState();
+ const preview=await caller().order.cleanupPreview({orderId:'ZERO-PAID'});
+ assert.deepEqual(await cleanupState(),before);assert.equal(preview.expectedTotal,0);assert.equal(preview.deletion.restockEligible,true);assert.equal(preview.stock.returnUnits,1);assert.equal(preview.stock.movements[0].articleId,9001);assert.equal(preview.stock.movements[0].sku,'SYNTHETIC-10MG');
+ assert(!JSON.stringify(preview).includes('synthetic@fixture.invalid'));assert(!JSON.stringify(preview).includes('Synthetic Owner'));assert(!JSON.stringify(preview).includes('Original requested variant'));
+ await assert.rejects(caller().order.delete({orderId:'ZERO-PAID',expectedTotal:1,expectedVersion:preview.expectedVersion}),cleanupConflict('ORDER_DELETE_SNAPSHOT_CONFLICT'));
+ await assert.rejects(caller().order.delete({orderId:'ZERO-PAID',expectedTotal:0,expectedVersion:'2000-01-01T00:00:00.000Z'}),cleanupConflict('ORDER_DELETE_SNAPSHOT_CONFLICT'));
+ assert.deepEqual(await cleanupState(),before);
+ const results=await Promise.all([caller().order.delete({orderId:'ZERO-PAID',expectedTotal:0,expectedVersion:preview.expectedVersion}),caller().order.delete({orderId:'ZERO-PAID',expectedTotal:0,expectedVersion:preview.expectedVersion})]);
+ assert.equal(results.filter(r=>'alreadyDeleted' in r && r.alreadyDeleted).length,1);assert.equal(await stock(),10);assert.equal(await count('priority_stock_returns'),1);assert.equal(await count('priority_order_actions'),1);
+ const action=(await pool.query("SELECT reason,stock_units FROM priority_order_actions WHERE order_id='ZERO-PAID'")).rows[0];const audit=JSON.parse(action.reason);assert.equal(audit.status,'bezahlt');assert.equal(audit.paidAt,'2026-11-18T12:24:27.000Z');assert.equal(audit.total,'0.00');assert.equal(action.stock_units,1);
+});
+test('ACTUAL zero-paid cleanup: nonzero/paid-bank/invoice/external/partner/KWK/referral/packed/shipped/header/archive label/integrity/goodie/history remain blocking',async()=>{
+ for(const [id,extra] of [['NONZERO',{discount:'0',total:'20'}],['BANK',{bunqPaymentId:'local'}],['MATCH',{bunqMatchedAt:new Date()}],['INVOICE',{}],['EXTERNAL',{externalOrderReference:'OTHER-REFERENCE'}],['PARTNER',{}],['KWK',{}],['REFERRAL',{}],['PACKED',{packedAt:new Date()}],['SHIPPED',{shippedAt:new Date(),status:'versendet'}],['LABEL',{shippingLabelUrl:'local'}],['ARCHIVE',{}],['INTEGRITY',{}],['GOODIE',{}],['BAD-TOTAL',{subtotal:'21'}],['INTENT',{kwkCreditRequested:'1'}]] as any)await seedZero(id,extra);
+ await pool.query(`INSERT INTO invoices(invoice_number,order_number,date,date_iso,total_gross,html) VALUES('ZERO-INVOICE','INVOICE','20.11.2026','2026-11-20',0,'local'),('EXTERNAL-INVOICE','OTHER-REFERENCE','20.11.2026','2026-11-20',0,'local');
+ INSERT INTO partner_transactions(partner_id,order_id,type,amount,balance_after,status) VALUES(9001,'PARTNER','provision',0,0,'storniert');
+ INSERT INTO kwk_ledger(kwk_id,order_id,type,amount,status) VALUES(9001,'KWK','redeemed',0,'confirmed');
+ INSERT INTO kwk_referrals(kwk_id,order_id) VALUES(9001,'REFERRAL');
+ INSERT INTO priority_order_tasks(order_id,task,state) VALUES('INTEGRITY','financial_cancellation','repair_required');`);
+  await pool.query("INSERT INTO dhl_label_generations(id,order_id,generation,state,recipient_snapshot,order_snapshot,reason,actor) VALUES($1,'ARCHIVE',1,'cancelled','{}','{}','Synthetic','local')",[randomUUID()]);
+ await pool.query("INSERT INTO goodie_assignments(order_id,article_id,article_name_snapshot,sku_snapshot,request_id,assigned_by) VALUES('GOODIE',9001,'Synthetic','SYNTHETIC-10MG','local-goodie','local')");
+  await seedZero('NO-HISTORY');await pool.query("DELETE FROM stock_history WHERE order_id='NO-HISTORY'");
+  const before=await cleanupState();
+ for(const id of ['NONZERO','BANK','MATCH','INVOICE','EXTERNAL','PARTNER','KWK','REFERRAL','PACKED','SHIPPED','LABEL','ARCHIVE','INTEGRITY','GOODIE','BAD-TOTAL','INTENT','NO-HISTORY']){
+  const preview=await caller().order.cleanupPreview({orderId:id});assert.equal(preview.deletion.restockEligible,false,id);
+  await assert.rejects(caller().order.delete({orderId:id,expectedTotal:0}),(e:any)=>e.code==='CONFLICT');
+  await assert.rejects(caller().order.deleteNoRestock({orderId:id}),(e:any)=>e.code==='CONFLICT');
+ }
+ assert.deepEqual(await cleanupState(),before);
+});
+test('ACTUAL zero-paid cleanup: header failure rolls stock/return/item/marker-audit back; retry only once',async()=>{
+ await seedZero('ZERO-ROLLBACK');const p=await caller().order.cleanupPreview({orderId:'ZERO-ROLLBACK'});
+ await pool.query("CREATE OR REPLACE FUNCTION local_zero_fail_cleanup() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'LOCAL_ZERO_DELETE_FAILURE'; END $$; CREATE TRIGGER local_cleanup_fail BEFORE DELETE ON orders FOR EACH ROW EXECUTE FUNCTION local_zero_fail_cleanup()");
+ const before=await cleanupState();await assert.rejects(caller().order.delete({orderId:'ZERO-ROLLBACK',expectedTotal:0,expectedVersion:p.expectedVersion}),/LOCAL_ZERO_DELETE_FAILURE|Failed query/);assert.deepEqual(await cleanupState(),before);
+ await pool.query('DROP TRIGGER local_cleanup_fail ON orders');await caller().order.delete({orderId:'ZERO-ROLLBACK',expectedTotal:0,expectedVersion:p.expectedVersion});await caller().order.delete({orderId:'ZERO-ROLLBACK',expectedTotal:0,expectedVersion:p.expectedVersion});assert.equal(await stock(),10);assert.equal(await count('priority_order_actions'),1);
+});
+test('ACTUAL permissions: no-op order.update remains admin-only; cleanupPreview read grant grants no new write or selfgrant rights',async()=>{
+ await seedZero('ROLES');const rows=(await pool.query("SELECT id FROM order_items WHERE order_id='ROLES'")).rows;
+ const input={orderId:'ROLES',items:[{id:rows[0].id,name:'Original requested variant',type:'peptide',price:20,quantity:1}],subtotal:20,discount:20,shipping:0,total:0};
+ for(const principal of [null,user,{...user,role:'packing'},{...user,role:'user'}])await assert.rejects(caller(principal).order.update(input),forbidden);
+ const before=await cleanupState();assert((await adminCaller().order.update(input)).unchanged);assert.deepEqual(await cleanupState(),before);
+ for(const principal of [null,{...user,id:3},{...user,role:'packing'},{...user,role:'user'}])await assert.rejects(caller(principal).order.cleanupPreview({orderId:'ROLES'}),forbidden);
+ await pool.query("UPDATE operations_account_capability_grants SET revoked_at=NOW() WHERE capability='operations_read'");await assert.rejects(caller().order.cleanupPreview({orderId:'ROLES'}),forbidden);
 });
