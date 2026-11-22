@@ -225,6 +225,9 @@ test("complete hidden draft persists open null values, exact strength compositio
   assert.equal(audit.length, 1); assert.equal(audit[0].action, "CREATE_DRAFT"); assert.equal(audit[0].changed_by, actor);
   assert.equal(audit[0].field_name, `request:${input.requestKey}`); assert.match(JSON.parse(audit[0].new_value).fingerprint, /^[a-f0-9]{64}$/);
   assert.deepEqual(JSON.parse(audit[0].new_value).response, created);
+  assert.equal(result.auditLog.length, 1); assert.equal(result.auditLog[0].id, audit[0].id);
+  assert.equal(result.auditLog[0].articleId, created.masterArticleId);
+  assert.equal(result.auditLog[0].fieldName, `request:${input.requestKey}`);
 });
 
 test("single-SKU draft supports one master, four FAQs, zero stock and no stock journal entry", async () => {
@@ -417,6 +420,22 @@ test("real createDraft/getDraft endpoints deny missing/basic principals and acce
   const result = await caller().productAdmin.getDraft({ shopProductId: input.shopProductId });
   assert.deepEqual(result.articleIds, created.articleIds); assert.deepEqual(result.social, input.social);
   assert(result.articles.every((a: any) => a.shopVisible === 0 && a.stock === 0 && a.publishedAt === null));
+});
+
+test("active WaWi list retains each marked draft master while shop list excludes all draft SKUs", async () => {
+  const priorList = await caller().article.list({ onlyActive: true });
+  const multi = payload("local-visible-wawi-multi"), single = payload("local-visible-wawi-single");
+  single.variants = single.variants.slice(0, 1);
+  const a = await caller().productAdmin.createDraft(multi), b = await caller().productAdmin.createDraft(single);
+  const stable = await snapshot();
+  const activeList = await caller().article.list({ onlyActive: true });
+  assert(activeList.some((row: any) => row.id === a.masterArticleId));
+  assert(activeList.some((row: any) => row.id === b.masterArticleId));
+  assert(!activeList.some((row: any) => row.id === a.articleIds[1]));
+  assert.deepEqual(activeList.filter((row: any) => ![...a.articleIds, ...b.articleIds].includes(row.id)), priorList);
+  const shop = JSON.stringify(await caller(null).article.shopProducts());
+  for (const v of [...multi.variants, ...single.variants]) assert(!shop.includes(v.sku));
+  assert.deepEqual(await snapshot(), stable);
 });
 
 test("both real visibility toggles block every marked draft and permit hide-only without stock changes", async () => {

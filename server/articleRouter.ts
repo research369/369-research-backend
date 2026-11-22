@@ -408,7 +408,8 @@ export const articleRouter = router({
       };
       if (input?.onlyActive !== false) {
         allArticles = allArticles.filter(a => a.isActive === 1
-          && !(a.shopVisible === 0 && configuredInventoryArticleIds.has(a.id)));
+          && !(a.shopVisible === 0 && configuredInventoryArticleIds.has(a.id)
+            && !(isProductDraftArticle(a) && Array.isArray(a.variants) && a.variants.length > 0)));
       }
 
       // Search

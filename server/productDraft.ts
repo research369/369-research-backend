@@ -1,6 +1,6 @@
-import { asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
-import { articles, articleSeo, articleMerchant, articleTranslations, articleUseCases, useCases } from "../drizzle/schema.js";
+import { articles, articleSeo, articleMerchant, articleTranslations, articleUseCases, useCases, productAuditLog } from "../drizzle/schema.js";
 import { canonicalFor, canonicalJson, fail, assertParsed, inspectProductSchema, requireProductSchema,
   readFamilyFaqs, insertFamilyFaqs, canLinkUseCases, lock, replay, audit,
   type ProductDraftDb, type ProductDb } from "./productFamily.js";
@@ -279,7 +279,9 @@ async function readProductDraftData(db: ProductDb, shopProductId: string) {
     master, articles: rows, description: master.description, social: meta.social, faqs, seo, merchant, translations,
     useCases: links, notes: PRODUCT_DRAFT_NOTES, productSchemaStatus: schema.status, input };
 }
-type ProductDraftResponse = Omit<Awaited<ReturnType<typeof readProductDraftData>>, "input">;
+type ProductDraftResponse = Omit<Awaited<ReturnType<typeof readProductDraftData>>, "input"> & {
+  auditLog: Array<typeof productAuditLog.$inferSelect>;
+};
 export type CreateProductDraftResponse = { success: true; shopProductId: string; masterArticleId: number; articleIds: number[];
   variants: ProductDraftVariant[]; shopVisible: false; priceStatus: "open"; publicationReady: false;
   faqs: CreateProductDraftInput["faqs"]; seo: CreateProductDraftInput["seo"]; merchant: CreateProductDraftInput["merchant"]; notes: string };
@@ -288,6 +290,10 @@ export async function readProductDraft(db: ProductDraftDb, shopProductId: string
   const parsed = assertParsed(getProductDraftInput, { shopProductId }, "Produktentwurf");
   return db.transaction(async tx => {
     const { input: _input, ...result } = await readProductDraftData(tx, parsed.shopProductId);
-    return result;
+    // The legacy audit reader selects an arbitrary family row; use our proven master.
+    const auditLog = await tx.select().from(productAuditLog).where(and(
+      eq(productAuditLog.articleId, result.masterArticleId), eq(productAuditLog.action, "CREATE_DRAFT"),
+    )).orderBy(asc(productAuditLog.id));
+    return { ...result, auditLog };
   }, { isolationLevel: "repeatable read", accessMode: "read only" });
 }
