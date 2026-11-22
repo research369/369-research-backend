@@ -75,9 +75,10 @@ test("Bestellmail erklärt Überweisung als zuverlässigen Fallback für die opt
   });
 
   assert.ok(presentation);
-  assert.match(presentation.html, /Es tut uns leid/);
-  assert.match(presentation.html, /Kreditkartenzahlungen können in unserer Branche technisch nicht immer verarbeitet werden/);
-  assert.match(presentation.html, /Überweisung funktioniert zuverlässig/);
+  // Baseline 30f94fc already removed the obsolete card apology; current policy is Wise.
+  assert.match(presentation.html, /SEPA- oder Echtzeitüberweisung \(Wise\)/);
+  assert.match(presentation.html, /Bitte überweise den Betrag eigenständig/);
+  assert.doesNotMatch(presentation.html, /Bunq|Es tut uns leid/);
 });
 
 test("englische Kommunikation erzeugt eine vollständige englische Bestellbestätigung", async () => {
@@ -92,8 +93,9 @@ test("englische Kommunikation erzeugt eine vollständige englische Bestellbestä
   assert.match(presentation.html, /<html lang="en">/);
   assert.match(presentation.html, /Important payment notice/);
   assert.match(presentation.html, /Payment information/);
-  assert.match(presentation.html, /Card payment \(Bunq\)/);
-  assert.match(presentation.html, /card payments cannot always be processed technically in our industry/);
+  assert.match(presentation.html, /SEPA or instant bank transfer \(Wise\)/);
+  assert.match(presentation.html, /Please transfer the amount independently/);
+  assert.doesNotMatch(presentation.html, /Bunq|card payments cannot always/);
   assert.doesNotMatch(presentation.html, /Bestellbestätigung/);
 });
 

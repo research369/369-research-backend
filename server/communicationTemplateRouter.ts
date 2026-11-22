@@ -1,3 +1,5 @@
+import { composeExplicitOrderMessage } from "./orderDiscountMessageService.js";
+import { readCrmOrderContext } from "./crmOrderCustomerService.js";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { router, adminProcedure } from "./trpc.js";
@@ -62,7 +64,9 @@ async function buildVariables(input: { customerId?: number; orderId?: string }):
   let items: Array<typeof orderItems.$inferSelect> = [];
 
   if (input.orderId) {
-    [order] = await db.select().from(orders).where(eq(orders.orderId, input.orderId)).limit(1);
+    const context = await readCrmOrderContext(db, input.orderId);
+    if (input.customerId && input.customerId !== context.customerId) throw new Error("Kunde und Bestellung stimmen nicht überein");
+    [order] = await db.select().from(orders).where(eq(orders.orderId, context.canonicalOrderId)).limit(1);
     if (!order) throw new Error("Bestellung nicht gefunden");
     items = await db.select().from(orderItems).where(eq(orderItems.orderId, order.orderId));
   }
@@ -141,6 +145,8 @@ export const communicationTemplateRouter = router({
 
       assertValidPlaceholders(template.subjectTemplate);
       assertValidPlaceholders(template.bodyTemplate);
+      const requiresOrder = ["order_confirmation", "payment_received", "packing_registered", "shipping_registered", "delivery_follow_up", "address_clarification", "payment_reminder", "cancellation_warning"].includes(template.templateKey);
+      if (requiresOrder && !input.orderId) throw new Error("Bitte eine Bestellung ausdrücklich auswählen");
       const variables = await buildVariables(input);
       const body = renderText(template.bodyTemplate, variables);
       const subject = renderText(template.subjectTemplate, variables);
@@ -151,11 +157,11 @@ export const communicationTemplateRouter = router({
           .filter((key) => !variables[key]),
       ));
 
+      const composed = await composeExplicitOrderMessage(db, { ...input, channel: template.channel as "email" | "whatsapp", communicationLanguage: template.language === "en" ? "en" : "de", subject, body });
       return {
-        template: { id: template.id, key: template.templateKey, title: template.title, channel: template.channel, language: template.language, version: template.version },
-        subject,
-        body,
-        htmlBody: template.channel === "email" ? textToHtml(body) : null,
+        template: { id: template.id, key: template.templateKey, templateKey: template.templateKey, title: template.title, channel: template.channel, language: template.language, version: template.version },
+        ...composed,
+        htmlBody: template.channel === "email" ? composed.htmlBody : null,
         missing,
       };
     }),

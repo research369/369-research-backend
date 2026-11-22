@@ -1,3 +1,4 @@
+import { readPersistedOrderMessageData, snapshotFromPersistedOrder } from "./orderDiscountMessageService.js";
 import { checkoutFingerprint, readCheckoutReceipt, lockCheckoutIntent, persistCheckoutReceipt, queueOrderTask, runOrderTask, resultRows, getOrderIntegrityIssues } from './priorityOrderIntegrity.js';
 import { lockOrder, returnOrderStock, recordOrderAction, deleteOrderAtomically, assertOrderFinanciallyEditable } from './orderStockReturnService.js';
 import { editMoneyCents, editBreakdownShape, validateEditAmounts, matchEditItems, orderEditError } from './orderEditValidation.js';
@@ -1224,6 +1225,7 @@ export const orderRouter = router({
       // form one transaction. A failure in this section cannot leave a partial P4P order.
       let customerId: number | null = null;
       let customerIntegrityTrigger: "order_customer_created" | "order_customer_changed" | null = null;
+      let persistedConfirmationData: Awaited<ReturnType<typeof readPersistedOrderMessageData>>["emailData"] | undefined;
       const transactionResponse = await db.transaction(async (tx) => {
       const db = tx;
       if (normalCheckoutKey) {
@@ -1922,7 +1924,11 @@ export const orderRouter = router({
         );
       }
 
+      // Materialize final written rows inside the original transaction, after all writes.
+      const persistedMessage = await readPersistedOrderMessageData(tx, orderId);
+      persistedConfirmationData = persistedMessage.emailData;
       const response = {
+        orderSnapshot: persistedMessage.orderSnapshot,
         success:true,orderId,paymentInstructions:null,externalOrderReference:externalOrderReference || undefined,
         subtotal:input.subtotal,discount:input.discount,kwkDiscount:input.kwkDiscount || 0,
         kwkCreditUsed:input.kwkCreditUsed || 0,shipping:input.shipping,total:input.total,
@@ -1956,12 +1962,8 @@ export const orderRouter = router({
 
       // Only the durable claim holder invokes the normal automatic shop confirmation.
       if (shouldSendConfirmation) await runOrderTask(db,orderId,'order_confirmation',async () => {
-        const accepted = await sendOrderConfirmationEmail({
-          orderId,communicationLanguage,storeKey:input.storeKey,externalOrderReference,
-          customer:input.customer,items:input.items.map(i => ({...i,dosage:i.dosage || null,variant:i.variant || null})),
-          subtotal:input.subtotal,discount:input.discount,discountCode:input.discountCode,
-          shipping:input.shipping,total:input.total,paymentMethod:input.paymentMethod,
-        });
+        if (!persistedConfirmationData) throw Error('ORDER_CONFIRMATION_SNAPSHOT_MISSING');
+        const accepted = await sendOrderConfirmationEmail(persistedConfirmationData);
         if (!accepted) throw Error('ORDER_CONFIRMATION_NOT_ACCEPTED');
       },true);
 
@@ -2196,6 +2198,7 @@ export const orderRouter = router({
             emailResult = await sendShippingNotificationEmail({
               orderId: input.orderId,
               communicationLanguage: normalizeCommunicationLanguage(order.communicationLanguage),
+              orderDiscountSnapshot: snapshotFromPersistedOrder(order),
               customerEmail: order.email,
               customerName: order.firstName,
               trackingNumber: input.trackingNumber,
@@ -2644,6 +2647,7 @@ export const orderRouter = router({
         const emailResult = await sendPackingNotificationEmail({
           orderId: order.orderId,
           communicationLanguage: normalizeCommunicationLanguage(order.communicationLanguage),
+          orderDiscountSnapshot: snapshotFromPersistedOrder(order),
           customerEmail: order.email,
           customerName,
         });
@@ -2662,6 +2666,7 @@ export const orderRouter = router({
         customerName,
         orderId: order.orderId,
         communicationLanguage: order.communicationLanguage,
+        orderDiscountSnapshot: snapshotFromPersistedOrder(order),
       });
 
       console.log(`[Orders] Packing notification for ${order.orderId}: email=${input.sendEmail}, phone=${phone}`);
@@ -2671,6 +2676,7 @@ export const orderRouter = router({
         whatsappPhone: phone,
         communicationPhoneSource: communicationPhone.source,
         whatsappMessage: waMessage,
+        orderDiscountSnapshot: snapshotFromPersistedOrder(order),
         customerName,
         orderId: order.orderId,
       };
