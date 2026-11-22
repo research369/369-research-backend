@@ -1,58 +1,62 @@
-name: Wöchentliches DB-Backup (Railway PostgreSQL)
-
+name: Verified encrypted PostgreSQL backup
 on:
   schedule:
-    # Jeden Sonntag um 02:00 UTC (04:00 Uhr DE-Zeit)
     - cron: '0 2 * * 0'
   workflow_dispatch:
-    # Manuell auslösbar über GitHub Actions UI
-
+permissions:
+  contents: read
+concurrency:
+  group: postgres-backup
+  cancel-in-progress: false
 jobs:
   backup:
-    name: PostgreSQL Backup erstellen
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
+    services:
+      verify:
+        image: postgres:18-bookworm
+        env:
+          POSTGRES_PASSWORD: isolated-restore-test
+          POSTGRES_DB: restore_verify
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 10
     steps:
-      - name: Backup erstellen
+      - name: Export, restore and encrypt before upload
+        shell: bash
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        shell: bash
+          BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
+          VERIFY_CONTAINER: ${{ job.services.verify.id }}
         run: |
-          set -euo pipefail
-          # Datum für Dateiname
-          TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
-          BACKUP_FILE="backup_369research_${TIMESTAMP}.sql.gz"
-          
-          echo "🗄️ Starte Backup: $BACKUP_FILE"
-          
-          # pg_dump mit Komprimierung
-          docker run --rm -e DATABASE_URL postgres:18-bookworm sh -c 'exec pg_dump "$DATABASE_URL" --no-password --format=plain --no-owner --no-acl' \
-            | gzip > "$BACKUP_FILE"
-          
-          gzip -t "$BACKUP_FILE"
-          test "$(wc -c < "$BACKUP_FILE")" -gt 1024
-
-          # Dateigröße prüfen
-          SIZE=$(du -sh "$BACKUP_FILE" | cut -f1)
-          echo "✅ Backup erstellt: $BACKUP_FILE ($SIZE)"
-          
-          # Für nächsten Schritt verfügbar machen
-          echo "BACKUP_FILE=$BACKUP_FILE" >> $GITHUB_ENV
-          echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
-
-      - name: Backup als Artifact hochladen
-        uses: actions/upload-artifact@v4
+          set -Eeuo pipefail
+          umask 077
+          trap 'rm -f backup.dump roundtrip.dump' EXIT
+          if [[ -z "${DATABASE_URL:-}" || ! "$DATABASE_URL" =~ ^postgres(ql)?:// ]]; then
+            echo "::error::PostgreSQL backup connection missing or invalid"; exit 1
+          fi
+          test -n "${BACKUP_ENCRYPTION_KEY:-}" || { echo "::error::Backup encryption key missing"; exit 1; }
+          docker run --rm -e DATABASE_URL -e PGCONNECT_TIMEOUT=20 postgres:18-bookworm \
+            sh -c 'exec pg_dump "$DATABASE_URL" --no-password --format=custom --no-owner --no-acl' > backup.dump
+          test "$(wc -c < backup.dump)" -gt 1024
+          docker exec -i "$VERIFY_CONTAINER" pg_restore -U postgres -d restore_verify \
+            --no-owner --no-privileges --exit-on-error < backup.dump
+          COUNT=$(docker exec "$VERIFY_CONTAINER" psql -U postgres -d restore_verify -Atc \
+            "SELECT count(*) FROM pg_tables WHERE schemaname='public';")
+          test "$COUNT" -gt 0
+          echo "Restore verified: $COUNT public tables"
+          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
+            -pass env:BACKUP_ENCRYPTION_KEY -in backup.dump -out backup.dump.enc
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
+            -pass env:BACKUP_ENCRYPTION_KEY -in backup.dump.enc -out roundtrip.dump
+          cmp backup.dump roundtrip.dump
+          sha256sum backup.dump.enc > backup.dump.enc.sha256
+      - uses: actions/upload-artifact@v4
         with:
-          name: db-backup-${{ env.TIMESTAMP }}
-          path: ${{ env.BACKUP_FILE }}
+          name: verified-db-backup-${{ github.run_id }}
+          path: |
+            backup.dump.enc
+            backup.dump.enc.sha256
+          if-no-files-found: error
           retention-days: 30
-
-      - name: Backup-Status melden
-        run: |
-          echo "✅ Backup erfolgreich abgeschlossen"
-          echo "📦 Datei: $BACKUP_FILE"
-          echo "🗓️ Datum: $TIMESTAMP"
-          echo "⏳ Aufbewahrung: 30 Tage"
-          echo ""
-          echo "📥 Download: GitHub → Actions → Artifacts"
+          compression-level: 0
