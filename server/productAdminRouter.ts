@@ -26,6 +26,7 @@ import {validateProductData} from "./productValidation.js";
 import { createFamilyInput, getFamilyInput, publishFamilyInput,
   createProductFamily, readFamily, publishProductFamily, createSingleBlendInput, publishSingleBlendInput,
   createSingleBlend, publishSingleBlend } from "./productFamily.js";
+import { createProductDraftInput, createProductDraft, readProductDraft, isProductDraftArticle } from "./productDraft.js";
 
 // ─────────────────────────────────────────────────────────────
 // HELPERS
@@ -66,6 +67,19 @@ async function writeAuditLog(
 // ─────────────────────────────────────────────────────────────
 
 export const productAdminRouter = router({
+
+  // Draft-only additive API: zero stock, open price, hidden rows; no publication.
+  createDraft: productManagerProcedure.input(createProductDraftInput).mutation(async ({ input, ctx }) => {
+    const db = await getDb();
+    if (!db) throw new Error("DB nicht verfügbar");
+    return createProductDraft(db, input, ctx.user.username || ctx.user.email || "product_manager");
+  }),
+
+  getDraft: productManagerProcedure.input(getFamilyInput).query(async ({ input }) => {
+    const db = await getDb();
+    if (!db) throw new Error("DB nicht verfügbar");
+    return readProductDraft(db, input.shopProductId);
+  }),
 
   // Additive exact-family operations. Existing single-article procedures unchanged.
   createFamily: productManagerProcedure.input(createFamilyInput).mutation(async ({ input, ctx }) => {
@@ -479,6 +493,10 @@ export const productAdminRouter = router({
 
       if (!existing[0]) throw new Error(`Produkt '${input.shopProductId}' nicht gefunden`);
       const old = existing[0];
+
+      if (input.visible && isProductDraftArticle(old)) {
+        throw new Error("Unvollständiger Produktentwurf: Preis und Produktfreigabe müssen zuerst bestätigt werden.");
+      }
 
       await db.update(articles)
         .set({ shopVisible: input.visible ? 1 : 0 } as any)

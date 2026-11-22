@@ -794,7 +794,9 @@ test("cross-family concurrent slug/SKU/request locks and independent SEO conflic
   const stable = await snapshot(); await assert.rejects(caller().createSingleBlend(blendPayload() as any), conflict);
   assert.deepEqual(await snapshot(), stable);
   const source = readFileSync(new URL("./productFamily.ts", import.meta.url), "utf8");
-  assert.match(source, /product-family:\$\{key\}/); assert(!source.includes("product-single:"));
+  assert.match(source, /product-family:\$\{canonicalKey\}/); assert(!source.includes("product-single:"));
+  assert.match(source, /key\.startsWith\("sku:"\)/);
+  assert.match(source, /key\.slice\(4\)\.toLowerCase\(\)/);
 });
 
 test("single blend persisted chemistry/composition/metadata/variant corruption fails publish and getFamily/validateProduct agree", async () => {

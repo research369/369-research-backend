@@ -76,7 +76,7 @@ type SharedCreateInput = Omit<z.infer<typeof familyBaseInput>, "casNumber" | "mo
 function refineCreate(input: SharedCreateInput, ctx: z.RefinementCtx) {
   const issue = (message: string) => ctx.addIssue({ code: "custom", message });
   if (input.seo.canonical !== canonicalFor(input.shopProductId)) issue("Canonical muss exakt zur Familien-URL passen");
-  if (new Set(input.variants.map(v => v.sku)).size !== input.variants.length) issue("Doppelte SKU im Payload");
+  if (new Set(input.variants.map(v => v.sku.toLowerCase())).size !== input.variants.length) issue("Doppelte SKU im Payload");
   // 5mg and 5 mg (or 5.0 mg) must not represent two inventory variants.
   if (new Set(input.variants.map(v => Number(v.label.replace(/ ?mg$/, "")))).size !== input.variants.length) issue("Doppelte mg-Variante");
   if (input.variants.some(v => `${input.name} (${v.label})`.length > 200)) issue("Variantenname maximal 200 Zeichen");
@@ -223,7 +223,9 @@ async function readAvailableUseCases(db: ProductDb, schema: ProductSchema) {
   });
 }
 async function lock(tx: Tx, key: string) {
-  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`product-family:${key}`}, 0))`);
+  // Both creation paths must serialize aliases of the same SKU identically.
+  const canonicalKey = key.startsWith("sku:") ? `sku:${key.slice(4).toLowerCase()}` : key;
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`product-family:${canonicalKey}`}, 0))`);
 }
 async function replay<T>(tx: Tx, requestKey: string, action: string, input: unknown): Promise<{ fingerprint: string; response?: T }> {
   const fingerprint = createHash("sha256").update(canonicalJson({ action, input })).digest("hex");
@@ -367,12 +369,12 @@ async function createAtomicProduct(db: Db, input: SharedCreateInput, actor: stri
       fail("Use-Case-Slugs können nicht verknüpft werden: optionale use_cases/article_use_cases Tabellen oder ID-/Slug-Felder fehlen oder sind inkompatibel");
     await lock(tx, `request:${input.requestKey}`);
     await lock(tx, `family:${input.shopProductId}`);
-    for (const sku of input.variants.map(v => v.sku).sort()) await lock(tx, `sku:${sku}`);
+    for (const sku of [...new Set(input.variants.map(v => v.sku.toLowerCase()))].sort()) await lock(tx, `sku:${sku}`);
     const prior = await replay<CreateResponse | CreateSingleBlendResponse>(tx, input.requestKey, action, input);
     if (prior.response) return prior.response;
     if ((await tx.select({ id: articles.id }).from(articles).where(eq(articles.shopProductId, input.shopProductId))).length)
       fail("Produktfamilie existiert bereits", "CONFLICT");
-    if ((await tx.select({ id: articles.id }).from(articles).where(inArray(articles.sku, input.variants.map(v => v.sku)))).length)
+    if ((await tx.select({ id: articles.id }).from(articles).where(inArray(sql`lower(${articles.sku})`, input.variants.map(v => v.sku.toLowerCase())))).length)
       fail("SKU existiert bereits", "CONFLICT");
     if ((await tx.select({ id: articleSeo.id }).from(articleSeo).where(eq(articleSeo.slug, input.shopProductId))).length)
       fail("SEO-Slug existiert bereits", "CONFLICT");
@@ -427,6 +429,11 @@ type CreateResponse = { success: true; shopProductId: string; masterArticleId: n
   variants: FamilyVariant[]; shopVisible: false };
 type CreateSingleBlendResponse = Omit<CreateResponse, "shopProductId"> & { shopProductId: "somatide"; composition: SingleBlendComposition };
 type PublishResponse = { success: true; shopProductId: string; masterArticleId: number; shopVisible: true };
+
+// Shared fixed-schema/FAQ/idempotency utilities; existing contracts stay unchanged.
+export { canonicalFor, canonicalJson, fail, assertParsed, inspectProductSchema, requireProductSchema,
+  readFamilyFaqs, insertFamilyFaqs, canLinkUseCases, lock, replay, audit };
+export type { Db as ProductDraftDb, ProductDb, ProductSchema };
 
 export function publishProductFamily(db: Db, input: PublishFamilyInput, actor: string) {
   return publishAtomicProduct(db, input, actor, false);

@@ -10,6 +10,7 @@ import {applyStockMovement} from "./stockMovementService.js";
 import { articles, stockHistory, orderItems, orders, articleTranslations, articleFaq } from "../drizzle/schema.js";
 import { isBillableOrderItem, isCompletedCommercialOrder } from "./commercialOrderMetrics.js";
 import { getPublicSingleBlendComposition } from "./singleBlendComposition.js";
+import { isProductDraftArticle } from "./productDraft.js";
 
 type PublicShopVariant = {
   dosage: string;
@@ -879,6 +880,12 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
+      if (input.visible) {
+        const [article] = await db.select().from(articles).where(eq(articles.id, input.id)).limit(1);
+        if (isProductDraftArticle(article ?? {})) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Unvollständiger Produktentwurf: Preis und Produktfreigabe müssen zuerst bestätigt werden." });
+        }
+      }
       await db.update(articles).set({
         shopVisible: input.visible ? 1 : 0,
       }).where(eq(articles.id, input.id));
