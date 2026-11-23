@@ -27,6 +27,7 @@ import { createFamilyInput, getFamilyInput, publishFamilyInput,
   createProductFamily, readFamily, publishProductFamily, createSingleBlendInput, publishSingleBlendInput,
   createSingleBlend, publishSingleBlend } from "./productFamily.js";
 import { createProductDraftInput, createProductDraft, readProductDraft, isProductDraftArticle } from "./productDraft.js";
+import { finalizeProductDraftInput, finalizeProductDraft } from "./productDraftFinalization.js";
 
 // ─────────────────────────────────────────────────────────────
 // HELPERS
@@ -79,6 +80,14 @@ export const productAdminRouter = router({
     const db = await getDb();
     if (!db) throw new Error("DB nicht verfügbar");
     return readProductDraft(db, input.shopProductId);
+  }),
+
+  // One existing first/master draft variant only; price/stock/publication/audit
+  // commit together. Never route through legacy piecemeal article mutations.
+  finalizeDraft: productManagerProcedure.input(finalizeProductDraftInput).mutation(async ({ input, ctx }) => {
+    const db = await getDb();
+    if (!db) throw new Error("DB nicht verfügbar");
+    return finalizeProductDraft(db, input, ctx.user.username || ctx.user.email || "product_manager");
   }),
 
   // Additive exact-family operations. Existing single-article procedures unchanged.
@@ -231,6 +240,8 @@ export const productAdminRouter = router({
       if (!existing[0]) throw new Error(`Produkt '${input.shopProductId}' nicht gefunden`);
       const old = existing[0];
 
+      if (Array.isArray(old.variants) && old.variants.some(v => v?.publicationStatus === "finalized-draft"))
+        throw new Error("Finalisierte Entwurfsvariante benötigt einen separaten atomaren Preisvertrag.");
       // Validierung: salePrice muss kleiner als sellingPrice sein
       const newSellingPrice = input.sellingPrice ?? Number(old.sellingPrice ?? 0);
       const newSalePrice = input.salePrice !== undefined ? input.salePrice : null;

@@ -180,6 +180,7 @@ export function getPublicShopVariants(
   // inventory links. Legacy products retain their existing mapping below.
   if (article.shopProductId === "somatide" && !getPublicSingleBlendComposition(article, inventoryArticles)) return [];
   const configured = Array.isArray(article.variants) ? article.variants : [];
+  const finalized = configured.some(raw => raw && typeof raw === "object" && raw.publicationStatus === "finalized-draft");
   const fromConfigured = configured.flatMap((raw): PublicShopVariant[] => {
     if (!raw || typeof raw !== "object") return [];
     const variant = raw as VariantSource;
@@ -199,6 +200,9 @@ export function getPublicShopVariants(
       ? inventoryArticles.find(candidate => candidate.id === configuredInventoryArticleId
         && candidate.shopProductId === article.shopProductId)
       : undefined;
+    if (finalized && ((raw as Record<string, unknown>).publicationStatus !== "finalized-draft"
+      || !Number.isFinite(rawPrice) || rawPrice <= 0 || !inventoryArticle
+      || inventoryArticle.sku !== variant.sku)) return [];
     const rawStock = Number(variant.stock);
     const stock = inventoryArticle?.stock ?? (Number.isFinite(rawStock) ? rawStock : article.stock);
     const explicitlyHidden = variant.hidden === true || variant.isActive === false || variant.isActive === 0;
@@ -221,6 +225,7 @@ export function getPublicShopVariants(
   });
 
   if (fromConfigured.length > 0) return fromConfigured;
+  if (finalized) return []; // Never infer a zero-price SKU for a finalized draft.
 
   const dosageMatch = article.name.match(/(\d+(?:\.\d+)?\s*(?:mg|IU|ml|mcg|iu))\s*\)?\s*$/i);
   const dosage = dosageMatch ? dosageMatch[1].trim() : "";
@@ -518,6 +523,11 @@ export const articleRouter = router({
       if (!db) throw new Error("Database not available");
 
       const { id, ...data } = input;
+      if (data.variants !== undefined || data.sellingPrice !== undefined || data.sku !== undefined || data.shopProductId !== undefined) {
+        const [existing] = await db.select({ variants: articles.variants }).from(articles).where(eq(articles.id, id));
+        if (Array.isArray(existing?.variants) && existing.variants.some(v => v?.publicationStatus === "finalized-draft"))
+          throw new Error("Finalisierte Entwurfsvariante benötigt einen separaten atomaren Preis-/Variantenvertrag.");
+      }
       const updateData: Record<string, any> = {};
 
       if (data.sku !== undefined) updateData.sku = data.sku;
@@ -930,7 +940,7 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
           image: a.labelImageUrl || null,
           casNumber: a.casNumber || '',
           molecularWeight: a.molecularWeight || '',
-          purity: a.purity || (pid === 'somatide' ? null : '99%'),
+          purity: a.purity || (pid === 'somatide' || (Array.isArray(a.variants) && a.variants.some(v => v?.publicationStatus === 'finalized-draft')) ? null : '99%'),
           ...(pid === 'somatide' ? { composition: getPublicSingleBlendComposition(a, inventoryArticles),
             masterArticleId: getPublicSingleBlendComposition(a, inventoryArticles) ? a.id : null } : {}),
           badge: a.badge || null,
@@ -1001,7 +1011,7 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
         image: first.labelImageUrl || null,
         casNumber: first.casNumber || '',
         molecularWeight: first.molecularWeight || '',
-        purity: first.purity || (first.shopProductId === 'somatide' ? null : '99%'),
+        purity: first.purity || (first.shopProductId === 'somatide' || (Array.isArray(first.variants) && first.variants.some(v => v?.publicationStatus === 'finalized-draft')) ? null : '99%'),
         ...(first.shopProductId === 'somatide' ? { composition: getPublicSingleBlendComposition(first, allArticles),
           masterArticleId: getPublicSingleBlendComposition(first, allArticles) ? first.id : null } : {}),
         badge: first.badge || null,

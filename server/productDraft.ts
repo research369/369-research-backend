@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import { articles, articleSeo, articleMerchant, articleTranslations, articleUseCases, useCases, productAuditLog } from "../drizzle/schema.js";
@@ -59,7 +60,7 @@ const reservedKeys = new Set(["__proto__", "prototype", "constructor", "composit
   "inventoryarticleid", "masterarticleid", "articleid", "articleids", "shopvisible", "publishedat", "sellingprice",
   "saleprice", "pricestatus", "publicationready", "isactive", "requestkey", "sql", "tablename", "credentials", "password", "endpoint",
   "publish", "published", "publication", "hidden", "id", "stock", "price", "saleactive", "table", "masterid",
-  "totalmassmg", "massmg", "components", "volumeml", "concentrationmgml"]);
+  "totalmassmg", "massmg", "components", "volumeml", "concentrationmgml", "draftpublication", "publicationstatus"]);
 const boundedObject = z.record(z.unknown()).superRefine((value, ctx) => {
   const pending: Array<{ value: unknown; depth: number }> = [{ value, depth: 0 }];
   let count = 0;
@@ -209,7 +210,7 @@ export async function createProductDraft(db: ProductDraftDb, value: CreateProduc
   });
 }
 
-async function readProductDraftData(db: ProductDb, shopProductId: string) {
+export async function readProductDraftData(db: ProductDb, shopProductId: string) {
   const schema = await inspectProductSchema(db); requireProductSchema(schema);
   const rows = await db.select().from(articles).where(sql`lower(${articles.shopProductId}) = ${shopProductId}`).orderBy(asc(articles.id));
   if (!rows.length || rows.some(a => !isProductDraftArticle(a))) fail("Unveröffentlichter Produktentwurf nicht gefunden", "NOT_FOUND");
@@ -280,20 +281,30 @@ async function readProductDraftData(db: ProductDb, shopProductId: string) {
     useCases: links, notes: PRODUCT_DRAFT_NOTES, productSchemaStatus: schema.status, input };
 }
 type ProductDraftResponse = Omit<Awaited<ReturnType<typeof readProductDraftData>>, "input"> & {
+  snapshotHash: string;
   auditLog: Array<typeof productAuditLog.$inferSelect>;
 };
 export type CreateProductDraftResponse = { success: true; shopProductId: string; masterArticleId: number; articleIds: number[];
   variants: ProductDraftVariant[]; shopVisible: false; priceStatus: "open"; publicationReady: false;
   faqs: CreateProductDraftInput["faqs"]; seo: CreateProductDraftInput["seo"]; merchant: CreateProductDraftInput["merchant"]; notes: string };
 
+// Normalize Date values before canonicalization; audit transport uses the same JSON shape.
+export function draftSnapshot(data: Awaited<ReturnType<typeof readProductDraftData>>) {
+  return JSON.parse(JSON.stringify(data)) as typeof data;
+}
+export function draftSnapshotHash(data: Awaited<ReturnType<typeof readProductDraftData>>) {
+  return createHash("sha256").update(canonicalJson(draftSnapshot(data))).digest("hex");
+}
+
 export async function readProductDraft(db: ProductDraftDb, shopProductId: string): Promise<ProductDraftResponse> {
   const parsed = assertParsed(getProductDraftInput, { shopProductId }, "Produktentwurf");
   return db.transaction(async tx => {
-    const { input: _input, ...result } = await readProductDraftData(tx, parsed.shopProductId);
+    const data = await readProductDraftData(tx, parsed.shopProductId);
+    const { input: _input, ...result } = data;
     // The legacy audit reader selects an arbitrary family row; use our proven master.
     const auditLog = await tx.select().from(productAuditLog).where(and(
       eq(productAuditLog.articleId, result.masterArticleId), eq(productAuditLog.action, "CREATE_DRAFT"),
     )).orderBy(asc(productAuditLog.id));
-    return { ...result, auditLog };
+    return { ...result, snapshotHash: draftSnapshotHash(data), auditLog };
   }, { isolationLevel: "repeatable read", accessMode: "read only" });
 }
