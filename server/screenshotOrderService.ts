@@ -8,16 +8,19 @@ import { orderRouter } from './orderRouter.js';
 import { communicationTemplateRouter } from './communicationTemplateRouter.js';
 import { normalizeWhatsappContactPhone } from './whatsappContactIdentity.js';
 import { normalizeOrderCommunicationPhone } from './orderCommunicationPhoneService.js';
-import { calculateAuthoritativeShipping, calculateAutomaticGlobalDiscount, calculatePromoDiscount, resolveShippingRegion, roundMoney, resolveAuthoritativeItemPrice } from './kwkCheckoutPricing.js';
+import { calculateAuthoritativeShipping, calculateAutomaticGlobalDiscount, calculatePromoDiscount, resolveShippingRegion, roundMoney, parsePromoMetadata } from './kwkCheckoutPricing.js';
 import { getActiveGlobalAutomaticDiscount, parseGlobalAutomaticDiscountConfig, resolveGlobalAutomaticDiscountBenefits } from './globalAutomaticDiscountConfig.js';
 import { reconcileFreeBacWaterForShopOrder } from './freeBacWaterService.js';
 import { isPromoCodeExpired } from './promoCodeRouter.js';
 import { resultRows } from './priorityOrderIntegrity.js';
-import { screenshotHash, screenshotIntentKey, signScreenshotQuote, verifyScreenshotQuote, type ScreenshotQuoteInput, type ScreenshotQuoteEnvelope, type ScreenshotForm } from './screenshotOrderContract.js';
+import { screenshotHash, screenshotIntentKey, signScreenshotQuote, verifyScreenshotQuote, type ScreenshotQuoteInput, type ScreenshotQuoteEnvelope } from './screenshotOrderContract.js';
 import { readPersistedOrderMessageData } from './orderDiscountMessageService.js';
 import { getReleasedBankTransferInstructions } from './paymentInstructionsConfig.js';
 import { assertNoActiveCheckoutBlock } from './customerOrderBlockService.js';
 import { projectDiscountRules } from './guardianDiscounts.js';
+import { resolveTrustedColdShippingItems } from './coldShippingCatalog.js';
+import { screenshotCatalogProjection, screenshotSelection, screenshotInventoryPolicy } from './screenshotOrderInventory.js';
+export { screenshotCatalogProjection } from './screenshotOrderInventory.js';
 
 const revisions=new Map<string,{revision:string;expiresAt:number}>();
 const email=(v:unknown)=>String(v??'').trim().toLowerCase();
@@ -37,29 +40,8 @@ export function screenshotCustomerResolution(rows:any[],input:{phone?:string;ema
   }));
   return {match:conflict?'conflict' as const:contacts.length===1?'exact' as const:'none' as const,...(!conflict&&contacts.length===1?{exactCustomerId:contacts[0].id}:{}),candidates,...(conflict?{reason:'duplicate_or_split_contacts'}:{})};
 }
-function form(a:any,label=''):ScreenshotForm{const s=[a.name,a.sku,a.category,JSON.stringify(a.categories??[]),label].join(' ');if(/nasal|nasenspray/i.test(s))return 'nasal';if(/plug\s*[&+_-]?\s*play|patrone|cartridge|fertigpen|forscherpen/i.test(s))return 'plug_play';return /vial|peptide/i.test(s)?'vial':'other';}
-function dosage(a:any){return a.name.match(/\((\d+(?:[.,]\d+)?\s*(?:mg|mcg|iu|ml))\)\s*$/i)?.[1]??a.name.match(/\b(\d+(?:[.,]\d+)?\s*(?:mg|mcg|iu|ml))\s*$/i)?.[1]??'';}
-/** Existing canonical price resolver and published-parent -> exact inventory mapping. */
-export function screenshotCatalogProjection(rows:any[]){
-  const duplicates=new Set<string>();const seen=new Set<string>();for(const a of rows){const k=a.sku.toLowerCase();if(seen.has(k))duplicates.add(k);seen.add(k);}
-  const result=new Map<string,any>(),ambiguous=new Set<string>();
-  for(const parent of rows.filter(a=>a.isActive===1&&a.shopVisible===1&&a.publishedAt&&Number(a.sellingPrice)>0&&!/\[draft\]|price[_ -]?open|open[_ -]?price/i.test([a.name,a.notes,JSON.stringify(a.description??{})].join(' ')))){
-    const variants=Array.isArray(parent.variants)&&parent.variants.length?parent.variants:[{label:dosage(parent),inventoryArticleId:parent.id}];
-    for(const v of variants){if(!v||v.hidden===true||v.isActive===false||v.isActive===0||v.price===null)continue;
-      const label=String(v.dosage??v.label??v.name??dosage(parent));
-      const family=rows.filter(a=>a.isActive===1&&(parent.shopProductId?a.shopProductId===parent.shopProductId:a.id===parent.id));
-      const choices=v.inventoryArticleId?family.filter(a=>a.id===Number(v.inventoryArticleId)):v.sku?family.filter(a=>a.sku.toLowerCase()===String(v.sku).toLowerCase()):family.filter(a=>strength(dosage(a))===strength(label));
-      if(choices.length!==1)continue;const a=choices[0];if(duplicates.has(a.sku.toLowerCase())||Number(a.sellingPrice)<=0)continue;
-      let price:number;try{price=resolveAuthoritativeItemPrice({shopProductId:a.sku,dosage:label,price:0,quantity:1},rows);}catch{continue;}
-      if(!Number.isFinite(price)||price<=0)continue;
-      const candidate={sku:a.sku,name:a.name,dosage:label,form:form(a,label),price:roundMoney(price),stock:a.stock,shopProductId:parent.shopProductId||a.sku,articleId:a.id,parentId:parent.id};
-      const old=result.get(a.sku);if(old&&screenshotHash({...old,parentId:0})!==screenshotHash({...candidate,parentId:0}))ambiguous.add(a.sku);else result.set(a.sku,candidate);
-    }
-  }
-  return [...result.values()].filter(c=>!ambiguous.has(c.sku));
-}
 export async function lookupScreenshotCustomers(input:any){return withReadOnlyDatabase(async()=>{const db=await getDb();if(!db)throw Error('DATABASE_UNAVAILABLE');return screenshotCustomerResolution(await db.select().from(customers),input);});}
-export async function lookupScreenshotCatalog(input:any){return withReadOnlyDatabase(async()=>{const db=await getDb();if(!db)throw Error('DATABASE_UNAVAILABLE');const words=norm(input.query).split(' ').filter(Boolean);const candidates=screenshotCatalogProjection(await db.select().from(articles)).filter(c=>words.every(w=>norm(c.name+' '+c.sku+' '+c.shopProductId).includes(w))&&(!input.strength||strength(c.dosage)===strength(input.strength))&&(!input.form||c.form===input.form)).slice(0,100).map(({articleId,parentId,...c})=>c);return {candidates};});}
+export async function lookupScreenshotCatalog(input:any){return withReadOnlyDatabase(async()=>{const db=await getDb();if(!db)throw Error('DATABASE_UNAVAILABLE');const words=norm(input.query).split(' ').filter(Boolean);const candidates=screenshotCatalogProjection(await db.select().from(articles)).filter(c=>c.available&&words.every(w=>norm(c.name+' '+c.sku+' '+c.shopProductId).includes(w))&&(!input.strength||strength(c.dosage)===strength(input.strength))&&(!input.form||c.form===input.form)).slice(0,100).map(({articleId,parentId,dependencyIds,componentLines,stockDemands,...c})=>({...c,stockDemands:stockDemands.map(({articleId,...d})=>d)}));return {candidates};});}
 async function source(db:any,request:ScreenshotQuoteInput){
   const arts=await db.select().from(articles);const profiles=await db.select().from(customers);
   const settings=await db.select().from(shopSettings);const globalValue=settings.find((s:any)=>s.key==='global_automatic_discount')?.value;
@@ -72,7 +54,11 @@ async function source(db:any,request:ScreenshotQuoteInput){
   const selectedResolution=screenshotCustomerResolution(profiles,customer);
   if(selectedResolution.match==='conflict'||(selectedResolution.exactCustomerId&&selectedResolution.exactCustomerId!==selectedId))throw Error('CUSTOMER_CONTACT_CONFLICT');
   if(!normalizeOrderCommunicationPhone(customer.phone))throw Error('CUSTOMER_PHONE_INVALID');
-  const catalog=screenshotCatalogProjection(arts);const items=request.items.map(line=>{const c=catalog.find(c=>c.sku===line.sku);if(!c)throw Error('EXACT_PUBLISHED_SKU_REQUIRED');if(c.stock<line.quantity)throw Error('STOCK_UNAVAILABLE');if(c.form!=='vial'||/bundle|diy|\bset\b/i.test(c.name))throw Error('COMPONENT_FORM_REQUIRES_WAWI');return {name:c.name,dosage:c.dosage,shopProductId:c.sku,price:c.price,quantity:line.quantity,type:'peptide'};});
+  const catalog=screenshotCatalogProjection(arts);
+  const {selected:selections,stockPlan,componentLines}=screenshotSelection(catalog,request.items);
+  const items=selections.map(c=>({name:c.name,dosage:c.dosage,shopProductId:c.sku,price:c.price,quantity:c.quantity,type:c.type,
+    ...(c.preparation==='plug_play_option'?{variant:'Plug&Play · aufbereitet'}:c.preparation==='nasal_diy_option'?{variant:'DIY Nasenspray-Set'}:{}),
+    isPlugPlay:c.isPlugPlay,isNasalSpray:c.isNasalSpray,isNasalDiySet:c.isNasalDiySet}));
   const subtotal=roundMoney(items.reduce((s,i)=>s+i.price*i.quantity,0));
   let promo:any=null;if(request.discount.mode==='code'){
     const code=request.discount.code.toUpperCase();const matches=(await db.select().from(promoCodes)).filter((p:any)=>p.code.toUpperCase()===code);
@@ -95,24 +81,43 @@ async function source(db:any,request:ScreenshotQuoteInput){
   const requested=request.discount.mode==='percent'?roundMoney(subtotal*request.discount.value/100):request.discount.mode==='amount'?request.discount.value:0;
   const manual=roundMoney(Math.min(Math.max(0,subtotal-automatic),requested));
   const promoAmount=promo?calculatePromoDiscount({subtotal,items,precedingProductDiscount:automatic,promo:{discountType:promo.discountType,percentage:Number(promo.percentage||0),fixedAmount:Number(promo.fixedAmount||0),description:promo.description}}):0;
-  const shipping=calculateAuthoritativeShipping({country:customer.country,items,coldChainRequested:request.coldShippingRequested,promoDescription:promo?.description,freeBaseShipping:benefits.globalFreeShippingApplies,coldShippingSurcharge:global?.coldShippingSurcharge});
+  const shipping=calculateAuthoritativeShipping({country:customer.country,items:resolveTrustedColdShippingItems(items,arts),coldChainRequested:request.coldShippingRequested,promoDescription:promo?.description,freeBaseShipping:benefits.globalFreeShippingApplies||request.freeBaseShippingRequested===true,coldShippingSurcharge:global?.coldShippingSurcharge});
   const manualBreakdown=manual>0?[{source:request.discount.mode==='percent'?'manual_global_percent':'manual_global_amount',label:request.discount.mode==='percent'?`Manueller Rabatt (${request.discount.value}%)`:'Manueller Betragsrabatt',amount:manual,...(request.discount.mode==='percent'?{percentage:request.discount.value}:{})}]:[];
-  const canonicalInput={orderSource:'wawi_manual',storeKey:'369research',communicationLanguage:selected?.communicationLanguage==='en'?'en':'de',sendOrderConfirmation:false,customer,items:reconcileFreeBacWaterForShopOrder(items,arts,global),subtotal,discount:manual+promoAmount,discountBreakdown:manualBreakdown,discountCode:promo?.code??null,shipping,shippingCountry:resolveShippingRegion(customer.country),total:roundMoney(subtotal-manual-promoAmount+shipping),paymentMethod:'wise',date:new Date().toLocaleDateString('sv-SE',{timeZone:'Europe/Berlin'}),...(selectedId?{existingCustomerId:selectedId}:{}),internalNote:request.internalNote??'',coldShippingRequested:request.coldShippingRequested??false,...(request.addressWarningConfirmed?{addressValidationOverride:{confirmed:true}}:{})};
-  const relevantIds=new Set(catalog.filter(c=>request.items.some(i=>i.sku===c.sku)).flatMap(c=>[c.articleId,c.parentId]));
+  const canonicalInput={orderSource:'wawi_manual',storeKey:'369research',communicationLanguage:selected?.communicationLanguage==='en'?'en':'de',sendOrderConfirmation:false,customer,items:reconcileFreeBacWaterForShopOrder(items,arts,global),subtotal,discount:manual+promoAmount,discountBreakdown:manualBreakdown,discountCode:promo?.code??null,shipping,shippingCountry:resolveShippingRegion(customer.country),total:roundMoney(subtotal-manual-promoAmount+shipping),paymentMethod:'wise',date:new Date().toLocaleDateString('sv-SE',{timeZone:'Europe/Berlin'}),...(selectedId?{existingCustomerId:selectedId}:{}),internalNote:request.internalNote??'',coldShippingRequested:request.coldShippingRequested??false,freeBaseShippingRequested:request.freeBaseShippingRequested??false,...(request.addressWarningConfirmed?{addressValidationOverride:{confirmed:true}}:{})};
+  const relevantIds=new Set(selections.flatMap(c=>c.dependencyIds));
+  // Include the entire dependency identity family, including inactive duplicates.
+  for(const a of arts)if(a.shopProductId==='bac-wasser'&&componentLines.length)relevantIds.add(a.id);
   // Hash data/revisions, not names as identity. No persistent quote/customer store.
-  const sourceHash=screenshotHash({articles:arts.filter((a:any)=>relevantIds.has(a.id)||request.items.some(i=>i.sku.toLowerCase()===a.sku.toLowerCase())),resolution,selected: selected?{...selected,totalOrders:undefined,totalSpent:undefined,firstOrderDate:undefined,lastOrderDate:undefined}:null,settings:settings.filter((s:any)=>/global_automatic_discount|bank_transfer_payment_instructions|address_validation|cold_shipping|customer_number_migration_pause/.test(s.key)),global,promo,canonicalInput});
-  return {canonicalInput,sourceHash,selectedId,relevantArticleIds:[...relevantIds].sort((a,b)=>a-b)};
+  const sourceHash=screenshotHash({articles:arts.filter((a:any)=>relevantIds.has(a.id)||request.items.some(i=>i.sku.toLowerCase()===a.sku.toLowerCase())),resolution,selected: selected?{...selected,totalOrders:undefined,totalSpent:undefined,firstOrderDate:undefined,lastOrderDate:undefined}:null,settings:settings.filter((s:any)=>/global_automatic_discount|bank_transfer_payment_instructions|address_validation|cold_shipping|nasal_diy_set_config_v1|customer_number_migration_pause/.test(s.key)),global,promo,canonicalInput,stockPlan,componentLines,policy:screenshotInventoryPolicy});
+  const region=resolveShippingRegion(customer.country);
+  const freeBaseShippingApplied=benefits.globalFreeShippingApplies||request.freeBaseShippingRequested===true||parsePromoMetadata(promo?.description).freeShipping.some(r=>r.toLowerCase()===region);
+  const shippingBase=calculateAuthoritativeShipping({country:customer.country,items:[],freeBaseShipping:freeBaseShippingApplied});
+  return {canonicalInput,sourceHash,selectedId,stockPlan,componentLines,selections,shippingBase,freeBaseShippingApplied,relevantArticleIds:[...relevantIds].sort((a,b)=>a-b)};
 }
 export async function quoteScreenshotOrder(request:ScreenshotQuoteInput,ctx:Context){
   if(!ctx.user||ctx.user.role!=='admin')throw Error('ADMIN_REQUIRED');
-  const calculated=await withReadOnlyDatabase(async()=>{const db=await getDb();if(!db)throw Error('DATABASE_UNAVAILABLE');const s=await source(db,request);const result=await orderRouter.createCaller({...ctx,screenshotOrder:{mode:'preview'}}).create(s.canonicalInput as any);if(!('screenshotPreview' in result))throw Error('QUOTE_UNAVAILABLE');return {...s,result:result as any};});
+  const calculated=await withReadOnlyDatabase(async()=>{const db=await getDb();if(!db)throw Error('DATABASE_UNAVAILABLE');const s=await source(db,request);const result=await orderRouter.createCaller({...ctx,screenshotOrder:{mode:'preview',stockPlan:s.stockPlan,componentLines:s.componentLines}}).create(s.canonicalInput as any);if(!('screenshotPreview' in result))throw Error('QUOTE_UNAVAILABLE');return {...s,result:result as any};});
   const key=screenshotIntentKey(ctx.user.id,request.draftId),expiresAt=Date.now()+600000,revision=randomUUID();
   for(const [k,v] of revisions)if(v.expiresAt<=Date.now())revisions.delete(k);if(revisions.size>=10000&&!revisions.has(key))throw Error('QUOTE_CAPACITY');
   const envelope:ScreenshotQuoteEnvelope={version:1,actorId:ctx.user.id,draftId:request.draftId,expiresAt,revision,canonicalInput:calculated.canonicalInput,expectedHash:calculated.result.hash,sourceHash:calculated.sourceHash};
   // Validated original request is inside the signed envelope; used only for locked reconstruction.
-  (envelope as any).request=request;(envelope as any).articleIds=calculated.relevantArticleIds;const quoteToken=signScreenshotQuote(envelope);revisions.set(key,{revision,expiresAt});
+  (envelope as any).request=request;(envelope as any).articleIds=calculated.relevantArticleIds;(envelope as any).stockPlan=calculated.stockPlan;(envelope as any).componentLines=calculated.componentLines;const quoteToken=signScreenshotQuote(envelope);revisions.set(key,{revision,expiresAt});
   const {input,discountBreakdown}=calculated.result.screenshotPreview;
-  return {quoteToken,expiresAt:new Date(expiresAt).toISOString(),preview:{customer:input.customer,existingCustomerId:calculated.selectedId??null,items:input.items.map((i:any)=>({sku:i.shopProductId,name:i.name,dosage:i.dosage??'',quantity:i.quantity,price:i.price,isFreeGift:Boolean(i.isFreeGift)})),subtotal:input.subtotal,discount:input.discount,discountBreakdown,shipping:input.shipping,total:input.total,paymentMethod:'wise' as const,coldShippingRequested:Boolean(input.coldShippingRequested)},warnings:request.addressWarningConfirmed?['ADDRESS_WARNING_EXPLICITLY_CONFIRMED']:[]};
+  const previewItems=input.items.map((i:any,index:number)=>{
+    const c=i.isFreeGift?undefined:calculated.selections[index];
+    return {sku:i.shopProductId,name:i.name,dosage:i.dosage??'',quantity:i.quantity,price:i.price,type:i.type,
+      isFreeGift:Boolean(i.isFreeGift),isPlugPlay:Boolean(i.isPlugPlay),isNasalSpray:Boolean(i.isNasalSpray),isNasalDiySet:Boolean(i.isNasalDiySet),
+      form:c?.form??'other',preparation:c?.preparation??'inventory'};
+  });
+  const includedComponents=calculated.componentLines.map(line=>({name:line.name,variant:line.variant,quantity:line.quantity,price:0,
+    sku:calculated.stockPlan.find(d=>d.articleId===line.articleId)?.sku,isNasalDiySet:line.isNasalDiySet}));
+  const coldShippingMandatory=calculated.selections.some(c=>c.mandatoryCold);
+  return {quoteToken,expiresAt:new Date(expiresAt).toISOString(),preview:{customer:input.customer,existingCustomerId:calculated.selectedId??null,
+    items:previewItems,includedComponents,subtotal:input.subtotal,discount:input.discount,discountBreakdown,shipping:input.shipping,total:input.total,paymentMethod:'wise' as const,
+    coldShippingRequested:Boolean(input.coldShippingRequested),coldShippingMandatory,coldShippingActive:Boolean(input.coldShippingRequested)||coldShippingMandatory,
+    freeBaseShippingRequested:Boolean(input.freeBaseShippingRequested),freeBaseShippingApplied:calculated.freeBaseShippingApplied,
+    shippingBase:calculated.shippingBase,coldShippingSurcharge:roundMoney(input.shipping-calculated.shippingBase)},
+    warnings:request.addressWarningConfirmed?['ADDRESS_WARNING_EXPLICITLY_CONFIRMED']:[]};
 }
 async function receipt(draftId:string,actorId:number){const db=await getDb();if(!db)throw Error('DATABASE_UNAVAILABLE');const r=resultRows(await db.execute(sql`SELECT response FROM priority_checkout_receipts WHERE intent_key=${screenshotIntentKey(actorId,draftId)}`))[0]?.response;return r?.screenshotActorId===actorId&&r?.screenshotDraftId===draftId?r:null;}
 export async function statusScreenshotOrder(draftId:string,actorId:number):Promise<{state:'not_found'|'succeeded'|'unknown';orderId?:string}>{try{const r=await receipt(draftId,actorId);return r?{state:'succeeded',orderId:r.orderId}:{state:'not_found'};}catch{return {state:'unknown'};}}
@@ -121,11 +126,11 @@ export async function executeScreenshotOrder(token:string,ctx:Context){
   const saved=await receipt(envelope.draftId,ctx.user.id);if(saved)return {state:'succeeded' as const,orderId:saved.orderId,idempotencyKey:key};
   verifyScreenshotQuote(token,ctx.user.id);const current=revisions.get(key);if(!current||current.revision!==envelope.revision)throw Error('QUOTE_REPLACED');
   const request=(envelope as any).request as ScreenshotQuoteInput;
-  const response=await orderRouter.createCaller({...ctx,screenshotOrder:{mode:'execute',actorId:ctx.user.id,draftId:envelope.draftId,expectedHash:envelope.expectedHash,validateInTransaction:async(tx)=>{
+  const response=await orderRouter.createCaller({...ctx,screenshotOrder:{mode:'execute',stockPlan:(envelope as any).stockPlan,componentLines:(envelope as any).componentLines,actorId:ctx.user.id,draftId:envelope.draftId,expectedHash:envelope.expectedHash,validateInTransaction:async(tx)=>{
     // Policy/config mutations use this same global campaign key. Exact stock and customer
     // checks happen BEFORE any canonical transaction writes, including receipt/stock.
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('global_automatic_discount'))`);
-    await tx.execute(sql`SELECT key FROM shop_settings WHERE key LIKE 'address_validation%' OR key LIKE 'cold_shipping%' OR key IN ('global_automatic_discount','bank_transfer_payment_instructions','customer_number_migration_pause') ORDER BY key FOR SHARE`);
+    await tx.execute(sql`SELECT key FROM shop_settings WHERE key LIKE 'address_validation%' OR key LIKE 'cold_shipping%' OR key IN ('global_automatic_discount','bank_transfer_payment_instructions','nasal_diy_set_config_v1','customer_number_migration_pause') ORDER BY key FOR SHARE`);
     // Match canonical block keys before customer rows; never lock unrelated CRM/shop tables.
     await assertNoActiveCheckoutBlock(tx,envelope.canonicalInput.customer);
     const identities=[...new Set([email(request.customer.email),phone(request.customer.phone),email(envelope.canonicalInput.customer.email),phone(envelope.canonicalInput.customer.phone)].filter(Boolean))].sort();
@@ -138,7 +143,7 @@ export async function executeScreenshotOrder(token:string,ctx:Context){
     const actor=resultRows(await tx.execute(sql`SELECT id FROM users WHERE id=${ctx.user!.id} AND role='admin' FOR SHARE`));if(!actor.length)throw Error('ACTOR_REVOKED');
     if(envelope.expiresAt<=Date.now()||revisions.get(key)?.revision!==envelope.revision)throw Error('QUOTE_EXPIRED_OR_REPLACED');
     if(request.discount.mode==='code')await tx.execute(sql`SELECT id FROM promo_codes WHERE upper(code)=upper(${request.discount.code}) FOR UPDATE NOWAIT`);
-    const fresh=await source(tx,request);if(fresh.sourceHash!==envelope.sourceHash)throw Error('QUOTE_CHANGED');
+    const fresh=await source(tx,request);if(fresh.sourceHash!==envelope.sourceHash||screenshotHash(fresh.stockPlan)!==screenshotHash((envelope as any).stockPlan)||screenshotHash(fresh.componentLines)!==screenshotHash((envelope as any).componentLines))throw Error('QUOTE_CHANGED');
   }}}).create({...envelope.canonicalInput,checkoutIdempotencyKey:key} as any);
   if(!('orderId' in response)||!response.orderId)throw Error('ORDER_RESULT_UNKNOWN');return {state:'succeeded' as const,orderId:response.orderId,idempotencyKey:key};
 }
@@ -208,6 +213,11 @@ export function screenshotSafeError(error:unknown):never{
     CUSTOMER_NOT_FOUND:'Das ausgewählte Kundenprofil ist nicht mehr vorhanden. Bitte neu auswählen.',
     STOCK_UNAVAILABLE:'Der Bestand reicht nicht für diese Menge. Bitte Menge oder Artikel prüfen.',
     EXACT_PUBLISHED_SKU_REQUIRED:'Bitte einen eindeutigen, aktiven und veröffentlichten Lagerartikel auswählen.',
+    PRODUCT_FORM_UNAVAILABLE:'Diese Aufbereitung ist für den gewählten Lagerartikel nicht freigegeben. Bitte die aktuelle Katalogauswahl verwenden.',
+    DUPLICATE_SELECTION:'Dieser Artikel mit derselben Produktform ist bereits ausgewählt. Bitte die Menge anpassen.',
+    COMPONENT_INVENTORY_UNAVAILABLE:'Ein erforderlicher Bestandsteil ist nicht eindeutig verfügbar. Bitte die aktuelle Katalogauswahl prüfen.',
+    KUEHLVERSAND_INSEL_AUSGESCHLOSSEN:'Gekühlter Versand und kühlpflichtige Artikel sind an dieser Inseladresse nicht möglich.',
+    KUEHLVERSAND_ZIEL_UNGEKLAERT:'Für diese Lieferadresse konnte gekühlter Versand nicht sicher freigegeben werden.',
     COMPONENT_FORM_REQUIRES_WAWI:'Diese Produktform benötigt den normalen manuellen WaWi-Bestellweg. Bitte dort bestellen; andere Artikel sind hier weiterhin möglich.',
     EXCLUSIVE_CAMPAIGN_DISCOUNT_FORBIDDEN:'Die aktive exklusive Aktion erlaubt keine zusätzlichen Codes oder manuellen Rabatte.',
     PROMOTION_INVALID:'Der Aktionscode ist ungültig, abgelaufen oder für diesen Warenwert nicht verfügbar.',
@@ -219,7 +229,8 @@ export function screenshotSafeError(error:unknown):never{
   // an unfamiliar error may originate from a post-commit task or result rendering.
   const addressPrefix='ADRESSPRUEFUNG_BESTAETIGUNG_ERFORDERLICH: ';
   const addressWarning=message.startsWith(addressPrefix)?message.slice(addressPrefix.length).slice(0,1200):null;
-  const safe=Object.hasOwn(messages,message)?message:addressWarning!==null?'ADDRESS_WARNING_CONFIRMATION_REQUIRED':null;
+  const knownCold=['KUEHLVERSAND_INSEL_AUSGESCHLOSSEN','KUEHLVERSAND_ZIEL_UNGEKLAERT'].find(code=>message.startsWith(code+': '));
+  const safe=Object.hasOwn(messages,message)?message:knownCold??(addressWarning!==null?'ADDRESS_WARNING_CONFIRMATION_REQUIRED':null);
   const dbCode=(error as any)?.cause?.cause?.code??(error as any)?.cause?.code??(error as any)?.code;
   // Only known pre-write validation errors (or database-aborted transactions) are
   // definitive rejections. Unknown failures may have happened after a commit.

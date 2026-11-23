@@ -21,11 +21,11 @@ export const screenshotDiscountSchema = z.discriminatedUnion('mode', [
 export const screenshotQuoteInputSchema = z.object({
   draftId:z.string().uuid(), existingCustomerId:z.number().int().positive().optional(), existingCustomerReviewed:z.boolean().optional(),
   customer:screenshotCustomerSchema,
-  items:z.array(z.object({sku:text(50),quantity:z.number().int().min(1).max(100)}).strict()).min(1).max(30),
-  discount:screenshotDiscountSchema, coldShippingRequested:z.boolean().optional(), internalNote:z.string().trim().max(1000).optional(),
+  items:z.array(z.object({sku:text(50),quantity:z.number().int().min(1).max(100),form:z.enum(['vial','plug_play','nasal','other']).optional()}).strict()).min(1).max(30),
+  discount:screenshotDiscountSchema, coldShippingRequested:z.boolean().optional(), freeBaseShippingRequested:z.boolean().optional(), internalNote:z.string().trim().max(1000).optional(),
   customerConfirmed:z.literal(true), addressWarningConfirmed:z.boolean().optional(),
 }).strict().superRefine((v,c)=>{
-  if(new Set(v.items.map(i=>i.sku.toLowerCase())).size!==v.items.length)c.addIssue({code:'custom',message:'DUPLICATE_SKU'});
+  if(new Set(v.items.map(i=>JSON.stringify([i.sku.toLowerCase(),i.form??'default']))).size!==v.items.length)c.addIssue({code:'custom',message:'DUPLICATE_SKU_FORM'});
   if(v.existingCustomerId && v.existingCustomerReviewed!==true)c.addIssue({code:'custom',message:'CUSTOMER_REVIEW_REQUIRED'});
 });
 export const screenshotCustomersInputSchema=z.object({phone:z.string().trim().max(50).optional(),email:z.string().trim().max(320).optional(),name:z.string().trim().max(200).optional()}).strict().refine(v=>Boolean(v.phone||v.email||v.name),'CONTACT_OR_NAME_REQUIRED');
@@ -48,4 +48,7 @@ export function verifyScreenshotQuote(token:string,actorId:number,now=Date.now()
   if(!allowExpired&&e.expiresAt<=now)throw Error('QUOTE_EXPIRED');return e;
 }
 /** Server-only; never accepted from request input. Preview cannot disable normal checkout receipts. */
-export type ScreenshotOrderContext={mode:'preview'}|{mode:'execute';actorId:number;draftId:string;expectedHash:string;validateInTransaction:(tx:any)=>Promise<void>};
+export type ScreenshotOrderContext=({mode:'preview'}|{mode:'execute';actorId:number;draftId:string;expectedHash:string;validateInTransaction:(tx:any)=>Promise<void>}) & {
+  stockPlan: import('./screenshotOrderInventory.js').ScreenshotStockPlan;
+  componentLines: import('./screenshotOrderInventory.js').ScreenshotComponentLine[];
+};

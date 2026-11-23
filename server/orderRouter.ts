@@ -272,7 +272,7 @@ export const orderRouter = router({
       // Reject foreign public-code terms before lookup, pricing or any writes.
       assertNoMixedPartnerOrderInput(input);
       assertManualSaleRole(input.orderSource, ctx.user);
-      if (ctx.screenshotOrder && (ctx.user?.role !== 'admin' || input.orderSource !== 'wawi_manual' || input.storeKey !== '369research' || input.stockOverride || input.partnerCode || input.partnerNumber || input.kwkCode || input.creditUsed || input.kwkCreditUsed || input.qrAttributionToken || input.sendOrderConfirmation || input.freeBaseShippingRequested)) throw Error('SCREENSHOT_ORDER_SCOPE');
+      if (ctx.screenshotOrder && (ctx.user?.role !== 'admin' || input.orderSource !== 'wawi_manual' || input.storeKey !== '369research' || input.stockOverride || input.partnerCode || input.partnerNumber || input.kwkCode || input.creditUsed || input.kwkCreditUsed || input.qrAttributionToken || input.sendOrderConfirmation)) throw Error('SCREENSHOT_ORDER_SCOPE');
       const db = await getDb();
       if (!db) throw new Error("Database not available");
       const normalCheckoutKey = input.storeKey === '369research' && !ctx.jarvyOrder ? input.checkoutIdempotencyKey : undefined;
@@ -685,6 +685,19 @@ export const orderRouter = router({
           });
           input.shippingCountry = resolveShippingRegion(input.customer.country);
         }
+      }
+
+      // Screenshot requests are signed, server-reconstructed catalog orders.
+      // Rebuild base shipping for all combinations, including explicit free base
+      // plus promo; preserve the existing manual/public logic everywhere else.
+      if (ctx.screenshotOrder) {
+        input.shipping = calculateAuthoritativeShipping({
+          country: input.customer.country, items: trustedColdShippingItems,
+          promoDescription: resolvedPromoCode?.description, coldChainRequested: coldShippingRequested,
+          freeBaseShipping: globalBenefitResolution.globalFreeShippingApplies || input.freeBaseShippingRequested === true,
+          coldShippingSurcharge: configuredGlobalDiscount?.coldShippingSurcharge ?? undefined,
+        });
+        input.shippingCountry = resolveShippingRegion(input.customer.country);
       }
 
       if (isAuthenticatedWawiPickup) {
@@ -1329,6 +1342,17 @@ export const orderRouter = router({
             // ── Stock check: verify all peptide items are in stock before creating order ──
       if(ctx.jarvyOrder)await db.select({id:articles.id}).from(articles).where(inArray(articles.sku,input.items.map(i=>i.shopProductId!))).orderBy(articles.id).for('update');
       const allArticlesForCheck = await db.select().from(articles).where(eq(articles.isActive, 1));
+      if (ctx.screenshotOrder) {
+        // validateInTransaction locked every price/eligibility/component dependency
+        // before this point. Validate the COMPLETE sum before any stock write.
+        const plan = ctx.screenshotOrder.stockPlan;
+        if (!plan?.length || new Set(plan.map(d => d.articleId)).size !== plan.length) throw Error('QUOTE_CHANGED');
+        for (const d of plan) {
+          const a = allArticlesForCheck.find(a => a.id === d.articleId);
+          if (!a || a.sku !== d.sku || a.stock !== d.expectedStock) throw Error('QUOTE_CHANGED');
+          if (!Number.isSafeInteger(d.quantity) || d.quantity <= 0 || a.stock < d.quantity) throw Error('STOCK_UNAVAILABLE');
+        }
+      }
       if (!isAuthenticatedWawiManualSale) {
         for (const item of input.items) {
           const family = allArticlesForCheck.filter(a => a.sku.toLowerCase() === item.shopProductId?.toLowerCase() || a.shopProductId?.toLowerCase() === item.shopProductId?.toLowerCase());
@@ -1394,7 +1418,7 @@ export const orderRouter = router({
 
       for (let itemIdx = 0; itemIdx < input.items.length; itemIdx++) {
         const item = input.items[itemIdx];
-        if (item.type !== 'peptide') continue;
+        if (ctx.screenshotOrder || item.type !== 'peptide') continue;
         const matchingArticles = findMatchingArticles(item, allArticlesForCheck);
         // Ein leerer Stärkenwert ist bei einer Variantenfamilie fachlich nicht
         // bestimmbar. Die Bestellung wird abgebrochen, statt Bestand über alle
@@ -1461,7 +1485,7 @@ export const orderRouter = router({
 
       // DIY-Nasenspray-Set darf nur für die zentral freigegebenen Produkte bestellt werden.
       // Der Checkout kann die Bestands- oder Produktfreigabe nicht über Namen manipulieren.
-      const diyNasalItems = input.items.filter((item) => item.isNasalDiySet === true);
+      const diyNasalItems = ctx.screenshotOrder ? [] : input.items.filter((item) => item.isNasalDiySet === true);
       for (const item of diyNasalItems) {
         if (!isNasalDiySetEligible(item.shopProductId)) {
           throw new Error(`DIY-Nasenspray-Set ist für ${item.name} nicht verfügbar`);
@@ -1484,6 +1508,7 @@ export const orderRouter = router({
       // substitution and already catalogued BAC/DIY components. No whole-shop lock.
       const plannedIds=new Set<number>();
       input.items.forEach((item,index) => {
+        if (ctx.screenshotOrder) return;
         if (item.type === 'peptide') {
           const sub=substitutionMap.get(index);
           if(sub?.possible)sub.components.forEach(c => plannedIds.add(c.articleId));
@@ -1495,11 +1520,19 @@ export const orderRouter = router({
       });
       const lockedInventory=plannedIds.size ? await db.select().from(articles).where(inArray(articles.id,[...plannedIds].sort((a,b)=>a-b))).orderBy(articles.id).for('update') : [];
       lockedInventory.forEach(fresh => {const a=allArticlesForCheck.find(a=>a.id===fresh.id);if(a)a.stock=fresh.stock;});
+      // Dedicated screenshot aggregate: every physical row exactly once, all
+      // billable forms/types and tracked native components, same stock journal.
+      if (ctx.screenshotOrder) {
+        for (const d of ctx.screenshotOrder.stockPlan) {
+          await applyStockMovement(db, { articleId:d.articleId, sku:d.sku, expectedStock:d.expectedStock,
+            change:-d.quantity, type:'verkauf', reason:`Screenshot-Bestandsabzug für Bestellung ${orderId}`, orderId, actor:'system' });
+        }
+      }
       // ── Stock deduction: reduce stock for all ordered peptide items ──
       // Bei Substitution: Bestand der Ersatz-Varianten abziehen, nicht der bestellten Variante
       for (let itemIdx = 0; itemIdx < input.items.length; itemIdx++) {
         const item = input.items[itemIdx];
-        if (item.type !== 'peptide') continue;
+        if (ctx.screenshotOrder || item.type !== 'peptide') continue;
 
         const sub = substitutionMap.get(itemIdx);
         if (sub && sub.possible) {
@@ -1668,20 +1701,31 @@ export const orderRouter = router({
           type: item.type,
           price: item.price.toFixed(2),
           quantity: item.quantity,
+          ...(ctx.screenshotOrder ? {articleId: item.isFreeGift ? null : allArticlesForCheck.find(a=>a.sku===item.shopProductId)?.id ?? null} : {}),
           // Nasenspray- und Plug&Play-Flag speichern (für WaWi-Anzeige)
-          isNasalSpray: item.isNasalSpray === true ||
+          isNasalSpray: ctx.screenshotOrder ? item.isNasalSpray === true : item.isNasalSpray === true ||
             item.name.toLowerCase().includes('[nasenspray]') ||
             item.name.toLowerCase().includes('nasenspray'),
           isNasalDiySet: item.isNasalDiySet === true,
-          isPlugPlay: item.isPlugPlay === true ||
+          isPlugPlay: ctx.screenshotOrder ? item.isPlugPlay === true : item.isPlugPlay === true ||
             item.name.toLowerCase().includes('[plug&play') ||
             item.name.toLowerCase().includes('plug&play patrone'),
         });
       }
 
+      if (ctx.screenshotOrder) {
+        // The plan already deducted tracked components. Persist transparent kit
+        // lines only; legacy nasal loops are suppressed for this route.
+        for (const line of ctx.screenshotOrder.componentLines) {
+          await db.insert(orderItems).values({ orderId, name:line.name, dosage:null, variant:line.variant,
+            type:'accessory', price:'0.00', quantity:line.quantity, articleId:line.articleId,
+            isNasalDiySet:line.isNasalDiySet });
+        }
+      }
+
       // ── Nasenspray: automatisch BAC Wasser 10ml (0€) hinzufügen und Bestand abziehen ──
       // Erkennung über isNasalSpray-Flag (primär) oder Name-Fallback (Legacy)
-      const nasalSprayCount = input.items.filter(i =>
+      const nasalSprayCount = ctx.screenshotOrder ? 0 : input.items.filter(i =>
         i.isNasalDiySet !== true && (
           i.isNasalSpray === true ||
           i.name.toLowerCase().includes('[nasenspray]') ||
