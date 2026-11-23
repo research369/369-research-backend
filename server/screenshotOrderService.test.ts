@@ -216,3 +216,19 @@ test('concurrent message preparations return one durable CAS winner; invalid cus
  assert.equal(a.whatsapp.state,'ready');assert.equal(b.whatsapp.state,'ready');assert.equal(a.whatsapp.message,b.whatsapp.message);const stored=(await pool.query('SELECT response FROM priority_checkout_receipts WHERE order_id=$1',[out.orderId])).rows[0].response;assert.equal(stored.screenshotConfirmation.body,a.whatsapp.message);assert.equal(await count('orders'),1);assert.equal(await count('stock_history'),1);
  await pool.query("UPDATE customers SET first_name='Changed' WHERE id=$1",[stored.orderSnapshot.customerId]);const pending=await caller().result({draftId:r.draftId});assert.equal(pending.whatsapp.state,'pending');assert.equal(pending.whatsapp.message,null);assert.equal((await caller().prepareMessage({draftId:r.draftId})).whatsapp.state,'pending');assert.deepEqual((await pool.query('SELECT response FROM priority_checkout_receipts WHERE order_id=$1',[out.orderId])).rows[0].response,stored);
 });
+
+test('legacy maxPerCustomer metadata cannot bypass native eligibility in screenshot quote or execute',async()=>{
+ const r=request({discount:{mode:'code',code:'LIMIT10'}});
+ await pool.query("INSERT INTO promo_codes(code,percentage,max_uses,current_uses,description) VALUES('LIMIT10',10,100,0,'Public promotion | {\"maxPerCustomer\":1}')");
+ const before=await counts();
+ await assert.rejects(caller().quote(r),(error:any)=>error.code==='PRECONDITION_FAILED'&&error.message.startsWith('PROMOTION_REQUIRES_NATIVE_ELIGIBILITY:'));
+ assert.deepEqual(await counts(),before);
+ await pool.query("UPDATE promo_codes SET description='Public promotion' WHERE code='LIMIT10'");
+ const q=await caller().quote(r);
+ await pool.query("UPDATE promo_codes SET description='Public promotion | {\"maxPerCustomer\":1}' WHERE code='LIMIT10'");
+ await assert.rejects(caller().execute({quoteToken:q.quoteToken,confirmed:true}),(error:any)=>error.code==='PRECONDITION_FAILED'&&error.message.startsWith('PROMOTION_REQUIRES_NATIVE_ELIGIBILITY:'));
+ // PostgreSQL sequences are not transactional; a rejected execution may leave
+ // a number gap, but must never create an order or move stock.
+ const after=await counts();assert.deepEqual({...after,sequence:before.sequence},before);
+ assert.deepEqual(await caller().status({draftId:r.draftId}),{state:'not_found'});
+});

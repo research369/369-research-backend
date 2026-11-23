@@ -17,6 +17,7 @@ import { screenshotHash, screenshotIntentKey, signScreenshotQuote, verifyScreens
 import { readPersistedOrderMessageData } from './orderDiscountMessageService.js';
 import { getReleasedBankTransferInstructions } from './paymentInstructionsConfig.js';
 import { assertNoActiveCheckoutBlock } from './customerOrderBlockService.js';
+import { projectDiscountRules } from './guardianDiscounts.js';
 
 const revisions=new Map<string,{revision:string;expiresAt:number}>();
 const email=(v:unknown)=>String(v??'').trim().toLowerCase();
@@ -77,11 +78,16 @@ async function source(db:any,request:ScreenshotQuoteInput){
     const code=request.discount.code.toUpperCase();const matches=(await db.select().from(promoCodes)).filter((p:any)=>p.code.toUpperCase()===code);
     if(matches.length!==1)throw Error('PROMOTION_INVALID');promo=matches[0];
     if(promo.isActive!==1||(promo.validFrom&&Date.now()<new Date(promo.validFrom).getTime())||isPromoCodeExpired(promo)||((promo.maxUses??0)>0&&promo.currentUses>=promo.maxUses)||subtotal<Number(promo.minOrder||0))throw Error('PROMOTION_INVALID');
+    // Use the existing strict metadata projection: maxPerCustomer is not a
+    // Drizzle column and must not silently disappear in the manual order path.
+    let projected:any;try{projected=projectDiscountRules([{code:promo.code,description:promo.description,discount_type:promo.discountType,percentage:promo.percentage,fixed_amount:promo.fixedAmount,min_order:promo.minOrder,max_uses:promo.maxUses,current_uses:promo.currentUses,valid_from:promo.validFrom,valid_until:promo.validUntil,valid_until_exact:promo.validUntilExact,is_active:promo.isActive}],[]).codes[0];}catch{throw Error('PROMOTION_REQUIRES_NATIVE_ELIGIBILITY');}
+    if(projected.customer_limit!==0)throw Error('PROMOTION_REQUIRES_NATIVE_ELIGIBILITY');
     // Generic public promos only. Personalized/partner/new-customer eligibility belongs to its native flow.
     const guards=resultRows(await db.execute(sql`SELECT EXISTS(SELECT 1 FROM customer_promo_assignments WHERE promo_code_id=${promo.id}) AS personal,
-      EXISTS(SELECT 1 FROM partner_codes WHERE upper(code_normalized)=upper(${code})) AS partner,
-      EXISTS(SELECT 1 FROM sales_followups WHERE promo_code_id=${promo.id}) AS followup`))[0];
-    if(guards.personal||guards.partner||guards.followup||/neukund|new.customer|follow.?up|reminder|kwk|partner|creator/i.test(promo.description??''))throw Error('PROMOTION_REQUIRES_NATIVE_ELIGIBILITY');
+      EXISTS(SELECT 1 FROM partner_codes WHERE upper(code_normalized)=upper(${code})) OR EXISTS(SELECT 1 FROM partners WHERE upper(code)=upper(${code})) AS partner,
+      EXISTS(SELECT 1 FROM sales_followups WHERE promo_code_id=${promo.id} OR upper(discount_code)=upper(${code})) AS followup,
+      EXISTS(SELECT 1 FROM personal_promo_expiry_reminders WHERE promo_code_id=${promo.id}) AS reminder`))[0];
+    if(guards.personal||guards.partner||guards.followup||guards.reminder||/neukund|new.customer|follow.?up|reminder|kwk|partner|creator|persönlich|individuell|bestellung|intern/i.test(promo.description??''))throw Error('PROMOTION_REQUIRES_NATIVE_ELIGIBILITY');
   }
   if(global?.exclusiveCampaign&&request.discount.mode!=='none')throw Error('EXCLUSIVE_CAMPAIGN_DISCOUNT_FORBIDDEN');
   const benefits=resolveGlobalAutomaticDiscountBenefits(global,{merchandiseSubtotal:subtotal,shippingRegion:resolveShippingRegion(customer.country),hasPromotionCode:Boolean(promo)});
