@@ -190,6 +190,21 @@ async function prepared(slug = "local-cartendon", single = false) {
 const priceItem = (shopProductId: string, dosage = "12.5 mg") => ({ shopProductId, dosage, price: 999, quantity: 1 });
 function catalog(rows: any[]) { return rows.map(a => ({ ...a, shopProductId: a.shop_product_id, sellingPrice: a.selling_price, salePrice: a.sale_price, shopVisible: a.shop_visible, isActive: a.is_active })); }
 
+test("exact article-bound audit read resolves the promoted master without sibling fallback", async () => {
+  const { input, created, request } = await prepared("local-audit-exact");
+  assert(Array.isArray(await caller().productAdmin.getAuditLog({ shopProductId: input.shopProductId })));
+  assert.equal((await caller().productAdmin.getAuditLog({ shopProductId: input.shopProductId, articleId: created.masterArticleId })).length, 1);
+  await finalize(request);
+  const stable = await snapshot();
+  const logs = await caller().productAdmin.getAuditLog({ shopProductId: input.shopProductId, articleId: created.masterArticleId });
+  assert.equal(logs.filter((entry: any) => entry.action === "FINALIZE_DRAFT" && entry.fieldName === `request:${request.requestKey}`).length, 1);
+  assert(logs.every((entry: any) => entry.articleId === created.masterArticleId));
+  assert.deepEqual(await caller().productAdmin.getAuditLog({ shopProductId: input.shopProductId, articleId: created.articleIds[1] }), []);
+  await assert.rejects(caller().productAdmin.getAuditLog({ shopProductId: input.shopProductId, articleId: 1 }));
+  await assert.rejects(caller(null).productAdmin.getAuditLog({ shopProductId: input.shopProductId, articleId: created.masterArticleId }));
+  assert.deepEqual(await snapshot(), stable);
+});
+
 test("fresh journal-only corruption and timestamp-only stale snapshots reject without writes", async () => {
   const { request, created } = await prepared();
   await pool.query("INSERT INTO stock_history(article_id,change_type,quantity_before,quantity_change,quantity_after,reason) VALUES($1,'korrektur',0,0,0,'local corrupt')", [created.masterArticleId]);

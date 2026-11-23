@@ -12,7 +12,7 @@
  */
 
 import { z } from "zod";
-import { eq, desc } from "drizzle-orm";
+import { and, eq, desc } from "drizzle-orm";
 import { router, productManagerProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
 import {
@@ -531,6 +531,7 @@ export const productAdminRouter = router({
   getAuditLog: productManagerProcedure
     .input(z.object({
       shopProductId: z.string(),
+      articleId: z.number().int().positive().optional(),
       limit: z.number().int().min(1).max(200).default(50),
     }))
     .query(async ({ input }) => {
@@ -540,7 +541,8 @@ export const productAdminRouter = router({
       const article = await db
         .select()
         .from(articles)
-        .where(eq(articles.shopProductId, input.shopProductId))
+        .where(input.articleId === undefined ? eq(articles.shopProductId, input.shopProductId)
+          : and(eq(articles.shopProductId, input.shopProductId), eq(articles.id, input.articleId)))
         .limit(1);
 
       if (!article[0]) throw new Error(`Produkt '${input.shopProductId}' nicht gefunden`);
