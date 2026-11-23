@@ -13,9 +13,18 @@ import {
 import { quoteRequest } from "./whatsappOrderContract.js";
 import { createWhatsappOrderRouter } from "./whatsappOrderRouter.js";
 import { projectOffers } from "./pepgptOffers.js";
+const testHost = process.env.WOP_TEST_DB_HOST || "/tmp/369-whatsapp-hardening-pg/socket";
+if (process.env.NODE_ENV !== "test" || !testHost.startsWith("/"))
+  throw Error("isolated_unix_test_environment_required");
+const externalFetch = globalThis.fetch;
+globalThis.fetch = async (input, init) => {
+  const url = new URL(input instanceof Request ? input.url : String(input));
+  if (url.hostname !== "127.0.0.1") throw Error("external_requests_forbidden");
+  return externalFetch(input, init);
+};
 const pool = new Pool({
-  host: "127.0.0.1",
-  port: 55439,
+  host: testHost,
+  port: Number(process.env.WOP_TEST_DB_PORT || 55439),
   database: "whatsapp_phase1_test_rehearsal",
   user: process.env.WOP_TEST_DB_USER || process.env.USER,
   max: 5,
@@ -203,6 +212,7 @@ test.beforeEach(async () => {
   contactStatus = "new";
 });
 test.after(async () => {
+  globalThis.fetch = externalFetch;
   await pool.end();
 });
 test("Automatik, Clientpreise, Kunden-ID und E-Mail-Opt-in abgewiesen", async () => {
@@ -417,5 +427,80 @@ test("Router: Schlüssel getrennt, kein gefälschter Telegram-Callback", async (
     );
   } finally {
     await new Promise<void>((r) => http.close(() => r()));
+  }
+});
+
+async function awaitIntentWaiters(count: number) {
+  for (let i = 0; i < 100; i++) {
+    const { rows: [row] } = await pool.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=current_database() AND wait_event='advisory'");
+    if (row.n >= count) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw Error("intent_lock_waiters_not_observed");
+}
+
+test("Quote vor Execute: gleiche Intent-Lockqueue ohne Deadlock, Revision entwertet alte Freigaben", async () => {
+  const r = await request(), q = await service.quote(tenant, r), e = await ready(q);
+  const blocker = await pool.connect();
+  let revise: Promise<any> | undefined, execute: Promise<any> | undefined;
+  try {
+    await blocker.query("BEGIN");
+    await blocker.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [tenant + r.bot_conversation_id + r.draft_id]);
+    revise = service.quote(tenant, { ...r, lines: [{ ...r.lines[0], quantity: 2 }] });
+    await awaitIntentWaiters(1);
+    execute = service.execute(tenant, e);
+    await awaitIntentWaiters(2);
+    // Revision is first in the intent queue. Execute must not already hold its quote row.
+    await blocker.query("COMMIT");
+    const result = await Promise.allSettled([revise, execute]);
+    assert.equal(result[0].status, "fulfilled");
+    assert.equal(result[1].status, "rejected");
+    if (result[0].status !== "fulfilled" || result[1].status !== "rejected") throw Error("unexpected_concurrency_result");
+    assert.equal(result[0].value.quote_revision, 2);
+    assert.match(result[1].reason.message, /quote_stale/);
+    assert.notEqual(result[1].reason.code, "40P01");
+    assert.equal((await pool.query("SELECT * FROM wop_test_orders")).rowCount, 0);
+    const fresh = await ready(result[0].value);
+    const booked = await service.execute(tenant, fresh);
+    assert.deepEqual(await service.execute(tenant, fresh), booked);
+    assert.equal((await pool.query("SELECT * FROM wop_test_orders")).rowCount, 1);
+    assert.equal((await pool.query("SELECT * FROM wop_intents")).rowCount, 1);
+  } finally {
+    await blocker.query("ROLLBACK"); blocker.release();
+    await Promise.allSettled([revise, execute].filter(Boolean));
+  }
+});
+
+test("Execute vor Quote: Buchung gewinnt die Intent-Lockqueue, Idempotenz und Revision bleiben erhalten", async () => {
+  const r = await request(), q = await service.quote(tenant, r);
+  const reused = await service.quote(tenant, r);
+  assert.equal(reused.quote_id, q.quote_id);
+  assert.equal(reused.quote_hash, q.quote_hash);
+  assert.equal(reused.quote_revision, q.quote_revision);
+  const e = await ready(q), blocker = await pool.connect();
+  let execute: Promise<any> | undefined, revise: Promise<any> | undefined;
+  try {
+    await blocker.query("BEGIN");
+    await blocker.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [tenant + r.bot_conversation_id + r.draft_id]);
+    execute = service.execute(tenant, e);
+    await awaitIntentWaiters(1);
+    revise = service.quote(tenant, { ...r, lines: [{ ...r.lines[0], quantity: 2 }] });
+    await awaitIntentWaiters(2);
+    await blocker.query("COMMIT");
+    const result = await Promise.allSettled([execute, revise]);
+    assert.equal(result[0].status, "fulfilled");
+    assert.equal(result[1].status, "rejected");
+    if (result[0].status !== "fulfilled" || result[1].status !== "rejected") throw Error("unexpected_concurrency_result");
+    assert.match(result[1].reason.message, /intent_already_executed/);
+    assert.notEqual(result[1].reason.code, "40P01");
+    assert.deepEqual(await service.execute(tenant, e), result[0].value);
+    await assert.rejects(() => service.execute(tenant, { ...e, quote_hash: "f".repeat(64) }), /idempotency_conflict/);
+    await assert.rejects(() => service.execute(tenant, { ...e, execution_id: randomUUID() }), /quote_already_executed/);
+    assert.equal((await pool.query("SELECT * FROM wop_test_orders")).rowCount, 1);
+    assert.equal((await pool.query("SELECT * FROM wop_executions")).rowCount, 1);
+    assert.equal((await pool.query("SELECT * FROM wop_intents")).rowCount, 1);
+  } finally {
+    await blocker.query("ROLLBACK"); blocker.release();
+    await Promise.allSettled([execute, revise].filter(Boolean));
   }
 });

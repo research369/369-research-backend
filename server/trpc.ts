@@ -9,6 +9,7 @@ export interface Context {
   /** Internal diagnostic principal only. Never accepted in a public request. */
   operationsPreview?: {partnerId?:number;kwkCreditAccountId?:number};
   jarvyOrder?: import('./jarvyOrderContract.js').JarvyOrderContext;
+  screenshotOrder?: import('./screenshotOrderContract.js').ScreenshotOrderContext;
   req: Request;
   res: Response;
   user: {
@@ -49,7 +50,9 @@ const isAdmin = middleware(({ ctx, next }) => {
 const auditAdminMutation = middleware(async ({ ctx, path, type, input, next }) => {
   const result = await next();
   const unchangedOrderEdit = result.ok && ['order.update','update'].includes(path) && (result.data as any)?.unchanged === true;
-  if (type === "mutation" && result.ok && ctx.user?.role === "admin" && !unchangedOrderEdit) {
+  const screenshotReadOnly = ['screenshotOrder.customers','screenshotOrder.quote','screenshotOrder.extract'].includes(path)
+    || (ctx.screenshotOrder?.mode === 'preview');
+  if (type === "mutation" && result.ok && ctx.user?.role === "admin" && !unchangedOrderEdit && !screenshotReadOnly) {
     // Storage problems must never turn a successful business action into a failed one.
     // The journal stores procedure paths and safe field names, never submitted values.
     void recordAdminMutation({

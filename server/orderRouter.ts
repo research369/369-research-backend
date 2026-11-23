@@ -21,6 +21,7 @@ import { assertManualSaleRole } from "./manualSaleAuthorization.js";
 import { reassignOrderCustomer } from "./orderCustomerAssignmentService.js";
 import {applyStockMovement} from "./stockMovementService.js";
 import {orderHash} from "./jarvyOrderContract.js";
+import { screenshotHash } from "./screenshotOrderContract.js";
 import { eq, desc, inArray, and, or, getTableColumns } from "drizzle-orm";
 import { router, publicProcedure, adminProcedure, scopedOperationsReadProcedure, scopedOrderCleanupProcedure } from "./trpc.js";
 import { getDb, getPool } from "./db.js";
@@ -271,6 +272,7 @@ export const orderRouter = router({
       // Reject foreign public-code terms before lookup, pricing or any writes.
       assertNoMixedPartnerOrderInput(input);
       assertManualSaleRole(input.orderSource, ctx.user);
+      if (ctx.screenshotOrder && (ctx.user?.role !== 'admin' || input.orderSource !== 'wawi_manual' || input.storeKey !== '369research' || input.stockOverride || input.partnerCode || input.partnerNumber || input.kwkCode || input.creditUsed || input.kwkCreditUsed || input.qrAttributionToken || input.sendOrderConfirmation || input.freeBaseShippingRequested)) throw Error('SCREENSHOT_ORDER_SCOPE');
       const db = await getDb();
       if (!db) throw new Error("Database not available");
       const normalCheckoutKey = input.storeKey === '369research' && !ctx.jarvyOrder ? input.checkoutIdempotencyKey : undefined;
@@ -290,7 +292,7 @@ export const orderRouter = router({
         && input.shippingCountry.trim().toLowerCase() === "abholung";
       // The manual workflow records discounts in discountBreakdown; labels such
       // as "25%" or "Kostenloser Versand" must never enter promo-code lookup.
-      input.discountCode = normalizeDiscountCodeForOrderSource(input.orderSource, input.discountCode);
+      input.discountCode = ctx.screenshotOrder ? input.discountCode?.trim().toUpperCase() || null : normalizeDiscountCodeForOrderSource(input.orderSource, input.discountCode);
 
       // Public checkout may only attach to a customer through one unique, real
       // contact identifier. No name or address is ever used as an identity key.
@@ -831,7 +833,7 @@ export const orderRouter = router({
         const authoritativeWawiPricing = calculateAuthoritativeWawiManualOrder({
           subtotal: input.subtotal,
           shipping: input.shipping,
-          submittedDiscount: strictExclusiveCampaign ? submittedAutomaticGlobalDiscount : input.discount,
+          submittedDiscount: strictExclusiveCampaign ? submittedAutomaticGlobalDiscount : ctx.screenshotOrder && resolvedPromoCode ? authoritativePromoDiscount : input.discount,
           submittedAutomaticGlobalDiscount,
           authoritativeAutomaticGlobalDiscount: automaticGlobalDiscountAmount,
         });
@@ -993,7 +995,7 @@ export const orderRouter = router({
 
       // ── Hilfsfunktion: Checkout-Fehler als Backup speichern + E-Mail an Admin ──
       const saveFailedOrder = async (errorMsg: string, attemptedOrderId?: string) => {
-        if(ctx.jarvyOrder)return;
+        if(ctx.jarvyOrder || ctx.screenshotOrder)return;
         try {
           const pool = await getPool();
           if (pool) {
@@ -1063,6 +1065,13 @@ export const orderRouter = router({
         throw new Error(CUSTOMER_ORDER_BLOCKED_CODE);
       }
 
+      if (ctx.screenshotOrder) {
+        const preview = {input,discountBreakdown};
+        const hash = screenshotHash({input:{...input,checkoutIdempotencyKey:undefined},discountBreakdown});
+        if (ctx.screenshotOrder.mode === 'preview') return {screenshotPreview:preview,hash};
+        if (hash !== ctx.screenshotOrder.expectedHash) throw Error('QUOTE_CHANGED');
+      }
+
       // The dedicated Jarvy endpoint uses this same validation/pricing path.
       // Preview stops before sequence allocation, stock/order writes and messages.
       if (ctx.jarvyOrder) {
@@ -1120,6 +1129,7 @@ export const orderRouter = router({
           orderId = rows.rows[0].order_id;
         }
       } catch (err) {
+        if (ctx.screenshotOrder) throw Error('SCREENSHOT_ORDER_REFERENCE_UNAVAILABLE');
         console.warn('[Orders] Failed to generate sequential order ID, using fallback:', err);
       }
 
@@ -1127,7 +1137,7 @@ export const orderRouter = router({
 
       // Ein bewusst übergangener Hinweis wird sofort mit der finalen Bestellnummer
       // festgeschrieben. Der Nachweis enthält keine änderbare UI-Aktion.
-      if (addressWarningNeedsConfirmation) {
+      if (addressWarningNeedsConfirmation && !ctx.screenshotOrder) {
         await persistAddressValidation({
           input: input.customer,
           result: addressValidation,
@@ -1233,6 +1243,7 @@ export const orderRouter = router({
         const receipt = await readCheckoutReceipt(tx,normalCheckoutKey,normalFingerprint!);
         if (receipt) return receipt;
       }
+      if (ctx.screenshotOrder?.mode === 'execute') await ctx.screenshotOrder.validateInTransaction(tx);
       if(ctx.jarvyOrder?.mode==='execute') {
         const actor=await db.execute(sql`SELECT id FROM users WHERE id=${ctx.user!.id} AND role='admin' FOR SHARE`);
         if(!actor.rows.length)throw new Error('JARVY_ACTOR_REVOKED');
@@ -1330,7 +1341,7 @@ export const orderRouter = router({
       const ambiguousVariantItems: string[] = [];
 
       // Smart Substitution: prüfen ob Feature aktiv ist
-      const substitutionActive = !ctx.jarvyOrder && await isSubstitutionEnabled();
+      const substitutionActive = !ctx.jarvyOrder && !ctx.screenshotOrder && await isSubstitutionEnabled();
 
       // Helper: find articles matching a shop item by direct variant SKU or canonical
       // shop product ID plus dosage. Bundle items carry the selected variant SKU; it must
@@ -1345,7 +1356,7 @@ export const orderRouter = router({
       const dosageMatches = (article: typeof allArticlesForCheck[number], dosageNorm: string): boolean =>
         !dosageNorm || getArticleDosage(article) === dosageNorm;
       const findMatchingArticles = (item: { name: string; dosage?: string; shopProductId?: string }, allArts: typeof allArticlesForCheck) => {
-        if(ctx.jarvyOrder) {
+        if(ctx.jarvyOrder || ctx.screenshotOrder) {
           const exact=allArts.filter(a=>a.sku===item.shopProductId);
           if(exact.length!==1||exact[0].name!==item.name)throw new Error('JARVY_ARTICLE_CHANGED');
           return exact;
@@ -1442,7 +1453,7 @@ export const orderRouter = router({
           console.warn(`[Orders] Master-Admin stock override for order ${orderId}:`, { outOfStockItems, admin: ctx.user?.username, reason: overrideReason });
         } else {
           const errMsg = `Folgende Artikel sind nicht mehr verfügbar: ${outOfStockItems.join(', ')}. Bitte entferne sie aus dem Warenkorb.`;
-          console.warn(`[Orders] Stock check failed for order ${orderId}:`, outOfStockItems);
+          if (!ctx.screenshotOrder) console.warn(`[Orders] Stock check failed for order ${orderId}:`, outOfStockItems);
           await saveFailedOrder(errMsg, orderId);
           throw new Error(errMsg);
         }
@@ -1513,7 +1524,7 @@ export const orderRouter = router({
               await applyStockMovement(db,{articleId:article.id,sku:article.sku,expectedStock:article.stock??0,change:-deduct,type:'verkauf',reason:`Bestandsabzug für Bestellung ${orderId}`,orderId,actor:'system',...(ctx.jarvyOrder?{expectedPrice:item.price}:{})});
               article.stock=newStock;
               remainingToDeduct -= deduct;
-              console.log(`[Orders] Stock deducted: ${article.name} ${newStock+deduct} → ${newStock} (order ${orderId})`);
+              if (!ctx.screenshotOrder) console.log(`[Orders] Stock deducted: ${article.name} ${newStock+deduct} → ${newStock} (order ${orderId})`);
             }
           }
           if (remainingToDeduct > 0 && !stockOverrideAuthorized) throw Error('ORDER_STOCK_DEMAND_NOT_COVERED');
@@ -1798,7 +1809,7 @@ export const orderRouter = router({
         if (!found) throw new Error("Kunde nicht gefunden");
         if (found) {
           existingCustomer = found;
-          console.log(`[Customers] Using manually matched customer ID=${input.existingCustomerId} (${found.name})`);
+          if (!ctx.screenshotOrder) console.log(`[Customers] Using manually matched customer ID=${input.existingCustomerId} (${found.name})`);
         }
       } else if (transactionCustomerDataChangeResolution?.kind === "matched") {
         existingCustomer = transactionCustomerDataChangeResolution.customer;
@@ -1834,7 +1845,7 @@ export const orderRouter = router({
             changedFields: confirmedPublicChange.changedFields,
           });
           console.log(`[CustomerDataChange] Confirmed order snapshot recorded in order ${orderId}; profile unchanged`);
-        } else if (isAuthenticatedWawiManualSale && !ctx.jarvyOrder) {
+        } else if (isAuthenticatedWawiManualSale && !ctx.jarvyOrder && !ctx.screenshotOrder) {
           // The established authenticated WaWi workflow remains unchanged. The
           // public shop path above is deliberately the only changed behavior.
           const addressBoundOptionalFields = resolveAddressBoundOptionalFields(existingCustomer, input.customer);
@@ -1864,7 +1875,7 @@ export const orderRouter = router({
           // Guest language/address preferences belong to the new order only.
           // Even a no-change checkout cannot alter an existing profile.
         }
-        console.log(`[Customers] Linked order ${orderId} to existing customer #${existingCustomer.customerNumber} (${fullName})`);
+        if (!ctx.screenshotOrder) console.log(`[Customers] Linked order ${orderId} to existing customer #${existingCustomer.customerNumber} (${fullName})`);
       } else {
           // Generate next customer number (starting at 1210)
           const nextNum = await nextCustomerNumber(db);
@@ -1903,7 +1914,7 @@ export const orderRouter = router({
 
           customerId = newCustomer.id;
           customerIntegrityTrigger = "order_customer_created";
-          console.log(`[Customers] Created new customer #${nextNum} (${fullName}) for order ${orderId}`);
+          if (!ctx.screenshotOrder) console.log(`[Customers] Created new customer #${nextNum} (${fullName}) for order ${orderId}`);
       }
 
       // Link order to customer
@@ -1928,20 +1939,29 @@ export const orderRouter = router({
       const persistedMessage = await readPersistedOrderMessageData(tx, orderId);
       persistedConfirmationData = persistedMessage.emailData;
       const response = {
-        orderSnapshot: persistedMessage.orderSnapshot,
+        ...(ctx.screenshotOrder ? {screenshotOrder: true, screenshotActorId:ctx.user!.id, screenshotDraftId:ctx.screenshotOrder.mode==='execute'?ctx.screenshotOrder.draftId:null, orderSnapshot: {...persistedMessage.orderSnapshot, customer: persistedMessage.emailData.customer, customerId, paymentMethod:input.paymentMethod}} : {}),
+        ...(!ctx.screenshotOrder ? {orderSnapshot: persistedMessage.orderSnapshot} : {}),
         success:true,orderId,paymentInstructions:null,externalOrderReference:externalOrderReference || undefined,
         subtotal:input.subtotal,discount:input.discount,kwkDiscount:input.kwkDiscount || 0,
         kwkCreditUsed:input.kwkCreditUsed || 0,shipping:input.shipping,total:input.total,
       };
       if (normalCheckoutKey) await persistCheckoutReceipt(tx,normalCheckoutKey,normalFingerprint!,response);
       await queueOrderTask(tx,orderId,'customer_metrics');
-      if (customerIntegrityTrigger) await queueOrderTask(tx,orderId,'customer_duplicate_review');
+      if (customerIntegrityTrigger && !ctx.screenshotOrder) await queueOrderTask(tx,orderId,'customer_duplicate_review');
       await queueOrderTask(tx,orderId,'payment_instructions');
       if (shouldSendConfirmation) await queueOrderTask(tx,orderId,'order_confirmation');
+      if (ctx.screenshotOrder && addressWarningNeedsConfirmation) await queueOrderTask(tx,orderId,'screenshot_address_evidence');
       return response;
       });
       // Another concurrent attempt committed the receipt: no second communication.
       if (transactionResponse.orderId !== orderId) return transactionResponse;
+      // Screenshot checks must complete before any write, including the standalone
+      // address evidence service. Recording evidence is post-commit and never email.
+      if (ctx.screenshotOrder && addressWarningNeedsConfirmation) {
+        await runOrderTask(db,orderId,'screenshot_address_evidence',async () => {
+          await persistAddressValidation({input:input.customer,result:addressValidation,context:'manual_order',orderId,customerId,overrideConfirmed:true,confirmedBy:ctx.user?.username || 'admin'});
+        });
+      }
       await runOrderTask(db,orderId,'customer_metrics',async () => {
         if (customerId) await refreshCustomerOrderMetrics(customerId);
       });

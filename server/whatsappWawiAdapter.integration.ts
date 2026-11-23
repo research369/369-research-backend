@@ -10,11 +10,33 @@ import { WhatsappWawiAdapter } from "./whatsappWawiAdapter.js";
 import { WhatsappOrderService } from "./whatsappOrderService.js";
 import { IsolatedPhase1Store } from "./whatsappPhase1Store.js";
 import { nextCustomerNumber } from "./customerNumberService.js";
+import { getBlockIdentifiers, ensureCustomerOrderBlockSchema, activateCustomerOrderBlock } from "./customerOrderBlockService.js";
+import { closeDb } from "./db.js";
+import {
+  toReleasedBankTransferInstructions,
+  type BankTransferPaymentInstructionsConfig,
+} from "./paymentInstructionsConfig.js";
+const wiseConfig: BankTransferPaymentInstructionsConfig = {
+  enabled: true,
+  checkoutLabelDe: "Wise", checkoutLabelEn: "Wise",
+  checkoutHintDe: "Wise", checkoutHintEn: "Wise",
+  accounts: [{ id: "wise-test", labelDe: "Wise Test", labelEn: "Wise Test",
+    accountHolder: "ISOLATED TEST", iban: "DE00000000000000000000", bic: "TESTDE00" }],
+};
 const config = {
-  host: "127.0.0.1",
-  port: 55439,
+  host: process.env.WOP_TEST_DB_HOST || "/tmp/369-whatsapp-hardening-pg/socket",
+  port: Number(process.env.WOP_TEST_DB_PORT || 55439),
   user: process.env.WOP_TEST_DB_USER || process.env.USER,
 };
+if (process.env.NODE_ENV !== "test" || !config.host.startsWith("/"))
+  throw Error("isolated_unix_test_environment_required");
+const helperUrl = new URL(process.env.DATABASE_URL || "postgresql://invalid/invalid");
+if (helperUrl.hostname || helperUrl.pathname !== "/whatsapp_phase1_test_native" ||
+    helperUrl.searchParams.get("host") !== config.host ||
+    Number(helperUrl.searchParams.get("port") || 5432) !== config.port)
+  throw Error("isolated_helper_database_required");
+const externalFetch = globalThis.fetch;
+globalThis.fetch = async () => { throw Error("external_requests_forbidden"); };
 const pool = new Pool({
   ...config,
   database: "whatsapp_phase1_test_native",
@@ -40,6 +62,7 @@ test.before(async () => {
     { encoding: "utf8" },
   );
   await pool.query(schema);
+  await ensureCustomerOrderBlockSchema();
   await pool.query(
     "CREATE SEQUENCE native_test_order_seq; CREATE FUNCTION next_order_id() RETURNS text LANGUAGE sql AS $$SELECT 'TEST-NATIVE-'||nextval('native_test_order_seq')::text$$",
   );
@@ -56,11 +79,7 @@ test.before(async () => {
   );
   adapter = new WhatsappWawiAdapter(
     pool,
-    {
-      recipient: "ISOLATED TEST",
-      iban: "DE00000000000000000000",
-      bic: "TESTDE00",
-    },
+    async () => toReleasedBankTransferInstructions(wiseConfig),
     new Set(["ALPHA", "BETA"]),
     "reference-test-key-".repeat(4),
   );
@@ -75,11 +94,14 @@ test.beforeEach(async () => {
   await pool.query(
     "TRUNCATE wop_executions,wop_intents,wop_quotes,wop_test_orders,whatsapp_order_provenance,stock_history,order_items,orders,customers,articles,promo_codes CASCADE",
   );
+  await pool.query("TRUNCATE partner_codes,partners CASCADE; DELETE FROM shop_settings WHERE key IN ('global_automatic_discount','bank_transfer_payment_instructions')");
   await pool.query(
     `INSERT INTO articles(sku,name,shop_product_id,selling_price,stock,shop_visible,variants) VALUES('ALPHA','Produkt Alpha','alpha',70,10,1,'[{"dosage":"10 mg","price":70}]'),('BETA','Produkt Beta','beta',50,10,1,'[{"dosage":"20 mg","price":50}]'); UPDATE articles SET variants=jsonb_set(variants,'{0,inventoryArticleId}',to_jsonb(id)); INSERT INTO promo_codes(code,percentage,max_uses) VALUES('TEST10',10,1)`,
   );
 });
 test.after(async () => {
+  globalThis.fetch = externalFetch;
+  await closeDb();
   await pool.end();
 });
 async function request(sku = "ALPHA", extra: any = {}) {
@@ -456,4 +478,190 @@ test("WhatsApp-Quote respektiert nicht kombinierbare Codes und globalen Freivers
       "DELETE FROM shop_settings WHERE key='global_automatic_discount'",
     );
   }
+});
+
+async function nativeState() {
+  const counts: Record<string, number> = {};
+  for (const table of ["customers", "orders", "order_items", "stock_history", "whatsapp_order_provenance", "wop_quotes", "wop_executions", "wop_intents"])
+    counts[table] = Number((await pool.query(`SELECT count(*) AS n FROM ${table}`)).rows[0].n);
+  return {
+    counts,
+    stock: (await pool.query("SELECT sku,stock FROM articles ORDER BY sku")).rows,
+    promos: (await pool.query("SELECT code,current_uses FROM promo_codes ORDER BY code")).rows,
+    customerSequence: (await pool.query("SELECT last_value,is_called FROM customer_number_seq")).rows,
+    orderSequence: (await pool.query("SELECT last_value,is_called FROM native_test_order_seq")).rows,
+  };
+}
+async function blockContact(customer: { email?: string; phone?: string }) {
+  const { rows: [row] } = await pool.query("INSERT INTO customers(customer_number,name) VALUES($1,'Explicit blocked identity') RETURNING id", ["BLOCK-" + randomUUID().slice(0, 12)]);
+  return activateCustomerOrderBlock({ customerId: row.id, ...customer, reason: "isolated test", actor: "test" });
+}
+async function campaign(extra: Record<string, unknown> = {}) {
+  await pool.query("INSERT INTO shop_settings(key,value) VALUES('global_automatic_discount',$1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [JSON.stringify({
+    enabled: true, percentage: 20, startsAt: null,
+    expiresAt: new Date(Date.now() + 3600000).toISOString(),
+    labelDe: "Isolated", labelEn: "Isolated", ...extra,
+  })]);
+}
+const bookContext = () => ({ execution_id: randomUUID(), quote_id: randomUUID(), quote_revision: 1,
+  quote_hash: "a".repeat(64), conversation: "isolated", owner: "1234" });
+
+test("Aktive Kontakt-Sperre vor Preview und direkt in book: keinerlei Writes oder Sequenzverbrauch", async () => {
+  const r = await request("ALPHA", { promotion: { mode: "none" } });
+  const priced = await adapter.quote(r as any, ["ALPHA"]);
+  await blockContact({ email: r.customer.email.toUpperCase(), phone: "0170 0000000" });
+  const before = await nativeState();
+  await assert.rejects(() => service.quote("phase1-bot", r), /CUSTOMER_ORDER_BLOCKED/);
+  const c = await pool.connect();
+  try {
+    await c.query("BEGIN");
+    await assert.rejects(() => adapter.book(c, r as any, priced, bookContext()), /CUSTOMER_ORDER_BLOCKED/);
+    await c.query("ROLLBACK");
+  } finally { c.release(); }
+  assert.deepEqual(await nativeState(), before);
+});
+
+test("Nach Quote aktivierte Kundensperre wird bei Execute unter kanonischen Locks erneut geprüft", async () => {
+  const r = await request("ALPHA", { promotion: { mode: "none" } });
+  const e = await ready(r);
+  await blockContact({ phone: "00491700000000" });
+  const before = await nativeState();
+  await assert.rejects(() => service.execute("phase1-bot", e), /CUSTOMER_ORDER_BLOCKED/);
+  assert.deepEqual(await nativeState(), before);
+});
+
+test("Book wartet auf die tatsächlichen Aktivierungs-Keys und sieht eine gleichzeitig aktivierte Sperre", async () => {
+  const r = await request("ALPHA", { promotion: { mode: "none" } });
+  const priced = await adapter.quote(r as any, ["ALPHA"]);
+  const { rows: [customer] } = await pool.query("INSERT INTO customers(customer_number,name) VALUES('LOCK-BLOCK','Test') RETURNING id");
+  const ids = getBlockIdentifiers(r.customer);
+  const blocker = await pool.connect(), booking = await pool.connect();
+  const before = await nativeState();
+  try {
+    await blocker.query("BEGIN");
+    // Exactly the hashtext and key contract used by activateCustomerOrderBlock.
+    await blocker.query("SELECT pg_advisory_xact_lock(hashtext($1))", ["customer-order-block:email:" + ids.emailNormalized]);
+    await blocker.query("SELECT pg_advisory_xact_lock(hashtext($1))", ["customer-order-block:phone:" + ids.phoneNormalized]);
+    await booking.query("BEGIN; SET LOCAL statement_timeout='3000ms'");
+    let settled = false;
+    const attempt = adapter.book(booking, r as any, priced, bookContext()).then(
+      () => { settled = true; return null; }, (e: Error) => { settled = true; return e; });
+    let observed = false;
+    for (let i = 0; i < 50; i++) {
+      const waiting = await pool.query("SELECT wait_event FROM pg_stat_activity WHERE pid=$1", [(booking as any).processID]);
+      if (waiting.rows[0]?.wait_event === "advisory") { observed = true; break; }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(observed, true, "book must wait on the canonical block lock");
+    assert.equal(settled, false);
+    await blocker.query("INSERT INTO customer_order_blocks(customer_id,reason,email_normalized,phone_normalized,created_by) VALUES($1,'isolated',$2,$3,'test')", [customer.id, ids.emailNormalized, ids.phoneNormalized]);
+    await blocker.query("COMMIT");
+    assert.match((await attempt)?.message || "", /CUSTOMER_ORDER_BLOCKED/);
+    await booking.query("ROLLBACK");
+  } finally {
+    await blocker.query("ROLLBACK"); await booking.query("ROLLBACK");
+    blocker.release(); booking.release();
+  }
+  assert.deepEqual(await nativeState(), before);
+});
+
+test("Kein Namensmatching: fremde Sperre und widerrufene Kontakt-Sperre erlauben Preview", async () => {
+  const r = await request("ALPHA", { promotion: { mode: "none" } });
+  await blockContact({ email: "other@example.invalid", phone: "+491799999999" });
+  assert.equal((await service.quote("phase1-bot", r)).customer_resolution.status, "new");
+  await blockContact(r.customer);
+  await pool.query("UPDATE customer_order_blocks SET status='revoked'");
+  assert.equal((await service.quote("phase1-bot", r)).customer_resolution.status, "new");
+});
+
+test("Strict exclusive: expliziter Code vor Preview abgelehnt, none und deaktivierte/Legacy-Aktion bleiben gültig", async () => {
+  const r = await request();
+  await campaign({ exclusiveCampaign: true });
+  const before = await nativeState();
+  await assert.rejects(() => service.quote("phase1-bot", r), /Diese Aktion ist exklusiv/);
+  assert.deepEqual(await nativeState(), before);
+  assert.equal((await service.quote("phase1-bot", { ...r, promotion: { mode: "none" } })).order_summary.discount_total_cents, 1400);
+  for (const extra of [{ exclusiveCampaign: true, enabled: false }, { exclusiveCampaign: true, expiresAt: new Date(Date.now() - 1000).toISOString() }, { exclusiveCampaign: false }]) {
+    await campaign(extra);
+    const q = await service.quote("phase1-bot", { ...r, draft_id: randomUUID() });
+    assert.equal(q.promotion_selection.selected_code, "TEST10");
+  }
+});
+
+test("Zwischen Quote und Execute aktivierte Strict-Aktion verweigert ohne native Writes oder Sequenzen", async () => {
+  const e = await ready(await request());
+  await campaign({ exclusiveCampaign: true });
+  const before = await nativeState();
+  await assert.rejects(() => service.execute("phase1-bot", e), /Diese Aktion ist exklusiv/);
+  assert.deepEqual(await nativeState(), before);
+});
+
+test("Partner-/Creator-Kollisionen sind auch inaktiven und anders geschriebenen Codes nicht als Promo zugänglich", async () => {
+  const r = await request();
+  await pool.query("INSERT INTO partners(name,code,partner_number,is_active) VALUES('Isolated','test10','TEST-PARTNER',0)");
+  const before = await nativeState();
+  await assert.rejects(() => service.quote("phase1-bot", r), /promotion_not_eligible/);
+  assert.deepEqual(await nativeState(), before);
+  await pool.query("DELETE FROM partners; INSERT INTO partner_codes(partner_id,display_code,code_normalized,commission_percent,customer_discount_percent,is_active) VALUES(999,'TeSt10','test10',10,10,false)");
+  await assert.rejects(() => service.quote("phase1-bot", r), /promotion_not_eligible/);
+  await pool.query("DELETE FROM partner_codes");
+  const e = await ready(r);
+  await pool.query("INSERT INTO partner_codes(partner_id,display_code,code_normalized,commission_percent,customer_discount_percent) VALUES(999,'TEST10','TEST10',10,10)");
+  const beforeExecute = await nativeState();
+  await assert.rejects(() => service.execute("phase1-bot", e), /promotion_not_eligible/);
+  assert.deepEqual(await nativeState(), beforeExecute);
+});
+
+test("Promo-Scope: private Beschreibungen und ungeprüfte Neukunden-/Kundenlimitberechtigung fail closed", async () => {
+  const r = await request();
+  for (const description of ["Follow-up", "persönlich", "individuell", "Bestellung", "Creator", "Partner", "intern", "Testaktion", "Neukunden", 'Public | {"maxPerCustomer":1}']) {
+    await pool.query("UPDATE promo_codes SET description=$1", [description]);
+    const before = await nativeState();
+    await assert.rejects(() => service.quote("phase1-bot", r), /promotion_not_eligible/, description);
+    assert.deepEqual(await nativeState(), before);
+  }
+  await pool.query("UPDATE promo_codes SET description='Neukunden'");
+  await pool.query("INSERT INTO customers(customer_number,name,email,phone,total_orders) VALUES('RETURNING','Test','native-test@example.invalid','+491700000000',3)");
+  await assert.rejects(() => service.quote("phase1-bot", r), /promotion_not_eligible/);
+});
+
+test("Wise: Default nutzt die zentrale freigegebene Quelle; fehlend, deaktiviert, nicht-Wise und mehrdeutig ohne Writes", async () => {
+  const central = new WhatsappWawiAdapter(pool, undefined, new Set(["ALPHA"]), "r".repeat(64));
+  const centralService = new WhatsappOrderService(await IsolatedPhase1Store.connect(pool), central, "s".repeat(64), { user: "1234", chat: "1234" });
+  const e = await ready(await request("ALPHA", { promotion: { mode: "none" } }));
+  const nonWise = { ...wiseConfig.accounts[0], id: "other", labelDe: "Other", labelEn: "Other" };
+  for (const config of [null, { ...wiseConfig, enabled: false }, { ...wiseConfig, accounts: [nonWise] }, { ...wiseConfig, accounts: [wiseConfig.accounts[0], { ...wiseConfig.accounts[0], id: "wise-two" }] }]) {
+    await pool.query("DELETE FROM shop_settings WHERE key='bank_transfer_payment_instructions'");
+    if (config) await pool.query("INSERT INTO shop_settings(key,value) VALUES('bank_transfer_payment_instructions',$1)", [JSON.stringify(config)]);
+    const before = await nativeState();
+    await assert.rejects(() => centralService.execute("phase1-bot", e), /payment_configuration_required/);
+    assert.deepEqual(await nativeState(), before);
+  }
+  await pool.query("UPDATE shop_settings SET value=$1 WHERE key='bank_transfer_payment_instructions'", [JSON.stringify(wiseConfig)]);
+  const result = await centralService.execute("phase1-bot", e);
+  assert.deepEqual(result.payment.instructions, { recipient: "ISOLATED TEST", iban: wiseConfig.accounts[0].iban, bic: "TESTDE00" });
+  assert.deepEqual(await centralService.execute("phase1-bot", e), result);
+  assert.equal(result.confirmation.email, "not_requested");
+});
+
+test("Wise-Injection: keine freien Strings, keine Production-Injection, keine FremdDB-Injection", async () => {
+  assert.throws(() => new WhatsappWawiAdapter(pool, { recipient: "Arbitrary" } as any, new Set(), "r".repeat(64)), /isolated_payment_source_required/);
+  const prior = process.env.NODE_ENV;
+  try {
+    process.env.NODE_ENV = "production";
+    assert.throws(() => new WhatsappWawiAdapter(pool, async () => toReleasedBankTransferInstructions(wiseConfig), new Set(), "r".repeat(64)), /isolated_payment_source_required/);
+  } finally { process.env.NODE_ENV = prior; }
+  const invalid = new WhatsappWawiAdapter(pool, async () => ({ accountCount: 1, accounts: [{ ...wiseConfig.accounts[0], id: "other", labelDe: "Other", labelEn: "Other" }] }), new Set(["ALPHA"]), "r".repeat(64));
+  const r = await request("ALPHA", { promotion: { mode: "none" } });
+  const priced = await adapter.quote(r as any, ["ALPHA"]);
+  const c = await pool.connect();
+  try {
+    await c.query("BEGIN");
+    const before = await nativeState();
+    await assert.rejects(() => invalid.book(c, r as any, priced, bookContext()), /payment_configuration_required/);
+    const foreign = new WhatsappWawiAdapter({ query: async () => ({ rows: [{ db: "forbidden" }] }) } as any, async () => toReleasedBankTransferInstructions(wiseConfig), new Set(), "r".repeat(64));
+    await assert.rejects(() => foreign.book(c, r as any, priced, bookContext()), /isolated_database_required/);
+    await c.query("ROLLBACK");
+    assert.deepEqual(await nativeState(), before);
+  } finally { c.release(); }
 });

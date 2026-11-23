@@ -6,6 +6,15 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { applyStockMovement } from "./stockMovementService.js";
 import { nextCustomerNumber } from "./customerNumberService.js";
 import { projectOffers, type OfferArticle } from "./pepgptOffers.js";
+import { assertNoActiveCheckoutBlock } from "./customerOrderBlockService.js";
+import { assertExclusiveCampaignInput } from "./exclusiveCampaignPolicy.js";
+import {
+  getReleasedBankTransferInstructions,
+  parseBankTransferPaymentInstructions,
+  toReleasedBankTransferInstructions,
+  type ReleasedBankTransferInstructions,
+} from "./paymentInstructionsConfig.js";
+import { IsolatedPhase1Store } from "./whatsappPhase1Store.js";
 import { projectDiscountRules } from "./guardianDiscounts.js";
 import {
   calculateAutomaticGlobalDiscount,
@@ -42,13 +51,32 @@ type Selection = CatalogItem & {
 export class WhatsappWawiAdapter implements Phase1Backend {
   constructor(
     private pool: Pool,
-    private bank: { recipient: string; iban: string; bic: string },
+    private testPaymentSource: (() => Promise<ReleasedBankTransferInstructions | null>) | undefined,
     private allowedSkus: ReadonlySet<string>,
     private referenceKey: string,
   ) {
     if (referenceKey.length < 40) throw Error("reference_key_required");
-    if (!bank.recipient || !bank.iban || !bank.bic)
+    if (testPaymentSource !== undefined &&
+      (process.env.NODE_ENV !== "test" || typeof testPaymentSource !== "function"))
+      throw Error("isolated_payment_source_required");
+  }
+  private async bankInstructions() {
+    if (this.testPaymentSource) {
+      if (process.env.NODE_ENV !== "test") throw Error("isolated_payment_source_required");
+      await IsolatedPhase1Store.connect(this.pool);
+    }
+    // Production always reads the same released Wise source as communication templates.
+    const released = await (this.testPaymentSource ?? getReleasedBankTransferInstructions)();
+    const wise = toReleasedBankTransferInstructions(parseBankTransferPaymentInstructions(JSON.stringify({
+      enabled: true,
+      checkoutLabelDe: "Wise", checkoutLabelEn: "Wise",
+      checkoutHintDe: "Wise", checkoutHintEn: "Wise",
+      accounts: released?.accounts,
+    })));
+    if (!wise || released?.accountCount !== 1 || released.accounts.length !== 1)
       throw Error("payment_configuration_required");
+    const account = wise.accounts[0];
+    return { recipient: account.accountHolder, iban: account.iban, bic: account.bic };
   }
   private async selection(client?: PoolClient): Promise<Selection[]> {
     const db = client ?? this.pool;
@@ -145,6 +173,8 @@ export class WhatsappWawiAdapter implements Phase1Backend {
     client?: PoolClient,
   ): Promise<PricedSnapshot> {
     const db = client ?? this.pool;
+    // Fast preview refusal; execute repeats this with transaction-scoped canonical locks.
+    await assertNoActiveCheckoutBlock(drizzle(db), request.customer);
     if (client) {
       await client.query(
         "SELECT id FROM articles WHERE sku=ANY($1::text[]) OR shop_product_id IN (SELECT shop_product_id FROM articles WHERE sku=ANY($1::text[])) ORDER BY id FOR UPDATE",
@@ -183,6 +213,9 @@ export class WhatsappWawiAdapter implements Phase1Backend {
       parseGlobalAutomaticDiscountConfig(setting ?? null),
       new Date(),
     );
+    assertExclusiveCampaignInput(global, {
+      promotionCode: request.promotion.mode === "explicit_code" ? request.promotion.code : null,
+    });
     const globalBenefits = resolveGlobalAutomaticDiscountBenefits(global, {
       merchandiseSubtotal: subtotal,
       shippingRegion: resolveShippingRegion(request.delivery.country_code),
@@ -204,7 +237,7 @@ export class WhatsappWawiAdapter implements Phase1Backend {
     if (request.promotion.mode === "explicit_code") {
       const rows = (
         await db.query(
-          `SELECT p.* FROM promo_codes p WHERE upper(p.code)=$1 AND NOT EXISTS(SELECT 1 FROM customer_promo_assignments a WHERE a.promo_code_id=p.id) AND NOT EXISTS(SELECT 1 FROM sales_followups f WHERE f.promo_code_id=p.id OR f.discount_code=p.code) AND NOT EXISTS(SELECT 1 FROM personal_promo_expiry_reminders e WHERE e.promo_code_id=p.id)`,
+          `SELECT p.* FROM promo_codes p WHERE upper(p.code)=$1 AND NOT EXISTS(SELECT 1 FROM customer_promo_assignments a WHERE a.promo_code_id=p.id) AND NOT EXISTS(SELECT 1 FROM sales_followups f WHERE f.promo_code_id=p.id OR f.discount_code=p.code) AND NOT EXISTS(SELECT 1 FROM personal_promo_expiry_reminders e WHERE e.promo_code_id=p.id) AND NOT EXISTS(SELECT 1 FROM partner_codes pc WHERE upper(pc.code_normalized)=upper(p.code)) AND NOT EXISTS(SELECT 1 FROM partners pt WHERE upper(pt.code)=upper(p.code)) AND coalesce(p.description,'') !~* '(follow.?up|persönlich|individuell|bestellung|creator|partner|intern|test)'`,
           [request.promotion.code],
         )
       ).rows;
@@ -214,6 +247,8 @@ export class WhatsappWawiAdapter implements Phase1Backend {
       if (
         !rule.active ||
         rule.customer_limit !== 0 ||
+        // As in PepGPT, this is conditional eligibility, never proof of redemption rights.
+        /neukund/i.test(String(promo.description ?? "")) ||
         subtotal < rule.min_order
       )
         throw Error("promotion_not_eligible");
@@ -307,6 +342,10 @@ export class WhatsappWawiAdapter implements Phase1Backend {
       owner: string;
     },
   ) {
+    // Same helper, normalization and hashtext keys as block activation and normal checkout.
+    // Must precede customer/order sequence allocation and all native writes.
+    await assertNoActiveCheckoutBlock(drizzle(client), r.customer);
+    const bank = await this.bankInstructions();
     const identities = [
       r.customer.email ? "e:" + r.customer.email.trim().toLowerCase() : "",
       r.customer.phone
@@ -473,7 +512,7 @@ export class WhatsappWawiAdapter implements Phase1Backend {
         method: "bank_transfer",
         amount_cents: summary.total_cents,
         payment_reference: orderId,
-        instructions: this.bank,
+        instructions: bank,
       },
       confirmation: {
         email: "not_requested",
