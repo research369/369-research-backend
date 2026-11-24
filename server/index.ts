@@ -1,3 +1,4 @@
+import {whatsappScreenshotRouter} from './whatsappScreenshotRouter.js';
 import {ensurePriorityOrderIntegritySchema,isPriorityOrderIntegrityReady} from './priorityOrderIntegrity.js';
 import { ensureAccountSecuritySchema, isAccountSecuritySchemaReady } from "./accountSecuritySchema.js";
 import {customerCreationActivity} from './customerCreationMaintenance.js';
@@ -174,6 +175,7 @@ app.use(qrRedirectRouter);
 app.use("/api/jarvy-read", jarvyReadRouter);
 app.use('/api/guardian', guardianInventoryRouter);
 app.use('/api/pepgpt-read', pepgptOffersRouter);
+app.use('/api/whatsapp-screenshot', whatsappScreenshotRouter);
 app.use('/api/operations', operationsRouter);
 app.use("/api/jarvy-orders", jarvyOrderRouter);
 
