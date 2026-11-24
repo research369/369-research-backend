@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomUUID } from 'node:crypto';
-import { screenshotHash,screenshotIntentKey,signScreenshotQuote,verifyScreenshotQuote,screenshotQuoteInputSchema,screenshotDiscountSchema } from './screenshotOrderContract.js';
+import { screenshotHash,screenshotIntentKey,signScreenshotQuote,verifyScreenshotQuote,screenshotQuoteInputSchema,screenshotDiscountSchema,screenshotCustomerSchema } from './screenshotOrderContract.js';
 if(process.env.SCREENSHOT_TEST_SANITIZED!=='1'||process.env.DATABASE_URL||process.env.DOTENV_CONFIG_PATH!=='/dev/null')throw Error('SANITIZED_FIXTURE_REQUIRED');
 test('HMAC binds actor, draft, input, expiry and denies tampering',()=>{
  const draftId=randomUUID(),now=Date.now();const envelope={version:1 as const,actorId:1,draftId,expiresAt:now+5000,revision:randomUUID(),canonicalInput:{safe:'fixture'},expectedHash:'a'.repeat(64),sourceHash:'b'.repeat(64)};
@@ -24,4 +24,19 @@ test('discount values cent exact, no hidden fields or browser price overrides',(
  assert(!screenshotQuoteInputSchema.safeParse({...input,existingCustomerId:1}).success);
  assert(!screenshotQuoteInputSchema.safeParse({...input,customerConfirmed:false}).success);
  assert(!screenshotQuoteInputSchema.safeParse({...input,items:[{sku:'TEST',quantity:1},{sku:'test',quantity:1}]}).success);
+});
+test('station contract requires location number, Postnummer and German ZIP/country without mixing home fields',()=>{
+ const base={firstName:'Test',lastName:'Person',phone:'+4915112345678',street:'Packstation',houseNumber:'123',zip:'10115',city:'Berlin',country:'DE',deliveryType:'packstation',dhlPostNumber:'12345678'};
+ for(const type of ['packstation','postfiliale']){
+  const street=type==='packstation'?'Packstation':'Postfiliale';
+  for(const country of ['DE','Deutschland','Germany']){
+   const parsed=screenshotCustomerSchema.parse({...base,deliveryType:type,street:`${street.toLowerCase()} 123`,country,company:'Unrelated home company'});
+   assert.equal(parsed.street,street);assert.equal(parsed.houseNumber,'123');assert.equal(parsed.country,'DE');assert.equal(parsed.company,undefined);
+  }
+  for(const extra of [{houseNumber:''},{houseNumber:'12a'},{houseNumber:'0'},{houseNumber:'123456'},{zip:'1010'},{zip:'ABCDE'},{country:'AT'},{dhlPostNumber:undefined},{dhlPostNumber:'12345'},{dhlPostNumber:'1234567890123'},{dhlPostNumber:'12x45678'},{street:'Home Street'},{street:`${street} 999`}])
+   assert(!screenshotCustomerSchema.safeParse({...base,deliveryType:type,street,...extra}).success,JSON.stringify(extra));
+ }
+ assert(!screenshotCustomerSchema.safeParse({...base,deliveryType:'home'}).success);
+ assert(!screenshotCustomerSchema.safeParse({...base,deliveryType:'home',street:'Home Street'}).success);
+ assert(screenshotCustomerSchema.safeParse({...base,deliveryType:'home',street:'Home Street',dhlPostNumber:undefined}).success);
 });

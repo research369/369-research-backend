@@ -9,8 +9,20 @@ export const screenshotCustomerSchema = z.object({
   company: z.string().trim().max(200).optional(), deliveryType: z.enum(['home','packstation','postfiliale']),
   dhlPostNumber: z.string().trim().regex(/^\d{6,12}$/).optional(),
 }).strict().superRefine((v,c) => {
-  if (v.deliveryType !== 'home' && (!v.dhlPostNumber || !/^(DE|Deutschland|Germany)$/i.test(v.country)))
-    c.addIssue({code:'custom',message:'DHL_POSTNUMBER_REQUIRED'});
+  if (v.deliveryType === 'home') {
+    if (/^(packstation|postfiliale)\b/i.test(v.street) || v.dhlPostNumber)
+      c.addIssue({code:'custom',path:['deliveryType'],message:'DHL_DELIVERY_TYPE_MISMATCH'});
+    return;
+  }
+  if (!v.dhlPostNumber) c.addIssue({code:'custom',path:['dhlPostNumber'],message:'DHL_POSTNUMBER_REQUIRED'});
+  if (!/^(DE|Deutschland|Germany)$/i.test(v.country)) c.addIssue({code:'custom',path:['country'],message:'DHL_GERMANY_REQUIRED'});
+  if (!/^\d{5}$/.test(v.zip)) c.addIssue({code:'custom',path:['zip'],message:'DHL_GERMAN_ZIP_REQUIRED'});
+  if (!/^\d{1,5}$/.test(v.houseNumber) || !/[1-9]/.test(v.houseNumber)) c.addIssue({code:'custom',path:['houseNumber'],message:'DHL_STATION_NUMBER_REQUIRED'});
+  const label = v.deliveryType === 'packstation' ? 'Packstation' : 'Postfiliale';
+  if (v.street.toLowerCase() !== label.toLowerCase() && v.street.toLowerCase() !== `${label} ${v.houseNumber}`.toLowerCase())
+    c.addIssue({code:'custom',path:['street'],message:'DHL_STATION_ADDRESS_MISMATCH'});
+}).transform(v => v.deliveryType === 'home' ? v : {
+  ...v, street:v.deliveryType === 'packstation' ? 'Packstation' : 'Postfiliale', country:'DE', company:undefined,
 });
 export const screenshotDiscountSchema = z.discriminatedUnion('mode', [
   z.object({mode:z.literal('none')}).strict(),

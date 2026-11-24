@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { TRPCError } from '@trpc/server';
-import { sql } from 'drizzle-orm';
+import { sql, eq } from 'drizzle-orm';
 import { articles, customers, promoCodes, shopSettings } from '../drizzle/schema.js';
 import { getDb, withReadOnlyDatabase } from './db.js';
 import type { Context } from './trpc.js';
@@ -13,7 +13,7 @@ import { getActiveGlobalAutomaticDiscount, parseGlobalAutomaticDiscountConfig, r
 import { reconcileFreeBacWaterForShopOrder } from './freeBacWaterService.js';
 import { isPromoCodeExpired } from './promoCodeRouter.js';
 import { resultRows } from './priorityOrderIntegrity.js';
-import { screenshotHash, screenshotIntentKey, signScreenshotQuote, verifyScreenshotQuote, type ScreenshotQuoteInput, type ScreenshotQuoteEnvelope } from './screenshotOrderContract.js';
+import { screenshotHash, screenshotIntentKey, signScreenshotQuote, verifyScreenshotQuote, screenshotCustomerSchema, type ScreenshotQuoteInput, type ScreenshotQuoteEnvelope } from './screenshotOrderContract.js';
 import { readPersistedOrderMessageData } from './orderDiscountMessageService.js';
 import { getReleasedBankTransferInstructions } from './paymentInstructionsConfig.js';
 import { assertNoActiveCheckoutBlock } from './customerOrderBlockService.js';
@@ -27,31 +27,71 @@ const email=(v:unknown)=>String(v??'').trim().toLowerCase();
 const phone=(v:unknown)=>normalizeWhatsappContactPhone(String(v??''));
 const norm=(v:unknown)=>String(v??'').toLowerCase().replace(/retatrutid[e]?|r3ta|\breta\b|triple\s*g/g,'3g').replace(/\b(tierze|tirze)\b/g,'tirzepatide').replace(/[^a-z0-9äöüß]+/g,' ').trim();
 const strength=(v:unknown)=>String(v??'').toLowerCase().replace(/,/g,'.').replace(/\s+/g,'').trim();
+// Customer search must not use product aliases or treat names as identity.
+const customerSearchText=(v:unknown)=>String(v??'').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g,'').replace(/ı/g,'i').replace(/ß/g,'ss').replace(/[^a-z0-9]+/g,' ').trim();
+const customerName=(c:any)=>[c.name,c.firstName,c.lastName].filter(Boolean).join(' ');
+const sqlCustomerText=(value:any)=>sql`btrim(regexp_replace(replace(replace(regexp_replace(lower(normalize(coalesce(${value}, ''), NFKD)), '[̀-ͯ]', '', 'g'), 'ı', 'i'), 'ß', 'ss'), '[^a-z0-9]+', ' ', 'g'))`;
+const searchPhone=(v:unknown)=>/^[+\d()\s./-]+$/.test(String(v??''))?phone(v):'';
+const searchNames=(v:unknown)=>String(v??'').includes('@')?[]:customerSearchText(v).split(' ').filter(Boolean);
+const sqlCustomerPhone=()=>sql`CASE WHEN digits LIKE '490%' THEN '49'||substring(digits from 4) WHEN digits LIKE '0%' THEN '49'||ltrim(digits, '0') ELSE digits END`;
+function customerPhoneExpression(){
+  // Mirrors normalizeWhatsappContactPhone, including +49(0), 0049 and local 0.
+  return sql`(SELECT ${sqlCustomerPhone()} FROM (SELECT regexp_replace(regexp_replace(coalesce(${customers.phone}, ''), '[^0-9]', '', 'g'), '^00', '') AS digits) normalized_phone)`;
+}
+async function screenshotContactRows(db:any,input:{phone?:string;email?:string}){
+  const p=phone(input.phone),e=email(input.email);
+  const ps=p?await db.select().from(customers).where(sql`${customerPhoneExpression()}=${p}`).orderBy(customers.id).limit(2):[];
+  const es=e?await db.select().from(customers).where(sql`lower(btrim(${customers.email}))=${e}`).orderBy(customers.id).limit(2):[];
+  // Two per contact suffice to detect ambiguity; never limit one combined OR,
+  // which could conceal a split email/phone identity behind duplicates.
+  return [...new Map([...ps,...es].map((c:any)=>[c.id,c])).values()];
+}
+function screenshotSuggestionMatches(c:any,input:{phone?:string;email?:string;name?:string}){
+  const tokens=searchNames(input.name);
+  const searchable=customerSearchText(`${customerName(c)} ${c.customerNumber??''} ${c.email??''}`);
+  return Boolean((tokens.length&&tokens.every(t=>searchable.includes(t)))
+    || (searchPhone(input.name).length>=3&&phone(c.phone).includes(searchPhone(input.name)))
+    || (input.name?.includes('@')&&email(c.email).includes(email(input.name)))
+    || (input.phone&&phone(input.phone).length>=3&&phone(c.phone).includes(phone(input.phone)))
+    || (input.email&&email(input.email).length>=3&&email(c.email).includes(email(input.email))));
+}
 export function screenshotCustomerResolution(rows:any[],input:{phone?:string;email?:string;name?:string}){
-  const p=phone(input.phone),e=email(input.email),n=norm(input.name);
+  const p=phone(input.phone),e=email(input.email);
   const ps=p?rows.filter(c=>phone(c.phone)===p):[],es=e?rows.filter(c=>email(c.email)===e):[];
   const contacts=[...new Map([...ps,...es].map(c=>[c.id,c])).values()];
   const conflict=ps.length>1||es.length>1||contacts.length>1;
-  const names=n?rows.filter(c=>norm(c.name||[c.firstName,c.lastName].join(' ')).includes(n)).slice(0,20):[];
+  const names=rows.filter(c=>screenshotSuggestionMatches(c,input)).slice(0,20);
   const candidates=[...contacts,...names.filter(c=>!contacts.some(x=>x.id===c.id))].map(c=>({
     id:c.id,customerNumber:c.customerNumber??null,name:c.name??'',firstName:c.firstName??'',lastName:c.lastName??'',email:c.email??null,phone:c.phone??null,
-    street:c.street??'',houseNumber:c.houseNumber??'',zip:c.zip??'',city:c.city??'',country:c.country??'',company:c.company??null,dhlPostNumber:c.dhlPostNumber??null,deliveryType:/^packstation\b/i.test(c.street??'')&&/^\d{6,12}$/.test(c.dhlPostNumber??'')?'packstation':/^postfiliale\b/i.test(c.street??'')&&/^\d{6,12}$/.test(c.dhlPostNumber??'')?'postfiliale':'home',
+    street:c.street??'',houseNumber:c.houseNumber??'',zip:c.zip??'',city:c.city??'',country:c.country??'',company:c.company??null,dhlPostNumber:c.dhlPostNumber??null,deliveryType:/^packstation\b/i.test(String(c.street??'').trim())?'packstation':/^postfiliale\b/i.test(String(c.street??'').trim())?'postfiliale':c.preferredDeliveryType==='packstation'||c.preferredDeliveryType==='postfiliale'?c.preferredDeliveryType:'home',
     matchBasis:ps.some(x=>x.id===c.id)?es.some(x=>x.id===c.id)?'phone_email':'phone':es.some(x=>x.id===c.id)?'email':'name',
   }));
   return {match:conflict?'conflict' as const:contacts.length===1?'exact' as const:'none' as const,...(!conflict&&contacts.length===1?{exactCustomerId:contacts[0].id}:{}),candidates,...(conflict?{reason:'duplicate_or_split_contacts'}:{})};
 }
-export async function lookupScreenshotCustomers(input:any){return withReadOnlyDatabase(async()=>{const db=await getDb();if(!db)throw Error('DATABASE_UNAVAILABLE');return screenshotCustomerResolution(await db.select().from(customers),input);});}
+export async function lookupScreenshotCustomers(input:{phone?:string;email?:string;name?:string}){return withReadOnlyDatabase(async()=>{
+  const db=await getDb();if(!db)throw Error('DATABASE_UNAVAILABLE');
+  const contacts=await screenshotContactRows(db,input),predicates=[];
+  const tokens=searchNames(input.name);
+  if(tokens.length)predicates.push(sql`(${sql.join(tokens.map(t=>sql`position(${t} in ${sqlCustomerText(sql`concat_ws(' ', ${customers.name}, ${customers.firstName}, ${customers.lastName}, ${customers.customerNumber}, ${customers.email})`)})>0`),sql` AND `)})`);
+  for(const raw of [input.name,input.phone]){const p=searchPhone(raw);if(p.length>=3)predicates.push(sql`position(${p} in ${customerPhoneExpression()})>0`);}
+  for(const raw of [input.name?.includes('@')?input.name:undefined,input.email])if(raw&&email(raw).length>=3)predicates.push(sql`position(${email(raw)} in lower(coalesce(${customers.email}, '')))>0`);
+  const suggestions=predicates.length?await db.select().from(customers).where(sql`(${sql.join(predicates,sql` OR `)})`).orderBy(customers.id).limit(20):[];
+  return screenshotCustomerResolution([...new Map([...contacts,...suggestions].map(c=>[c.id,c])).values()],input);
+});}
 export async function lookupScreenshotCatalog(input:any){return withReadOnlyDatabase(async()=>{const db=await getDb();if(!db)throw Error('DATABASE_UNAVAILABLE');const words=norm(input.query).split(' ').filter(Boolean);const candidates=screenshotCatalogProjection(await db.select().from(articles)).filter(c=>c.available&&words.every(w=>norm(c.name+' '+c.sku+' '+c.shopProductId).includes(w))&&(!input.strength||strength(c.dosage)===strength(input.strength))&&(!input.form||c.form===input.form)).slice(0,100).map(({articleId,parentId,dependencyIds,componentLines,stockDemands,...c})=>({...c,stockDemands:stockDemands.map(({articleId,...d})=>d)}));return {candidates};});}
 async function source(db:any,request:ScreenshotQuoteInput){
-  const arts=await db.select().from(articles);const profiles=await db.select().from(customers);
+  const validatedCustomer=screenshotCustomerSchema.parse(request.customer);
+  const arts=await db.select().from(articles);const profiles=await screenshotContactRows(db,validatedCustomer);
+  if(request.existingCustomerId&&!profiles.some((c:any)=>c.id===request.existingCustomerId))profiles.push(...await db.select().from(customers).where(eq(customers.id,request.existingCustomerId)).limit(1));
   const settings=await db.select().from(shopSettings);const globalValue=settings.find((s:any)=>s.key==='global_automatic_discount')?.value;
   const global=getActiveGlobalAutomaticDiscount(parseGlobalAutomaticDiscountConfig(globalValue));
   const resolution=screenshotCustomerResolution(profiles,request.customer);if(resolution.match==='conflict')throw Error('CUSTOMER_CONTACT_CONFLICT');
   const selectedId=request.existingCustomerId??resolution.exactCustomerId;
   if(request.existingCustomerId&&resolution.exactCustomerId&&resolution.exactCustomerId!==request.existingCustomerId)throw Error('CUSTOMER_CONTACT_CONFLICT');
   const selected=selectedId?profiles.find((c:any)=>c.id===selectedId):null;if(selectedId&&!selected)throw Error('CUSTOMER_NOT_FOUND');
-  const customer={...request.customer};if(selected){customer.firstName=selected.firstName??'';customer.lastName=selected.lastName??'';customer.phone=selected.phone??'';customer.email=selected.email??'';if(!customer.firstName||!customer.lastName||!normalizeOrderCommunicationPhone(customer.phone))throw Error('CUSTOMER_PROFILE_REQUIRES_REVIEW');}
-  const selectedResolution=screenshotCustomerResolution(profiles,customer);
+  const customer={...validatedCustomer};if(selected){customer.firstName=selected.firstName??'';customer.lastName=selected.lastName??'';customer.phone=selected.phone??'';customer.email=selected.email??'';if(!customer.firstName||!customer.lastName||!normalizeOrderCommunicationPhone(customer.phone))throw Error('CUSTOMER_PROFILE_REQUIRES_REVIEW');}
+  const selectedContacts=await screenshotContactRows(db,customer);
+  const selectedResolution=screenshotCustomerResolution(selectedContacts,customer);
   if(selectedResolution.match==='conflict'||(selectedResolution.exactCustomerId&&selectedResolution.exactCustomerId!==selectedId))throw Error('CUSTOMER_CONTACT_CONFLICT');
   if(!normalizeOrderCommunicationPhone(customer.phone))throw Error('CUSTOMER_PHONE_INVALID');
   const catalog=screenshotCatalogProjection(arts);
@@ -135,8 +175,8 @@ export async function executeScreenshotOrder(token:string,ctx:Context){
     await assertNoActiveCheckoutBlock(tx,envelope.canonicalInput.customer);
     const identities=[...new Set([email(request.customer.email),phone(request.customer.phone),email(envelope.canonicalInput.customer.email),phone(envelope.canonicalInput.customer.phone)].filter(Boolean))].sort();
     for(const identity of identities)await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${'wawi-contact:'+identity},0))`);
-    const currentProfiles=await tx.select().from(customers);
-    const targetIds=currentProfiles.filter((c:any)=>c.id===envelope.canonicalInput.existingCustomerId||identities.includes(email(c.email))||identities.includes(phone(c.phone))).map((c:any)=>c.id).sort((a:number,b:number)=>a-b);
+    const currentProfiles=[...await screenshotContactRows(tx,request.customer),...await screenshotContactRows(tx,envelope.canonicalInput.customer)];
+    const targetIds=[...new Set<number>([...currentProfiles.map((c:any)=>c.id),envelope.canonicalInput.existingCustomerId].filter((id):id is number=>Number.isInteger(id)))].sort((a,b)=>a-b);
     if(targetIds.length)await tx.execute(sql`SELECT id FROM customers WHERE id IN (${sql.join(targetIds.map((id:number)=>sql`${id}`),sql`,`)}) ORDER BY id FOR UPDATE NOWAIT`);
     const articleIds=(envelope as any).articleIds as number[];
     await tx.execute(sql`SELECT id FROM articles WHERE id IN (${sql.join(articleIds.map(id=>sql`${id}`),sql`,`)}) ORDER BY id FOR UPDATE NOWAIT`);

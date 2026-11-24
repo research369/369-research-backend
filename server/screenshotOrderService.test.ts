@@ -89,6 +89,45 @@ test('exact contact resolver normalizes all candidates; duplicates/split cannot 
  await assert.rejects(caller().quote(request({customer:{...request().customer,email:'two@example.test'},existingCustomerId:1,existingCustomerReviewed:true})),conflict);
  await pool.query("INSERT INTO customers(name,phone) VALUES('Duplicate','004915112345678')");assert.equal((await caller().customers({phone:'+4915112345678'})).match,'conflict');await assert.rejects(caller().quote(request()),conflict);
 });
+test('customer suggestions handle accents, multiword partials, customer number and partial contacts, never name identity',async()=>{
+ await pool.query("INSERT INTO customers(customer_number,name,first_name,last_name,email,phone,street,house_number,zip,city,country) VALUES('C-0042','Uğur Yılmaz','Uğur','Yılmaz','ugur@example.test','+49(0)151 99988777','Saved Home','17','10115','Berlin','DE'),('C-0043','Ugur Other','Ugur','Other','other@example.test','004915222222222','Other','1','10115','Berlin','DE'),('C-0044','Reta Tierze','Reta','Tierze','reta@example.test','015333333333','Other','1','10115','Berlin','DE')");
+ for(const name of ['Ugur Yil','Uğur Yılmaz','yil ug','C-0042','ugur@example.test','99988777']){
+  const found=await caller().customers({name});assert.equal(found.match,'none');assert.equal(found.exactCustomerId,undefined);assert.deepEqual(found.candidates.map((c:any)=>c.id),[1]);assert.equal(found.candidates[0].street,'Saved Home');assert.equal(found.candidates[0].houseNumber,'17');
+ }
+ assert.equal((await caller().customers({name:'ugur'})).candidates.length,2);
+ assert.equal((await caller().customers({name:'Reta Tier'})).candidates[0].id,3);
+ for(const input of [{phone:'99988777'},{email:'ugur@exa'}]){const found=await caller().customers(input);assert.equal(found.match,'none');assert.equal(found.candidates[0].id,1);}
+ assert.equal((await caller().customers({phone:'004915199988777'})).exactCustomerId,1);
+ for(const role of ['packing','product_manager','user'])await assert.rejects(caller({...actor,role}).customers({name:'Ugur'}),(e:any)=>e.code==='FORBIDDEN');
+ await pool.query("INSERT INTO customers(name) SELECT 'Bounded Person '||n FROM generate_series(1,50) n");
+ const query=pg.Client.prototype.query,statements:string[]=[];
+ const patch=mock.method(pg.Client.prototype,'query',function(this:pg.Client,...args:any[]){const text=typeof args[0]==='string'?args[0]:args[0]?.text??'';if(/from "customers"/i.test(text))statements.push(text);return Reflect.apply(query,this,args);} as any);
+ try{assert.equal((await caller().customers({name:'Bounded Person'})).candidates.length,20);assert.equal((await caller().customers({name:'% _'})).candidates.length,0);await caller().customers({phone:'004915199988777',email:'ugur@example.test'});}finally{patch.mock.restore();}
+ assert(statements.length>=3);for(const statement of statements){assert.match(statement,/where /i);assert.match(statement,/limit /i);}
+});
+test('station quote and execute store one canonical DHL snapshot without changing selected home profiles',async()=>{
+ await pool.query("INSERT INTO customers(name,first_name,last_name,email,phone,street,house_number,zip,city,country,company) VALUES('Existing Person','Existing','Person','existing@example.test','+4915999888777','Saved Home','9','10115','Berlin','DE','Saved Company')");
+ const profile=async()=>(await pool.query('SELECT * FROM customers WHERE id=1')).rows[0];const before=await profile();
+ const {prepareDhlLabel}=await import('./dhlLabelPreparation.js');const {ENV}=await import('./env.js');const billing=ENV.dhlBillingNumber;ENV.dhlBillingNumber='00000000000000';
+ try{for(const deliveryType of ['packstation','postfiliale']){
+  const label=deliveryType==='packstation'?'Packstation':'Postfiliale';
+  const r=request({existingCustomerId:1,existingCustomerReviewed:true,customer:{...request().customer,street:`${label.toLowerCase()} 123`,houseNumber:'123',zip:'10115',city:'Berlin',country:'Germany',deliveryType,dhlPostNumber:'12345678',company:'Do not copy home company'}});
+  const q=await caller().quote(r);assert.equal(q.preview.customer.street,label);assert.equal(q.preview.customer.houseNumber,'123');assert.equal(q.preview.customer.country,'DE');assert(!q.preview.customer.company);
+  const out=await caller().execute({quoteToken:q.quoteToken,confirmed:true});
+  const stored=(await pool.query('SELECT * FROM orders WHERE order_id=$1',[out.orderId])).rows[0];
+  assert.equal(stored.delivery_type,deliveryType);assert.equal(stored.street,label);assert.equal(stored.house_number,'123');assert.equal(stored.dhl_post_number,'12345678');assert.equal(stored.zip,'10115');assert.equal(stored.country,'DE');assert.equal(stored.company,null);
+  const prepared=await prepareDhlLabel({orderId:out.orderId,firstName:stored.first_name,lastName:stored.last_name,street:stored.street,houseNumber:stored.house_number,zip:stored.zip,city:stored.city,country:stored.country,company:stored.company,deliveryType:stored.delivery_type,dhlPostNumber:stored.dhl_post_number,email:stored.email,phone:stored.phone} as any,{shippingProfile:'DHL_DE_STANDARD',weightGrams:800});
+  assert.equal(prepared.shipmentInput.consignee.addressStreet,label);assert.equal(prepared.shipmentInput.consignee.addressHouse,'123');assert.equal(prepared.shipmentInput.consignee.name2,'12345678');
+  const after=await profile();assert.deepEqual({...after,total_orders:before.total_orders,total_spent:before.total_spent,first_order_date:before.first_order_date,last_order_date:before.last_order_date,updated_at:before.updated_at},before);assert.equal(await count('customers'),1);
+ }}finally{ENV.dhlBillingNumber=billing;}
+});
+test('invalid station quote is rejected before orders; invalid saved station remains a station requiring review',async()=>{
+ await pool.query("INSERT INTO customers(name,email,street,house_number,dhl_post_number,zip,country) VALUES('Incomplete Station','incomplete@example.test','Packstation','bad','123','1010','AT')");
+ assert.equal((await caller().customers({email:'incomplete@example.test'})).candidates[0].deliveryType,'packstation');
+ const before=await counts();
+ for(const extra of [{street:'Home Street'},{houseNumber:'12a'},{zip:'1010'},{country:'AT'},{dhlPostNumber:undefined}])await assert.rejects(caller().quote(request({customer:{...request().customer,street:'Packstation',houseNumber:'123',zip:'10115',city:'Berlin',country:'DE',deliveryType:'packstation',dhlPostNumber:'12345678',...extra}})),(e:any)=>e.code==='BAD_REQUEST');
+ assert.deepEqual(await counts(),before);
+});
 test('existing selection preserves profile, uses selected contacts and order-only address; new customer creates canonical record',async()=>{
  await pool.query("INSERT INTO customers(name,first_name,last_name,email,phone,street,house_number,zip,city,country,communication_language) VALUES('Existing Name','Existing','Name','existing@example.test','+41791112233','Old','99','8000','Old','CH','en')");
  await pool.query("INSERT INTO communication_templates(template_key,channel,language,title,body_template) VALUES('order_confirmation','whatsapp','en','Local English','Hello {{firstName}}, order {{orderId}} {{total}} {{paymentDetails}}')");
