@@ -3,9 +3,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # Reserved, UNIX-only local PostgreSQL fixture; never consult a productive URL.
 base=/tmp/369-accounts-pg-20261106
-bin=/usr/lib/postgresql/16/bin
+bin="$(pg_config --bindir)"
 if [[ ! -x "$bin/postgres" ]]; then
-  echo "PostgreSQL 16 required for the real concurrency/rollback suite" >&2
+  echo "PostgreSQL server tools required for the real concurrency/rollback suite" >&2
   exit 1
 fi
 if [[ -e "$base/data/postmaster.pid" ]]; then
