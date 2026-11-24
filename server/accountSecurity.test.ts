@@ -70,10 +70,20 @@ after(async () => {
   await closeDb(); ENV.databaseUrl = oldUrl; mock.restoreAll();
   if (pool) await pool.end();
   if (!createdDatabase) { await adminPool.end(); return; }
-  const remaining = await adminPool.query("SELECT pid, application_name, state FROM pg_stat_activity WHERE datname = 'accounts_security_synthetic_test'");
-  assert.equal(remaining.rows.length, 0, `test connections still live: ${JSON.stringify(remaining.rows)}`);
-  await adminPool.query("DROP DATABASE IF EXISTS accounts_security_synthetic_test");
-  await adminPool.end();
+  try {
+    // Pool.end closes the client sockets; PostgreSQL may reap their backends
+    // slightly later on a busy CI runner. Wait for observed closure, never kill
+    // connections or suppress a real leak.
+    let remaining;
+    const deadline = Date.now() + 3000;
+    do {
+      remaining = await adminPool.query("SELECT pid, application_name, state FROM pg_stat_activity WHERE datname = 'accounts_security_synthetic_test'");
+      if (!remaining.rows.length) break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    } while (Date.now() < deadline);
+    assert.equal(remaining.rows.length, 0, `test connections still live: ${JSON.stringify(remaining.rows)}`);
+    await adminPool.query("DROP DATABASE IF EXISTS accounts_security_synthetic_test");
+  } finally { await adminPool.end(); }
 });
 
 test("migration and startup are repeatable, version0 preserved, legacy note secrets removed", async () => {

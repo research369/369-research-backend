@@ -1,0 +1,28 @@
+name: WhatsApp self-order bridge isolated tests
+on:
+  pull_request:
+    paths:
+      - 'server/whatsappScreenshot*'
+      - 'server/screenshotOrder*'
+      - '.github/workflows/whatsapp-self-orders.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  isolated:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npx tsx --test server/whatsappScreenshotRouter.test.ts server/screenshotOrderExtraction.test.ts server/screenshotOrderContract.test.ts
+        env:
+          SCREENSHOT_TEST_SANITIZED: '1'
+          DOTENV_CONFIG_PATH: /dev/null
+          DATABASE_URL: ''
+          RAILWAY_DB_URL: ''
+          JWT_SECRET: synthetic-self-order-testing-secret-no-live-credentials-0123456789

@@ -26,7 +26,7 @@ jobs:
           cache: npm
       - run: npm ci --no-audit --no-fund
       - run: npx tsc --noEmit
-      - run: npx tsx --test server/*.test.ts tests/*.test.ts
+      - run: node scripts/test-unit-isolated.mjs
       - run: npx drizzle-kit export --dialect postgresql --schema ./drizzle/schema.ts > /tmp/ops-schema.sql
       - name: Create disposable rehearsal database
         run: |
@@ -39,3 +39,36 @@ jobs:
         env:
           OPS_ISOLATED_REHEARSAL: 'true'
           DATABASE_URL: postgresql://postgres@127.0.0.1:55446/ops_rehearsal
+
+      - name: Create separate campaign and island rehearsal database
+        run: |
+          createdb -h 127.0.0.1 -p 55446 -U postgres ops_ci
+          psql -h 127.0.0.1 -p 55446 -U postgres -d ops_ci -v ON_ERROR_STOP=1 -f /tmp/ops-schema.sql
+      - run: npx tsx --test --test-concurrency=1 server/blackFridayCheckout.postgres.test.ts server/islandPostalCheckout.postgres.test.ts
+        env:
+          OPS_ISOLATED_REHEARSAL: 'true'
+          OPS_REHEARSAL_DB: postgresql://postgres@127.0.0.1:55446/ops_ci
+          DATABASE_URL: postgresql://postgres@127.0.0.1:55446/ops_ci
+
+  dedicated-databases:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - test-account-security.sh
+          - test-campaign-account-permissions.sh
+          - test-operations-permissions-cleanup.sh
+          - test-priority-integrity.sh
+          - test-product-draft.sh
+          - test-product-draft-finalization.sh
+          - test-product-family.sh
+          - test-screenshot-order.sh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: bash scripts/${{ matrix.runner }}

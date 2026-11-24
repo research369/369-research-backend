@@ -12,6 +12,7 @@ test(
     assert.equal(process.env.DATABASE_URL, isolatedOperationsDatabase());
     const pool = await getPool();
     assert(pool);
+    await pool.query("INSERT INTO shop_settings(key,value) VALUES('address_validation_enabled','true') ON CONFLICT(key) DO UPDATE SET value='true'");
     const family = "sim-" + randomUUID().slice(0, 8);
     const sku = family + "-10";
     const id = (
@@ -364,7 +365,7 @@ test(
     try {
       const id = (
         await pool.query(
-          "INSERT INTO articles(sku,name,stock,shop_product_id,shop_visible,selling_price,category) VALUES($1,'Synthetic Nasenspray (10 mg)',7,$1,1,219,'Zubehör') RETURNING id",
+          "INSERT INTO articles(sku,name,stock,shop_product_id,shop_visible,selling_price,category) VALUES($1,'Synthetic Nasenspray (10 mg)',7,$1,1,219,'Nasensprays') RETURNING id",
           [sku],
         )
       ).rows[0].id;

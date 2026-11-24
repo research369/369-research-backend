@@ -1,20 +1,24 @@
 /** Explicit opt-in integration probe. Only a fresh, isolated loopback PostgreSQL is accepted. */
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
+import {realpathSync} from 'node:fs';
 import {randomUUID} from 'node:crypto';
 import {createServer} from 'node:http';
 import express from 'express';
 import pg from 'pg';
 if(process.env.JARVY_ISOLATED_ORDER_REHEARSAL!=='true')throw Error('Isolated rehearsal not enabled');
-const connectionString='postgresql://postgres@127.0.0.1:55446/postgres';process.env.DATABASE_URL=connectionString;
+const socket=process.env.JARVY_TEST_PG_SOCKET;
+if(process.env.NODE_ENV!=='test'||process.env.JARVY_TEST_SANITIZED!=='1'||process.env.DOTENV_CONFIG_PATH!=='/dev/null'||process.env.DATABASE_URL||!socket||!/^(?:\/private)?\/tmp\/369-jarvy-orders\.[A-Za-z0-9]+\/socket$/.test(socket)||realpathSync(socket)!==socket)throw Error('DEDICATED_JARVY_FIXTURE_REQUIRED');
+const connectionString='postgresql://jarvy_local@localhost:55467/jarvy_local?host='+encodeURIComponent(socket);process.env.DATABASE_URL=connectionString;
 process.env.RESEND_API_KEY='';process.env.BUNQ_API_KEY='';process.env.JARVY_WRITE_KEY='rehearsal-only-'.repeat(5);process.env.JARVY_READ_KEY='different-read-key-'.repeat(5);process.env.JARVY_WAWI_ACTOR_ID='1';
 const db=new pg.Pool({connectionString});
 assert.equal((await db.query("SELECT count(*)::int n FROM information_schema.tables WHERE table_schema='public'")).rows[0].n,0,'Fresh empty database required');
-await db.query(await readFile('/tmp/jarvy-wawi-schema.sql','utf8'));
+await db.query(await readFile(process.env.JARVY_TEST_SCHEMA!,'utf8'));
 await db.query("CREATE SEQUENCE rehearsal_order_seq; CREATE FUNCTION next_order_id() RETURNS text LANGUAGE sql AS $$ SELECT 'TEST-' || nextval('rehearsal_order_seq')::text $$;");
 await db.query("INSERT INTO users(username,password_hash,role) VALUES('isolated-operator','not-a-login','admin')");
 await db.query("INSERT INTO customers(name,first_name,last_name,email,phone,street,house_number,zip,city,country) VALUES('Test Person','Test','Person','test@example.test','000','Teststraße','1','1010','Wien','AT')");
 await db.query("INSERT INTO articles(sku,name,selling_price,stock,is_active) VALUES('TEST-BOTTLE','Test Bottle',10,20,1)");
+await (await import('./priorityOrderIntegrity.js')).ensurePriorityOrderIntegritySchema();
 const {jarvyOrderRouter}=await import('./jarvyOrderRouter.js');const {closeDb}=await import('./db.js');
 const app=express();app.use(express.json());app.use('/api/jarvy-orders',jarvyOrderRouter);const server=createServer(app);await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
 const url='http://127.0.0.1:'+(server.address() as any).port+'/api/jarvy-orders';
