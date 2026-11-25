@@ -28,6 +28,7 @@
 
 import { confirmAccountReset, enforceAuthRateLimit, findKwkResetAccount, invalidateAccountReset, issueAccountReset } from "./accountSecurityService.js";
 import { z } from "zod";
+import { assertNoExclusiveCampaignBenefitFromDb } from "./exclusiveCampaignPolicy.js";
 import bcrypt from "bcryptjs";
 import { router, publicProcedure, adminProcedure, middleware } from "./trpc.js";
 import { getPool } from "./db.js";
@@ -355,6 +356,7 @@ export const kwkRouter = router({
       code: z.string(),
     }))
     .query(async ({ input }) => {
+      await assertNoExclusiveCampaignBenefitFromDb();
       const pool = await getPool();
       if (!pool) throw new Error("Database not available");
 
@@ -486,6 +488,7 @@ export const kwkRouter = router({
       amount: z.number().positive(),
     }))
     .mutation(async ({ ctx, input }) => {
+      await assertNoExclusiveCampaignBenefitFromDb();
       const { kwkId } = ctx as any;
 
       // Guthaben einlösen (Service-Funktion, atomar)

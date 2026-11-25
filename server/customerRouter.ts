@@ -1,3 +1,7 @@
+import { composeExplicitOrderMessage } from "./orderDiscountMessageService.js";
+import { escapeOrderMessageHtml } from "./orderDiscountMessageContract.js";
+import { futureCartDiscountNotice } from "./orderDiscountMessagePresentation.js";
+import { htmlToPlainText } from "./crmCommunicationService.js";
 import {nextCustomerNumber,requireCustomerNumberMigration} from './customerNumberService.js';
 import {checkCustomerCreationMaintenance} from './customerCreationMaintenance.js';
 /**
@@ -539,6 +543,9 @@ export const customerRouter = router({
       customerId: z.number(),
       subject: z.string().min(1),
       htmlBody: z.string().min(1),
+      orderId: z.string().min(1).optional(),
+      plainText: z.string().optional(),
+      communicationLanguage: z.enum(["de", "en"]).optional(),
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
@@ -551,6 +558,7 @@ export const customerRouter = router({
       const apiKey = process.env.RESEND_API_KEY;
       if (!apiKey) throw new Error("RESEND_API_KEY not configured");
 
+      const composed = await composeExplicitOrderMessage(db, { ...input, channel: "email", body: input.htmlBody, bodyIsHtml: true });
       // Send email via Resend
       const response = await fetch(RESEND_API_URL, {
         method: "POST",
@@ -562,7 +570,8 @@ export const customerRouter = router({
           from: "369 Research <noreply@mail.369research.eu>",
           to: [customer.email],
           subject: input.subject,
-          html: input.htmlBody,
+          html: composed.htmlBody,
+          ...(input.orderId || input.plainText !== undefined ? { text: composed.plainText } : {}),
         }),
       });
 
@@ -575,7 +584,9 @@ export const customerRouter = router({
         type: "email",
         status: success ? "sent" : "failed",
         subject: input.subject,
-        htmlBody: input.htmlBody,
+        htmlBody: composed.htmlBody,
+        ...(input.orderId || input.plainText !== undefined ? { body: composed.plainText } : {}),
+        ...(input.orderId ? { orderId: composed.canonicalOrderId } : {}),
         recipientEmail: customer.email,
         senderName: "369 Research",
         createdBy: "admin",
@@ -596,6 +607,8 @@ export const customerRouter = router({
       subject: z.string().min(1),
       htmlBody: z.string().min(1),
       campaignName: z.string().optional(),
+      disclosureMode: z.enum(["none", "offer"]).optional(),
+      communicationLanguage: z.enum(["de", "en"]).optional(),
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
@@ -639,6 +652,11 @@ export const customerRouter = router({
             .replace(/\{\{customerNumber\}\}/g, customer.customerNumber || "")
             .replace(/\{\{email\}\}/g, customer.email || "")
             .replace(/\{\{company\}\}/g, customer.company || "");
+          if (input.disclosureMode === "offer") {
+            personalizedHtml += `<p style="font-family:Arial,sans-serif;font-size:13px">${escapeOrderMessageHtml(futureCartDiscountNotice(input.communicationLanguage))}</p>`;
+          }
+          const offerText = input.disclosureMode === "offer" ? htmlToPlainText(personalizedHtml) : undefined;
+
 
           const response = await fetch(RESEND_API_URL, {
             method: "POST",
@@ -651,6 +669,7 @@ export const customerRouter = router({
               to: [customer.email!],
               subject: input.subject,
               html: personalizedHtml,
+              ...(offerText !== undefined ? { text: offerText } : {}),
             }),
           });
 
@@ -663,6 +682,7 @@ export const customerRouter = router({
             status: success ? "sent" : "failed",
             subject: input.subject,
             htmlBody: personalizedHtml,
+            ...(offerText !== undefined ? { body: offerText } : {}),
             recipientEmail: customer.email,
             senderName: "369 Research",
             campaignId: campaign.id,

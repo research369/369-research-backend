@@ -108,6 +108,7 @@ app.get("/health", (_req, res) => {
     releaseCheck: softwareReleaseCheck,
     serverReleaseCheck: serverSoftwareReleaseCheck,
     fix: "paid-status-filter",
+    screenshotOrderApi: "2026-11-23-v2",
     peps4petsCheckoutSchema: isPeps4petsCheckoutSchemaReady() ? "ready" : "pending",
   });
 });

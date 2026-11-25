@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto";
 import { canonicalIntent } from "./priorityOrderIntegrity.js";
 import { roundMoney, parsePromoMetadata, normalizeKwkPhone, resolveShippingRegion, type KwkCatalogArticle, type PromoDefinition } from "./kwkCheckoutPricing.js";
-import { PLUGPLAY_SURCHARGE, NASAL_DIY_SET_SURCHARGE } from "./checkoutFormatSurcharges.js";
-import { isNasalDiySetEligible, NASAL_DIY_SET_COMPONENTS } from "./nasalDiySetConfig.js";
+import { PLUGPLAY_SURCHARGE } from "./checkoutFormatSurcharges.js";
 import type { CheckoutOrderItem } from "./freeBacWaterService.js";
 import { calculateCheckoutV2AutomaticGiftLines, type CheckoutV2Promotion2for3 } from "./checkoutV2AutomaticBenefits.js";
 import { resolveSubstitution, extractDosageMg, isSubstitutionEligible, type SubstitutionResult } from "./substitutionService.js";
@@ -18,7 +17,7 @@ type Variant = Record<string, unknown>;
 const variants = (a: MainshopCatalogArticle): Variant[] => Array.isArray(a.variants) ? a.variants.filter((v): v is Variant => !!v && typeof v === "object") : [];
 const variantDosage = (v: Variant) => dosage(v.dosage ?? v.label ?? v.name);
 const articleDosage = (a: MainshopCatalogArticle) => dosage(a.name.match(/(\d+(?:\.\d+)?\s*(?:mg|iu|ml|mcg))\s*\)?\s*$/i)?.[1] || a.sku.match(/-(\d+(?:\.\d+)?(?:MG|IU|ML|MCG))$/i)?.[1]);
-export function catalogCategories(a: MainshopCatalogArticle): string[] {
+export function catalogCategories(a: Pick<MainshopCatalogArticle, "category" | "categories">): string[] {
   return [a.category, ...(Array.isArray(a.categories) ? a.categories : [])].filter((v): v is string => typeof v === "string" && v.trim().length > 0);
 }
 type ResolvedSelection = { article: MainshopCatalogArticle; parent: MainshopCatalogArticle; configured?: Variant; selectedDosage: string; variantId: string };
@@ -62,22 +61,38 @@ function resolveSelection(line: MainshopLine, catalog: MainshopCatalogArticle[])
   return { article: selected, parent, configured, selectedDosage: wanted, variantId: familyId && wanted ? `${familyId}-${wanted}` : norm(selected.sku) };
 }
 export function mainshopArticleForLine(line: MainshopLine, catalog: MainshopCatalogArticle[]): MainshopCatalogArticle { return resolveSelection(line, catalog).article; }
+/** Secondary Nasensprays tags are option filters, never proof of a prepared spray.
+ * Existing primary product form/name is authoritative. No SKU or catalogue conversion is inferred. */
+export function mainshopBenefitCategories(a: Pick<MainshopCatalogArticle, "category" | "categories">): string[] {
+  return catalogCategories(a).filter(c => !/^(nasensprays?|nasal sprays?)$/.test(norm(c)) || norm(c) === norm(a.category));
+}
+const accessoryCategories = new Set(["zubehör", "accessories", "lab / research supplies"]);
+function preparedNasal(a: MainshopCatalogArticle): boolean {
+  if (accessoryCategories.has(norm(a.category))) return false;
+  return /^(nasensprays?|nasal sprays?)$/.test(norm(a.category)) || /nasenspray|nasal\s*spray/i.test(a.name);
+}
 function nonVial(a: MainshopCatalogArticle): boolean {
-  return catalogCategories(a).some(c => ["nasensprays", "fertigpens", "forscherpens", "kapseln / tabletten", "tabletten", "kapseln", "369 beautyline", "zubehör"].includes(norm(c)));
+  return mainshopBenefitCategories(a).some(c => ["nasensprays", "nasal spray", "fertigpens", "forscherpens", "kapseln / tabletten", "tabletten", "kapseln", "369 beautyline", ...accessoryCategories].includes(norm(c)));
+}
+function assertNoRetiredNasalFormat(line: MainshopLine): void {
+  if (line.isNasalDiySet === true || line.isNasalSpray === true || /nasenspray|nasal\s*spray|\bdiy\b/i.test(line.variant || "")) {
+    throw Error("CHECKOUT_NASAL_FORMAT_RETIRED");
+  }
+}
+function assertNoPreparedNasal(selection: ResolvedSelection): void {
+  if (preparedNasal(selection.parent) || preparedNasal(selection.article)) throw Error("CHECKOUT_PREPARED_NASAL_NOT_SELLABLE");
 }
 // Existing shop Plug&Play exclusions, now evaluated exclusively on canonical identities/categories.
 const plugExcluded = new Set(["369-retinal-shot", "369-deep-collagen-mask", "perfect-skin-bundle", "selank", "semax", "oxytocin", "adamax", "semax-selank", "melanotan-1", "melanotan-2", "dsip", "snap-8", "snap8", "peptidpen-case", "pen-kartusche-5er", "pen-nadeln-10er"]);
 function canonicalFormat(line: MainshopLine, selection: ResolvedSelection) {
-  if ([line.isPlugPlay, line.isNasalDiySet, line.isNasalSpray].filter(Boolean).length > 1) throw Error("CHECKOUT_FORMAT_AMBIGUOUS");
+  assertNoRetiredNasalFormat(line);
+  assertNoPreparedNasal(selection);
   const { parent, article } = selection;
-  const cats = catalogCategories(parent).map(norm);
-  const nasal = cats.includes("nasensprays") || catalogCategories(article).map(norm).includes("nasensprays");
+  const cats = mainshopBenefitCategories(parent).map(norm);
   const id = norm(parent.shopProductId || parent.sku);
   const plugIncluded = [id, norm(article.sku)].some(v => ["klow-stack", "klow-stack-80mg"].includes(v));
-  if (line.isNasalSpray && !nasal) throw Error("CHECKOUT_FORMAT_UNSUPPORTED");
   if (line.isPlugPlay && (nonVial(parent) || nonVial(article) || [id, norm(article.sku)].some(v => plugExcluded.has(v)) || (!plugIncluded && cats.includes("forscher-bundles")))) throw Error("CHECKOUT_FORMAT_UNSUPPORTED");
-  if (line.isNasalDiySet && (nonVial(parent) || nonVial(article) || !isNasalDiySetEligible(id))) throw Error("CHECKOUT_FORMAT_UNSUPPORTED");
-  return { isPlugPlay: line.isPlugPlay === true, isNasalDiySet: line.isNasalDiySet === true, isNasalSpray: nasal };
+  return { isPlugPlay: line.isPlugPlay === true, isNasalDiySet: false, isNasalSpray: false };
 }
 function priceValue(v: unknown): number {
   if (v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) || Number(v) < 0) throw Error("CHECKOUT_CATALOG_PRICE_REQUIRED");
@@ -88,7 +103,7 @@ function selectionPrice(selection: ResolvedSelection, format: ReturnType<typeof 
   const { article, configured } = selection;
   const base = !bundle && article.salePrice !== null && article.salePrice !== undefined && Number(article.salePrice) > 0
     ? priceValue(article.salePrice) : configured ? priceValue(configured.price) : priceValue(article.sellingPrice);
-  return { base, surcharge: (format.isPlugPlay ? PLUGPLAY_SURCHARGE : 0) + (format.isNasalDiySet ? NASAL_DIY_SET_SURCHARGE : 0) };
+  return { base, surcharge: (format.isPlugPlay ? PLUGPLAY_SURCHARGE : 0) };
 }
 function isPen(a: MainshopCatalogArticle): boolean {
   return [norm(a.sku), norm(a.shopProductId)].some(id => ["369pen", "forscherpen", "peptidpen-case"].includes(id));
@@ -97,6 +112,7 @@ function quantityEligible(a: MainshopCatalogArticle): boolean { return isPen(a) 
 function canonicalType(a: MainshopCatalogArticle): string { return nonVial(a) ? "accessory" : "peptide"; }
 /** The only bundle authority is the active WaWi definition and its complete composition. */
 export function canonicalizeMainshopLines(input: MainshopLine[], catalog: MainshopCatalogArticle[], bundles: MainshopBundle[], components: MainshopBundleComponent[], promotion2for3: CheckoutV2Promotion2for3 = { enabled: false, mode: "all", products: [] }): { items: MainshopLine[]; quantityUnits: number; quantityEligible: boolean[] } {
+  input.forEach(assertNoRetiredNasalFormat);
   const raw = input.filter(i => !(i.isFreeGift && norm(i.shopProductId) === "bac-wasser-3ml" && i.bundleId === undefined));
   const claimedGifts = raw.filter(i => i.isFreeGift && i.bundleId === undefined);
   const paid = raw.filter(i => !i.isFreeGift || i.bundleId !== undefined);
@@ -148,7 +164,7 @@ export function canonicalizeMainshopLines(input: MainshopLine[], catalog: Mainsh
     if (item.bundleId !== undefined || item.isFreeGift) return;
     const parent = selections[n].parent;
     const derived = calculateCheckoutV2AutomaticGiftLines({
-      lines: [{ ...item, shopProductId: item.canonicalProductId!, unitPrice: item.price, type: item.type === "peptide" ? "peptide" : "accessory", category: parent.category, categories: parent.categories, isPlugPlay: item.isPlugPlay === true, isNasalSpray: item.isNasalSpray === true, isNasalDiySet: item.isNasalDiySet === true }],
+      lines: [{ ...item, shopProductId: item.canonicalProductId!, unitPrice: item.price, type: item.type === "peptide" ? "peptide" : "accessory", category: parent.category, categories: mainshopBenefitCategories(parent), isPlugPlay: item.isPlugPlay === true, isNasalSpray: item.isNasalSpray === true, isNasalDiySet: item.isNasalDiySet === true }],
       promotion2for3, freeBacWaterProduct: { name: "BAC Wasser 3ml" },
     }).find(g => g.source === "promo_2for3");
     if (derived) gifts.push({ ...item, quantity: derived.quantity, price: 0, isFreeGift: true, variant: "2für3" });
@@ -173,34 +189,28 @@ export function canonicalizeMainshopLines(input: MainshopLine[], catalog: Mainsh
 export function assertMainshopStock(items: MainshopLine[], catalog: MainshopCatalogArticle[], substitutionEnabled = false): Map<string, SubstitutionResult> {
   const demand = new Map<string, number>();
   const add = (sku: string, count: number) => demand.set(norm(sku), (demand.get(norm(sku)) || 0) + count);
-  const trackedSkus = new Set<string>();
-  const trackedComponent = (id: string, count: number) => {
-    const matches = catalog.filter(a => a.isActive === 1 && norm(a.shopProductId) === norm(id));
-    if (matches.length !== 1) throw Error("CHECKOUT_STOCK_COMPONENT_REQUIRED");
-    trackedSkus.add(norm(matches[0].sku));
-    add(matches[0].sku, count);
-  };
   for (const item of items) {
     if (!item.shopProductId) throw Error("CHECKOUT_STOCK_IDENTITY_REQUIRED");
     add(item.shopProductId, item.quantity);
-    if (item.isNasalSpray && !item.isNasalDiySet) trackedComponent("bac-wasser", item.quantity);
-    if (item.isNasalDiySet) for (const c of NASAL_DIY_SET_COMPONENTS) if (c.inventoryTracked) trackedComponent(c.articleShopProductId, item.quantity);
+    assertNoRetiredNasalFormat(item);
+    const selected = catalog.find(a => norm(a.sku) === norm(item.shopProductId));
+    if (selected && preparedNasal(selected)) throw Error("CHECKOUT_PREPARED_NASAL_NOT_SELLABLE");
   }
   const active = catalog.filter(a => a.isActive === 1);
   const available = new Map(active.map(a => [norm(a.sku), Number.isSafeInteger(a.stock) && Number(a.stock) >= 0 ? Number(a.stock) : 0]));
-  const eligible = (a: MainshopCatalogArticle) => catalogCategories(a).every(isSubstitutionEligible);
+  const eligible = (a: MainshopCatalogArticle) => !nonVial(a) && !preparedNasal(a) && mainshopBenefitCategories(a).every(isSubstitutionEligible);
   const pending: Array<{ article: MainshopCatalogArticle; count: number }> = [];
   const substitutions = new Map<string, SubstitutionResult>();
   const fail = (sku: string): never => { throw Error(`CHECKOUT_STOCK_DEMAND_NOT_COVERED: ${sku} (Bestand)`); };
   // Reserve ALL directly fulfillable demand first, including paid/free BAC and
-  // tracked kit components. Substitution may only consume the remaining pool.
+  // separate accessories. Substitution may only consume the remaining pool.
   for (const [sku, count] of demand) {
     const matches = active.filter(a => norm(a.sku) === sku);
     if (matches.length !== 1 || !Number.isSafeInteger(count) || count <= 0 || !Number.isSafeInteger(matches[0].stock) || Number(matches[0].stock) < 0) fail(sku);
     const article = matches[0];
     if (Number(article.stock) >= count) available.set(sku, Number(article.stock) - count);
     else {
-      if (substitutionEnabled !== true || trackedSkus.has(sku) || !eligible(article)) fail(sku);
+      if (substitutionEnabled !== true || !eligible(article)) fail(sku);
       pending.push({ article, count });
     }
   }
@@ -279,7 +289,7 @@ export function mainshopCatalogScope(input: MainshopLine[], catalog: MainshopCat
   const selections = input.filter(i => !(i.isFreeGift && norm(i.shopProductId) === "bac-wasser-3ml" && i.bundleId === undefined)).map(i => resolveSelection(i, catalog));
   const families = new Set(selections.map(s => norm(s.parent.shopProductId)).filter(Boolean));
   const skus = new Set(selections.flatMap(s => [norm(s.parent.sku), norm(s.article.sku)]));
-  return catalog.filter(a => families.has(norm(a.shopProductId)) || skus.has(norm(a.sku)) || ["bac-wasser-3ml", "bac-wasser"].includes(norm(a.shopProductId))).sort((a, b) => norm(a.sku).localeCompare(norm(b.sku)));
+  return catalog.filter(a => families.has(norm(a.shopProductId)) || skus.has(norm(a.sku)) || norm(a.shopProductId) === "bac-wasser-3ml").sort((a, b) => norm(a.sku).localeCompare(norm(b.sku)));
 }
 export function mainshopPolicySnapshot(input: MainshopLine[], catalog: MainshopCatalogArticle[], bundles: MainshopBundle[], components: MainshopBundleComponent[]) {
   const ids = new Set(input.map(i => i.bundleId).filter(v => v !== undefined));

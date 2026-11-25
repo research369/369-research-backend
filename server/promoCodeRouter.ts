@@ -19,6 +19,7 @@ import {
   getPersonalPromoAssignmentsForPromoCodeIds,
 } from "./customerPromoAssignmentService.js";
 import { createPersonalPromoExpiryReminder } from "./personalPromoExpiryReminderService.js";
+import { assertNoExclusiveCampaignBenefitFromDb } from "./exclusiveCampaignPolicy.js";
 
 /**
  * Standard WaWi codes retain their established end-of-day expiry. Follow-up
@@ -338,6 +339,7 @@ export const promoCodeRouter = router({
       orderTotal: z.number().optional(), // for minOrder check
     }))
     .query(async ({ input }) => {
+      await assertNoExclusiveCampaignBenefitFromDb();
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 

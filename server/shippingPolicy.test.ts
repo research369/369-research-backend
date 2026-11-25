@@ -39,6 +39,6 @@ test("englische 369-Kundenmail nutzt 48h Mo-Fr, ohne Kühlversand; alte WaWi-Cop
   assert.match(customerHtml, /public holidays/);
   assert.doesNotMatch(customerHtml, /cold-chain|refrigerated packaging/);
   const wawiHtml = buildEnglishOrderConfirmationHtml({ ...baseOrder, mainshopCustomerPresentation: false }, "");
-  assert.match(wawiHtml, /cold-chain surcharge/);
+  assert.match(wawiHtml, /Refrigerated packaging; the recorded shipping amount/);
   assert.doesNotMatch(wawiHtml, /within 48 hours/);
 });

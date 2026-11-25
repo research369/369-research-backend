@@ -6,6 +6,7 @@ export const OPERATIONS_CAPABILITIES = {
   read: "operations_read",
   partnerCredit: "partner_credit_adjust",
   orderCleanup: "order_cleanup",
+  campaignSettings: "campaign_settings",
 } as const;
 export type OperationsCapability = typeof OPERATIONS_CAPABILITIES[keyof typeof OPERATIONS_CAPABILITIES];
 type OperationsPrincipal = { id: number; username: string; role: string } | null;

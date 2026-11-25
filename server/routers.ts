@@ -30,9 +30,11 @@ import { goodieRouter } from "./goodieRouter.js";
 import { customerDataChangeRouter } from "./customerDataChangeRouter.js";
 import { dashboardRouter } from "./dashboardRouter.js";
 import { adminChangeLogRouter } from "./adminChangeLogRouter.js";
+import { screenshotOrderRouter } from "./screenshotOrderRouter.js";
 
 export const appRouter = router({
   order: orderRouter,
+  screenshotOrder: screenshotOrderRouter,
   article: articleRouter,
   customer: customerRouter,
   label: labelRouter,

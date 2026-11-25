@@ -399,7 +399,7 @@ test("H2 canonical configured price works without optional SKU, no missing inven
   await assert.rejects(caller().quote(payload({ items: [{ ...payload().items[0], dosage: "10 mg" }] }) as any), /CHECKOUT_CATALOG_VARIANT_INVENTORY_REQUIRED/);
 });
 for (const flags of [{ isPlugPlay: true, isNasalSpray: true }, { isPlugPlay: true, isNasalDiySet: true }, { isNasalSpray: true }, { isNasalDiySet: true }]) test(`H5 unsupported/exclusive format ${JSON.stringify(flags)}`, async () => {
-  await assert.rejects(caller().quote(payload({ items: [{ ...payload().items[0], ...flags }] }) as any), /CHECKOUT_FORMAT/); assert.equal(writes.length, 0);
+  await assert.rejects(caller().quote(payload({ items: [{ ...payload().items[0], ...flags }] }) as any), /CHECKOUT_NASAL_FORMAT_RETIRED/); assert.equal(writes.length, 0);
 });
 test("H5 hidden standalone and hidden family parent fail; visible parent permits exact proved child", async () => {
   data.articles[0].shop_visible = 0;
@@ -409,18 +409,18 @@ test("H5 hidden standalone and hidden family parent fail; visible parent permits
 });
 for (const category of ["Nasensprays", "Tabletten", "Kapseln / Tabletten", "Fertigpens", "Zubehör"]) test(`H5 canonical ${category} cannot be forged to PlugPlay or BAC vial`, async () => {
   data.articles[0].category = category; data.articles[0].categories = [category];
-  await assert.rejects(caller().quote(payload({ items: [{ ...payload().items[0], isPlugPlay: true }] }) as any), /CHECKOUT_FORMAT_UNSUPPORTED/);
-  if (category === "Nasensprays") data.articles.push(article(4, "BAC-10ML", "bac-wasser", "5", "Zubehör", "BAC 10 ml"));
+  await assert.rejects(caller().quote(payload({ items: [{ ...payload().items[0], isPlugPlay: true }] }) as any), /CHECKOUT_FORMAT_UNSUPPORTED|CHECKOUT_PREPARED_NASAL_NOT_SELLABLE/);
+  if (category === "Nasensprays") {
+    await assert.rejects(caller().quote(payload() as any), /CHECKOUT_PREPARED_NASAL_NOT_SELLABLE/);
+    assert.equal(writes.length, 0); return;
+  }
   const q = await quote(); assert.equal(q.items.some(i => i.isFreeGift), false);
   assert.equal(q.items[0].isNasalSpray, category === "Nasensprays");
 });
-test("H5 legit canonical DIY family remains available at 7 surcharge and aggregates tracked kit BAC", async () => {
+test("H5 former canonical DIY format is retired even for previously eligible family", async () => {
   data.articles[0].shop_product_id = "semax";
-  data.articles.push(article(4, "BAC-10ML", "bac-wasser", "5", "Zubehör", "BAC 10 ml"));
-  const extra = { items: [{ ...payload().items[0], shopProductId: "semax", isNasalDiySet: true }] };
-  const q = await quote(extra); assert.equal(q.subtotal, 428); assert.equal(q.items.length, 1);
-  await caller().create(payload({ ...extra, expectedQuoteHash: q.hash, checkoutIdempotencyKey: "a".repeat(64) }) as any);
-  assert.equal(data.articles.find(a => a.sku === "BAC-10ML")!.stock, 996);
+  await assert.rejects(caller().quote(payload({ items: [{ ...payload().items[0], shopProductId: "semax", isNasalDiySet: true }] }) as any), /CHECKOUT_NASAL_FORMAT_RETIRED/);
+  assert.equal(writes.length, 0); assert.equal(data.orders.length, 0);
 });
 for (const [restriction, dose, amount] of [["pep-10mg", "5 mg", 0], ["pep-10mg", "10 mg", 72], ["PEP-10MG", "10 mg", 72], ["PeP", "5 mg", 28.8], ["pep-other", "5 mg", 0]] as const) test(`H6 restriction=${restriction} dose=${dose} exact canonical matching`, async () => {
   twoDosages(); promo(`Synthetic | {"restrict":["${restriction}"]}`);
@@ -566,15 +566,10 @@ test("Smart-Sub keeps aggregate paid plus free BAC mandatory", async () => {
   data.articles.find(a => a.sku === "BAC-3ML")!.stock = 2; await createQuoted(extra, q.hash);
   assert.equal(data.articles.find(a => a.sku === "BAC-3ML")!.stock, 0); assert.equal(fetches, 0);
 });
-test("Smart-Sub keeps aggregate DIY kit plus paid tracked BAC mandatory", async () => {
-  const item = smartSub(); data.articles.filter(a => a.shop_product_id === "pep").forEach(a => { a.shop_product_id = "semax"; });
-  data.articles.push({ ...article(8, "BAC-10ML", "bac-wasser", "5", "Zubehör", "BAC 10 ml"), variants: [], stock: 2 });
-  const extra = { items: [{ ...item(), shopProductId: "semax", isNasalDiySet: true }, { name: "BAC", shopProductId: "bac-wasser", quantity: 1, price: 0, type: "accessory" }] };
-  const q = await quote(extra); data.articles.at(-1)!.stock = 1;
-  await assert.rejects(caller().quote(payload(extra) as any), /CHECKOUT_STOCK_DEMAND_NOT_COVERED/);
-  await assert.rejects(createQuoted(extra, q.hash), /CHECKOUT_STOCK_DEMAND_NOT_COVERED/); assert.equal(writes.length, 0);
-  data.articles.at(-1)!.stock = 2; await createQuoted(extra, q.hash); assert.equal(data.articles.at(-1)!.stock, 0); assert.equal(fetches, 0);
-  // Stock coverage is not a claim of nasal/DIY quote/create position parity.
+test("Smart-Sub never revives retired DIY format or auto-components", async () => {
+  const item = smartSub();
+  await assert.rejects(caller().quote(payload({ items: [{ ...item(), isNasalDiySet: true }] }) as any), /CHECKOUT_NASAL_FORMAT_RETIRED/);
+  assert.equal(writes.length, 0); assert.equal(data.stock_history.length, 0);
 });
 for (const changed of ["disabled", "component-stock"]) test(`Smart-Sub CREATE repeats ${changed} under locks before number and writes`, async () => {
   const item = smartSub(); const extra = { items: [item()] }; const q = await quote(extra); calls = [];
@@ -640,4 +635,46 @@ test("Smart-Sub canonical oral parent excludes even a peptide-labelled hidden in
   await assert.rejects(caller().quote(payload(extra) as any), /CHECKOUT_STOCK_DEMAND_NOT_COVERED/);
   await assert.rejects(createQuoted(extra, q.hash), /CHECKOUT_STOCK_DEMAND_NOT_COVERED/);
   assert.equal(writes.length, 0); assert.equal(fetches, 0);
+});
+
+// Nov 25 handler fixtures only: pending real accessory definitions are NOT invented.
+test("NOV25 actual handler separate accessory set plus tagged vial preserves quote/create/receipt rows and never auto-adds BAC10 kit", async () => {
+  data.articles[0].categories = ["Peptide", "Nasensprays"];
+  const set = article(8, "LOCAL-SET", "local-set", "13.25", "Zubehör", "Synthetic DIY Nasenspray Zubehörset"); set.variants = [];
+  data.articles.push(set);
+  const extra = { coldShippingRequested: true, items: [...payload().items, { name: "Forged peptide", shopProductId: "local-set", price: 0, quantity: 2, type: "peptide" }] };
+  const q = await quote(extra);
+  assert.equal(q.items.length, 3); assert.equal(q.subtotal, 426.5); assert.equal(q.discount, 40); assert.equal(q.shipping, 8); assert.equal(q.total, 394.5);
+  assert.equal(q.items[1].price, 13.25); assert.equal(q.items[1].type, "accessory"); assert(q.items.every(i => !i.isNasalSpray && !i.isNasalDiySet));
+  const input = payload({ ...extra, checkoutIdempotencyKey: "e".repeat(64), expectedQuoteHash: q.hash });
+  const result = await caller().create(input as any);
+  assert.ok("success" in result && result.success); assert.equal(data.order_items.length, 3);
+  assert.deepEqual(data.order_items.map(i => [i.name, Number(i.price), i.quantity]), q.items.map(i => [i.name, i.price, i.quantity]));
+  assert.equal(data.articles.find(a => a.sku === "LOCAL-SET")!.stock, 998); assert.equal(data.stock_history.length, 3);
+  assert.equal(data.order_items.some(i => i.is_nasal_spray || i.is_nasal_diy_set), false);
+  const count = writes.length; await caller().create(input as any); assert.equal(writes.length, count);
+});
+test("NOV25 actual handler fresh set cannot inherit SmartSub, BAC, quantity or implicit components", async () => {
+  const set = article(8, "LOCAL-SET", "local-set", "13.25", "Zubehör", "Synthetic DIY Nasenspray Zubehörset"); set.variants = []; data.articles.push(set);
+  const extra = { items: [{ name: "Vial", shopProductId: "local-set", price: 1, quantity: 4, type: "peptide" }] };
+  const q = await quote(extra); assert.equal(q.items.length, 1); assert.equal(q.subtotal, 53); assert.equal(q.discount, 0); assert.equal(q.total, 61);
+  data.substitution_config[0].enabled = true; set.stock = 3;
+  await assert.rejects(caller().quote(payload(extra) as any), /CHECKOUT_STOCK_DEMAND_NOT_COVERED/); assert.equal(writes.length, 0);
+});
+for (const change of ["set-price", "prepared-primary", "prepared-name"]) test(`NOV25 actual handler locked revalidation protects ${change} before stock writes`, async () => {
+  const set = article(8, "LOCAL-SET", "local-set", "13.25", "Zubehör", "Synthetic DIY Nasenspray Zubehörset"); set.variants = []; data.articles.push(set);
+  const extra = { items: [...payload().items, { name: "Set", shopProductId: "local-set", price: 1, quantity: 1, type: "accessory" }] }; const q = await quote(extra);
+  beforeWriteTransaction = () => {
+    if (change === "set-price") set.selling_price = "15.50";
+    if (change === "prepared-primary") data.articles[0].category = "Nasensprays";
+    if (change === "prepared-name") data.articles[0].name = "Ready Nasenspray (5 mg)";
+  };
+  await assert.rejects(caller().create(payload({ ...extra, checkoutIdempotencyKey: "f".repeat(64), expectedQuoteHash: q.hash }) as any), /CHECKOUT_QUOTE_CHANGED/);
+  assert.equal(data.orders.length, 0); assert.equal(data.stock_history.length, 0); assert.equal(data.priority_checkout_receipts.length, 0);
+});
+
+test("NOV25 actual handler all current 369 forms use ordinary shipping even at cold-excluded island and stale requested-cooling flag", async () => {
+  const q = await quote({ coldShippingRequested: true, customer: { ...payload().customer, zip: "27498", city: "Helgoland" }, items: [{ ...payload().items[0], quantity: 1, isPlugPlay: true }] });
+  assert.equal(q.shipping, 8); assert.equal(q.items.length, 1); assert.equal(q.subtotal, 115);
+  assert.equal(fetches, 0); assert.equal(writes.length, 0);
 });

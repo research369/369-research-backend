@@ -90,6 +90,30 @@ export function resolveAuthoritativeItemPrice(
     ?? family[0];
   if (!canonical) throw new Error(`KWK_ARTIKEL_NICHT_GEFUNDEN: ${item.shopProductId}`);
 
+  const promotedMaster = catalog.find(a => a.shopProductId === canonical.shopProductId && a.shopVisible === 1
+    && Array.isArray(a.variants) && a.variants.some(raw => raw && typeof raw === "object" && raw.publicationStatus === "finalized-draft"));
+  if (promotedMaster && canonical !== promotedMaster)
+    throw new Error(`KWK_ENTWURFSVARIANTE_NICHT_FREIGEGEBEN: ${item.shopProductId}`);
+  const finalized = Array.isArray(canonical.variants) && canonical.variants.some(raw =>
+    raw && typeof raw === "object" && raw.publicationStatus === "finalized-draft");
+  if (finalized) {
+    const approved = canonical.variants as Array<Record<string, unknown>>;
+    const requested = normalizeDosage(item.dosage);
+    const selected = requested ? approved.find(v => normalizeDosage(v.dosage ?? v.label) === requested)
+      : approved.length === 1 ? approved[0] : undefined;
+    if (canonical.shopVisible !== 1 || !selected || selected.publicationStatus !== "finalized-draft"
+      || typeof selected.sku !== "string" || !selected.sku || selected.hidden === true
+      || !Number.isFinite(selected.price) || Number(selected.price) <= 0)
+      throw new Error(`KWK_ENTWURFSVARIANTE_NICHT_FREIGEGEBEN: ${item.shopProductId}`);
+    return roundMoney(Number(selected.price) + (item.isPlugPlay ? 15 : 0) + (item.isNasalDiySet ? 7 : 0));
+  }
+  // Explicit open-price draft rows (direct SKU lookup too) never become free
+  // through Number(null). Actual free gifts returned above remain unchanged.
+  if ((canonical.sellingPrice === null || Number(canonical.sellingPrice) === 0) && catalog.some(a =>
+    a.shopProductId === canonical.shopProductId && Array.isArray(a.variants) && a.variants.some(raw =>
+      raw && typeof raw === "object" && raw.priceStatus === "open")))
+    throw new Error(`KWK_ARTIKELPREIS_NICHT_ERMITTELBAR: ${item.shopProductId}`);
+
   const salePrice = Number(canonical.salePrice);
   let basePrice = Number.isFinite(salePrice) && salePrice > 0 ? salePrice : NaN;
   const dosage = normalizeDosage(item.dosage);
@@ -138,25 +162,33 @@ export const COLD_CHAIN_SHIPPING_SURCHARGE = 7;
  */
 export function requiresColdChainShipping(item: ShippingCheckoutItem): boolean {
   if (item.isPlugPlay === true) return true;
+  const descriptor = `${item.name || ""} ${item.variant || ""}`.toLowerCase();
+  if (/plug\s*(?:&|and|und)?\s*play/.test(descriptor) && /patrone|cartridge/.test(descriptor)) return true;
   if (item.isNasalDiySet === true) return false;
   if (item.isNasalSpray === true) return true;
-  const descriptor = `${item.name || ""} ${item.variant || ""}`.toLowerCase();
-  return descriptor.includes("nasenspray") && !descriptor.includes("diy");
+  return /nasenspray|nasal\s*spray/.test(descriptor) && !descriptor.includes("diy");
 }
 
 export function calculateAuthoritativeShipping(input: {
   country: string;
   items: ShippingCheckoutItem[];
   promoDescription?: string | null;
-  /** Explicit operator request for an otherwise non-cold manual WaWi shipment. */
+  /** Waives base only; cold-chain service must remain payable. */
+  freeBaseShipping?: boolean;
+  /** Pass only from the currently active authoritative campaign snapshot. */
+  coldShippingSurcharge?: number | null;
+  /** Explicit request, validated against destination eligibility by the caller. */
   coldChainRequested?: boolean;
 }): number {
   const region = resolveShippingRegion(input.country);
   const { freeShipping } = parsePromoMetadata(input.promoDescription);
-  if (freeShipping.some((entry) => entry.toLowerCase() === region)) return 0;
-  const base = region === "de" ? 8 : region === "ch" ? 18 : 15;
+  const waiveBase = input.freeBaseShipping === true || freeShipping.some((entry) => entry.toLowerCase() === region);
+  const base = waiveBase ? 0 : region === "de" ? 8 : region === "ch" ? 18 : 15;
   const hasColdChainService = input.coldChainRequested === true || input.items.some(requiresColdChainShipping);
-  return base + (hasColdChainService ? COLD_CHAIN_SHIPPING_SURCHARGE : 0);
+  const configuredCold = input.coldShippingSurcharge;
+  const cold = typeof configuredCold === "number" && Number.isFinite(configuredCold) && configuredCold >= 0
+    ? configuredCold : COLD_CHAIN_SHIPPING_SURCHARGE;
+  return roundMoney(base + (hasColdChainService ? cold : 0));
 }
 
 function productMatchesRestriction(productId: string, restriction: string): boolean {
@@ -167,10 +199,15 @@ function productMatchesRestriction(productId: string, restriction: string): bool
 
 export function calculateAutomaticGlobalDiscount(subtotal: number, percentage: number): number {
   const normalizedSubtotal = roundMoney(Math.max(0, subtotal));
-  return roundMoney(Math.min(
-    normalizedSubtotal,
-    normalizedSubtotal * Math.max(0, Math.min(100, percentage)) / 100,
-  ));
+  const rate = Math.max(0, Math.min(100, percentage));
+  const basisPoints = Math.round(rate * 100);
+  // Round from integer cents/basis points without first dividing a fractional
+  // euro amount. 215 EUR * 36.9% is 79.335: the discount must be 79.34, not 79.33.
+  // Preserve legacy rates with more than two decimal places.
+  const discount = Math.abs(rate * 100 - basisPoints) < 1e-8
+    ? Math.round(Math.round(normalizedSubtotal * 100) * basisPoints / 10000) / 100
+    : Math.round(normalizedSubtotal * rate) / 100;
+  return roundMoney(Math.min(normalizedSubtotal, discount));
 }
 
 /**

@@ -337,6 +337,18 @@ export class WhatsappOrderService {
           throw Error("idempotency_conflict");
         return old.result;
       }
+      // Discover immutable intent identity without a row lock, then follow quote's
+      // intent-before-quote order. Re-read the full quote under the row lock below.
+      const identity = (
+        await c.query(
+          "SELECT tenant,conversation,draft_id FROM wop_quotes WHERE id=$1 AND tenant=$2",
+          [input.quote_id, tenant],
+        )
+      ).rows[0];
+      if (!identity) throw Error("quote_mismatch");
+      await c.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
+        identity.tenant + identity.conversation + identity.draft_id,
+      ]);
       const q = (
         await c.query(
           "SELECT * FROM wop_quotes WHERE id=$1 AND tenant=$2 FOR UPDATE",
@@ -360,9 +372,6 @@ export class WhatsappOrderService {
         q.approval_hash !== digest(input.owner_approval.approval_token)
       )
         throw Error("both_approvals_required");
-      await c.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
-        q.tenant + q.conversation + q.draft_id,
-      ]);
       const intent = await c.query(
         "SELECT execution_id FROM wop_intents WHERE tenant=$1 AND conversation=$2 AND draft_id=$3",
         [tenant, q.conversation, q.draft_id],

@@ -1,3 +1,5 @@
+import { appendOrderDiscountHtml, appendOrderDiscountText, buildOrderDiscountMessagePresentation, futureCartDiscountNotice, stripManagedOrderDiscountBlock } from "./orderDiscountMessagePresentation.js";
+import { nativeMessagePlainText } from "./emailService.js";
 /**
  * Follow-Up Router – Cross-Sell Follow-ups nach Versand
  *
@@ -222,6 +224,24 @@ async function getCustomerOrderHistory(db: any, order: any): Promise<any[]> {
 }
 
 /** Generiert WhatsApp-Nachricht – entweder mit echtem Code oder Platzhalter */
+
+/** Adapt legacy cached content at read/dispatch; no migration, code issuance or financial writes. */
+export function presentFollowUpContent(order: any, content: string, channel: 'email' | 'whatsapp'): string {
+  const html = channel === 'email';
+  const notice = futureCartDiscountNotice('de'); // Existing body/product copy is German, not falsely EN.
+  let base = stripManagedOrderDiscountBlock(content.replace(/\u2063\u200b\u200b\u2063[\s\S]*?\u2063\u200c\u200c\u2063/g, '')
+    .replace(/<!-- follow-up-future-cart:v1:start -->[\s\S]*?<!-- follow-up-future-cart:v1:end -->/g, '')
+    .replace(/\[follow-up-future-cart:v1:start\][\s\S]*?\[follow-up-future-cart:v1:end\]/g, ''));
+  const future = html ? `<!-- follow-up-future-cart:v1:start --><p style="font-size:13px;line-height:1.5">${notice}</p><!-- follow-up-future-cart:v1:end -->` : `\u2063\u200b\u200b\u2063\n${notice}\n\u2063\u200c\u200c\u2063`;
+  base = html && /<\/body>/i.test(base) ? base.replace(/<\/body>/i, `${future}</body>`) : `${base}\n\n${future}`;
+  if (order && ['subtotal', 'discount', 'shipping', 'total'].every(key => order[key] !== undefined)) {
+    const presentation = buildOrderDiscountMessagePresentation(order, 'de');
+    const historical = { ...presentation, html: `<p style="font-size:13px;font-weight:700">Historische Abzüge deiner damaligen Bestellung</p>${presentation.html}`, text: `Historische Abzüge deiner damaligen Bestellung\n${presentation.text}`, whatsapp: `Historische Abzüge deiner damaligen Bestellung\n${presentation.whatsapp}` };
+    return html ? appendOrderDiscountHtml(base, historical) : appendOrderDiscountText(base, historical, 'whatsapp');
+  }
+  return base;
+}
+
 export function generateWhatsAppMessage(
   order: any,
   selectedArticles: any[],
@@ -249,7 +269,7 @@ export function generateWhatsAppMessage(
     })
     .join("\n\n");
 
-  return `Hallo ${firstName},
+  return presentFollowUpContent(order, `Hallo ${firstName},
 
 wir hoffen, du bist zufrieden mit deiner Bestellung vom ${orderDate}! 🙏
 
@@ -266,7 +286,7 @@ Alle Produkte sind ausschließlich für In-vitro-Forschungszwecke bestimmt.
 Bei Fragen stehen wir dir jederzeit zur Verfügung. 🔬
 
 Viele Grüße,
-Dein 369 Research Team`;
+Dein 369 Research Team`, "whatsapp");
 }
 
 /** Generiert E-Mail-Betreff und -Body – entweder mit echtem Code oder Platzhalter */
@@ -276,7 +296,7 @@ export function generateEmailContent(
   promoCode: string,
   codeExpiresAt: Date | null,
   terms: FollowUpOfferTerms,
-): { subject: string; body: string } {
+): { subject: string; body: string; emailText: string } {
   const firstName = order.firstName || order.first_name || "";
   const orderDate = order.orderDate
     ? new Date(order.orderDate).toLocaleDateString("de-DE")
@@ -320,7 +340,7 @@ export function generateEmailContent(
     </div>
     <!-- Body -->
     <div style="padding:40px;">
-      <p style="color:#1A1A2E;font-size:16px;margin:0 0 8px;">Hallo ${firstName},</p>
+      <p style="color:#1A1A2E;font-size:16px;margin:0 0 8px;">Hallo ${escapeHtml(firstName)},</p>
       <p style="color:#475569;font-size:15px;line-height:1.6;margin:0 0 24px;">
         wir hoffen, du bist zufrieden mit deiner Bestellung vom <strong>${orderDate}</strong>!
         Als Dankeschön für dein Vertrauen möchten wir dir eine gezielte Ergänzung zeigen.
@@ -339,7 +359,7 @@ export function generateEmailContent(
       <!-- Promo Code -->
       <div style="background:#f0f7ff;border:2px dashed #0040C1;border-radius:8px;padding:20px;text-align:center;margin-bottom:16px;">
         <p style="color:#475569;font-size:14px;margin:0 0 8px;">Dein persönlicher Rabattcode</p>
-        <p style="color:#0040C1;font-size:28px;font-weight:800;letter-spacing:0.1em;margin:0 0 8px;">${promoCode}</p>
+        <p style="color:#0040C1;font-size:28px;font-weight:800;letter-spacing:0.1em;margin:0 0 8px;">${escapeHtml(promoCode)}</p>
         <p style="color:#475569;font-size:14px;margin:0;"><strong>${terms.discountPercent}% Rabatt</strong> auf den gesamten Warenkorb<br><span style="font-size:12px;">Versandkosten sind ausgenommen.</span></p>
       </div>
       <p style="color:#ef4444;font-size:13px;text-align:center;margin:0 0 24px;">
@@ -362,7 +382,8 @@ export function generateEmailContent(
 </body>
 </html>`;
 
-  return { subject, body };
+  const presentedBody = presentFollowUpContent(order, body, "email");
+  return { subject, body: presentedBody, emailText: nativeMessagePlainText(presentedBody) };
 }
 
 // ─── Cross-Sell Empfehlungs-Matrix ──────────────────────────────────────────
@@ -883,6 +904,9 @@ export const followUpRouter = router({
       return {
         followUp: {
           ...followUp,
+          whatsappMessage: followUp.whatsappMessage ? presentFollowUpContent(originOrder, followUp.whatsappMessage, "whatsapp") : followUp.whatsappMessage,
+          emailBody: followUp.emailBody ? presentFollowUpContent(originOrder, followUp.emailBody, "email") : followUp.emailBody,
+          emailText: followUp.emailBody ? nativeMessagePlainText(presentFollowUpContent(originOrder, followUp.emailBody, "email")) : undefined,
           codeExpired,
         },
         originOrder: {
@@ -1077,7 +1101,7 @@ export const followUpRouter = router({
       // The selected terms are already visible, but become immutable only at customer contact.
       const terms = termsForFollowUp(followUp);
       const whatsappMessage = generateWhatsAppMessage(order, selectedProducts, "[DISCOUNT_CODE]", null, terms);
-      const { subject, body } = generateEmailContent(order, selectedProducts, "[DISCOUNT_CODE]", null, terms);
+      const { subject, body, emailText } = generateEmailContent(order, selectedProducts, "[DISCOUNT_CODE]", null, terms);
 
       // Platzhalter-Text im Follow-up speichern
       await db
@@ -1097,6 +1121,7 @@ export const followUpRouter = router({
         whatsappMessage,
         emailSubject: subject,
         emailBody: body,
+        emailText,
         // Kein Code hier – wird erst bei resolveCode erstellt
         hasCode: false,
         discountCode: followUp.discountCode || null,
@@ -1197,7 +1222,7 @@ export const followUpRouter = router({
       // Platzhalter in gespeicherten Nachrichten ersetzen
       const terms = termsForFollowUp(followUp);
       const finalWhatsApp = generateWhatsAppMessage(order, selectedProducts, promoCode, codeExpiresAt, terms);
-      const { subject: finalSubject, body: finalBody } = generateEmailContent(order, selectedProducts, promoCode, codeExpiresAt, terms);
+      const { subject: finalSubject, body: finalBody, emailText } = generateEmailContent(order, selectedProducts, promoCode, codeExpiresAt, terms);
 
       // Finale Nachrichten in DB speichern
       await db
@@ -1214,6 +1239,7 @@ export const followUpRouter = router({
         whatsappMessage: finalWhatsApp,
         emailSubject: finalSubject,
         emailBody: finalBody,
+        emailText,
         promoCode,
         codeExpiresAt,
         isNewCode,
@@ -1241,7 +1267,14 @@ export const followUpRouter = router({
 
       const result = await createIndividualCode(db, followUp);
       console.log(`[FollowUp] forceNewCode: Neuer Code ${result.code} für Follow-up ${input.followupId}`);
-      return { code: result.code, expiresAt: result.expiresAt };
+      const [order] = await db.select().from(orders).where(eq(orders.orderId, followUp.orderId)).limit(1);
+      const selectedProducts = await db.select().from(salesFollowupProducts).where(eq(salesFollowupProducts.followupId, input.followupId));
+      if (!order) return { code: result.code, expiresAt: result.expiresAt };
+      const email = generateEmailContent(order, selectedProducts, result.code, result.expiresAt, termsForFollowUp(followUp));
+      return { code: result.code, expiresAt: result.expiresAt,
+        whatsappMessage: generateWhatsAppMessage(order, selectedProducts, result.code, result.expiresAt, termsForFollowUp(followUp)),
+        emailSubject: email.subject, emailBody: email.body, emailText: email.emailText,
+      };
     }),
 
   /**
@@ -1313,6 +1346,8 @@ export const followUpRouter = router({
         throw new Error("Nachrichten noch nicht generiert. Bitte zuerst Nachrichten generieren.");
       }
 
+      const previousCode = followUp.discountCode;
+      const previousExpiry = followUp.codeExpiresAt;
       // Code-Ablauf prüfen – bei abgelaufenem Code resolveCode aufrufen um neuen Code zu erstellen
       if (followUp.codeExpiresAt && new Date(followUp.codeExpiresAt) < new Date()) {
         // Neuen Code automatisch erstellen (E-Mail-Versand = Kundenkontakt-Moment)
@@ -1337,7 +1372,7 @@ export const followUpRouter = router({
 
       // Bestellung laden für E-Mail-Adresse
       const [order] = await db
-        .select({ email: orders.email, firstName: orders.firstName, lastName: orders.lastName })
+        .select()
         .from(orders)
         .where(eq(orders.orderId, followUp.orderId))
         .limit(1);
@@ -1345,6 +1380,20 @@ export const followUpRouter = router({
 
       if (!order.email) throw new Error("Kunde hat keine E-Mail-Adresse");
 
+      // Never dispatch preview placeholders; direct send does not issue extra codes.
+      if (!followUp.discountCode) throw new Error("Bitte zuerst den Rabattcode auflösen.");
+      let cachedBody = followUp.emailBody.replace(/\[DISCOUNT_CODE\]/g, escapeHtml(followUp.discountCode));
+      if (previousCode && previousCode !== followUp.discountCode) {
+        cachedBody = cachedBody.split(escapeHtml(previousCode)).join(escapeHtml(followUp.discountCode));
+      }
+      const formatExpiry = (value: Date) => new Date(value).toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+      if (followUp.codeExpiresAt) {
+        const finalExpiry = formatExpiry(followUp.codeExpiresAt);
+        cachedBody = cachedBody.replace(/\[ABLAUFDATUM\]/g, finalExpiry);
+        if (previousExpiry) cachedBody = cachedBody.split(formatExpiry(previousExpiry)).join(finalExpiry);
+      }
+      const finalBody = presentFollowUpContent(order, cachedBody, "email");
+      const finalText = nativeMessagePlainText(finalBody);
       // E-Mail senden via Resend
       const response = await fetch(RESEND_API_URL, {
         method: "POST",
@@ -1357,7 +1406,8 @@ export const followUpRouter = router({
           to: [order.email],
           bcc: ["369rebackup@gmail.com"], // Kopie an Pakko
           subject: followUp.emailSubject,
-          html: followUp.emailBody,
+          html: finalBody,
+          text: finalText,
         }),
       });
 

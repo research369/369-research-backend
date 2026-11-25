@@ -1,3 +1,5 @@
+import { appendOrderDiscountHtml, appendOrderDiscountText, buildOrderDiscountMessagePresentation } from "./orderDiscountMessagePresentation.js";
+import type { OrderDiscountMessageSnapshot } from "./orderDiscountMessageContract.js";
 /**
  * E-Mail Service – Sends order confirmation emails to customers via Resend
  * Uses Resend API (https://resend.com)
@@ -16,7 +18,7 @@ const RESEND_API_URL = "https://api.resend.com/emails";
  */
 const CUSTOMER_EMAIL_BCC = "369rebackup@gmail.com";
 
-interface OrderEmailData {
+export interface OrderEmailData {
   orderId: string;
   /** Explicit DE/EN preference saved with the concrete order. */
   communicationLanguage?: "de" | "en";
@@ -49,6 +51,10 @@ interface OrderEmailData {
   subtotal: number;
   discount: number;
   discountCode?: string | null;
+  discountBreakdown?: unknown;
+  creditUsed?: unknown;
+  kwkCreditUsed?: unknown;
+  orderDiscountSnapshot?: OrderDiscountMessageSnapshot;
   shipping: number;
   total: number;
   paymentMethod: string;
@@ -127,17 +133,32 @@ export function buildBankTransferIntroHtml(bankDetailsHtml: string, language: "d
   return `<p style="margin:0 0 14px;font-size:13px;color:#374151;line-height:1.55;">Du kannst den Betrag per <strong>SEPA- oder Echtzeitüberweisung</strong> auf <strong>unser Wise-Konto</strong> überweisen. Überweisung ist der zuverlässige Zahlungsweg.</p>`;
 }
 
+
+/** Explicit native plain text: keep real link targets and table boundaries. */
+export function nativeMessagePlainText(html: string): string {
+  return html.replace(/<a\b[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, '$2 ($1)')
+    .replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<\/(?:tr|h[1-6]|p|div|section|li|table)>/gi, '\n')
+    .replace(/<\/t[dh]>/gi, ': ').replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#0?39;/g, "'").replace(/&quot;/g, '"')
+    .replace(/\n[ \t]+/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+function confirmationDiscount(data: OrderEmailData, language: 'de' | 'en') {
+  return buildOrderDiscountMessagePresentation(data.orderDiscountSnapshot ?? data, language);
+}
+
 export function buildOrderConfirmationHtml(data: OrderEmailData, bankDetailsHtml: string): string {
   const isMainshopCustomer = data.mainshopCustomerPresentation === true;
   const nextPaymentStep = bankDetailsHtml
-    ? `Überweise <strong>${data.total.toFixed(2)} €</strong> auf unser Wise-Konto mit dem Verwendungszweck <strong>${data.orderId}</strong>`
-    : `Nutze die gewählte Zahlungsart und gib als Verwendungszweck <strong>${data.orderId}</strong> an`;
+    ? `Überweise <strong>${data.total.toFixed(2)} €</strong> auf unser Wise-Konto mit dem Verwendungszweck <strong>${escapeHtml(data.orderId)}</strong>`
+    : `Nutze die gewählte Zahlungsart und gib als Verwendungszweck <strong>${escapeHtml(data.orderId)}</strong> an`;
   const itemRows = data.items.map(item => {
     const sku = generateSKUFromName(item.name, item.dosage || item.variant);
     return `
     <tr>
       <td style="padding:10px 12px;border-bottom:1px solid #f3f4f6;font-size:14px;font-family:monospace;font-weight:600;">
-        ${sku}${item.variant ? ` – ${item.variant}` : ""}
+        ${escapeHtml(sku)}${item.variant ? ` – ${escapeHtml(item.variant)}` : ""}
       </td>
       <td style="padding:10px 12px;border-bottom:1px solid #f3f4f6;font-size:14px;text-align:center;">${item.quantity}</td>
       <td style="padding:10px 12px;border-bottom:1px solid #f3f4f6;font-size:14px;text-align:right;">${(item.price * item.quantity).toFixed(2)} €</td>
@@ -169,8 +190,8 @@ export function buildOrderConfirmationHtml(data: OrderEmailData, bankDetailsHtml
       
       <!-- Order Info -->
       <div style="margin-bottom:24px;">
-        <h2 style="font-size:18px;color:#111827;margin:0 0 4px;">Bestellung ${data.orderId}</h2>
-        <p style="font-size:13px;color:#6b7280;margin:0;">Vielen Dank für deine Bestellung, ${data.customer.firstName}!</p>
+        <h2 style="font-size:18px;color:#111827;margin:0 0 4px;">Bestellung ${escapeHtml(data.orderId)}</h2>
+        <p style="font-size:13px;color:#6b7280;margin:0;">Vielen Dank für deine Bestellung, ${escapeHtml(data.customer.firstName)}!</p>
       </div>
 
       <!-- Items Table -->
@@ -187,13 +208,14 @@ export function buildOrderConfirmationHtml(data: OrderEmailData, bankDetailsHtml
         </tbody>
       </table>
 
+      ${appendOrderDiscountHtml("", confirmationDiscount(data, "de"))}
       <!-- Totals -->
       <div style="border-top:2px solid #e5e7eb;padding-top:12px;">
         <table style="width:100%;border-collapse:collapse;">
           <tr><td style="padding:4px 0;font-size:14px;color:#6b7280;">Zwischensumme</td><td style="padding:4px 0;font-size:14px;text-align:right;">${data.subtotal.toFixed(2)} €</td></tr>
-          ${data.discount > 0 ? `<tr><td style="padding:4px 0;font-size:14px;color:#059669;">Rabatt${data.discountCode ? ` (${data.discountCode})` : ""}</td><td style="padding:4px 0;font-size:14px;text-align:right;color:#059669;">-${data.discount.toFixed(2)} €</td></tr>` : ""}
+          ${data.discount > 0 ? `<tr><td style="padding:4px 0;font-size:14px;color:#059669;">Abzüge gesamt (Rabatte/Guthaben)</td><td style="padding:4px 0;font-size:14px;text-align:right;color:#059669;">-${data.discount.toFixed(2)} €</td></tr>` : ""}
           <tr><td style="padding:4px 0;font-size:14px;color:#6b7280;">Versand${!isMainshopCustomer && data.items.some(i => (i as any).isPlugPlay || ((i as any).isNasalSpray && !(i as any).isNasalDiySet)) ? ' \u2744\ufe0f' : ''}</td><td style="padding:4px 0;font-size:14px;text-align:right;">${data.shipping > 0 ? data.shipping.toFixed(2) + " €" : "Kostenlos"}</td></tr>
-          ${!isMainshopCustomer && data.items.some(i => (i as any).isPlugPlay || ((i as any).isNasalSpray && !(i as any).isNasalDiySet)) ? '<tr><td colspan="2" style="padding:2px 0 6px;font-size:12px;color:#0284c7;">\u2744\ufe0f Inkl. Aufpreis f\u00fcr gek\u00fchlten Versand (+7 \u20ac) aufgrund aufwendiger K\u00fchlverpackung</td></tr>' : ''}
+          ${!isMainshopCustomer && data.items.some(i => (i as any).isPlugPlay || ((i as any).isNasalSpray && !(i as any).isNasalDiySet)) ? '<tr><td colspan="2" style="padding:2px 0 6px;font-size:12px;color:#0284c7;">\u2744\ufe0f Gek\u00fchlter Versand; der gespeicherte Versandbetrag steht oben</td></tr>' : ''}
           ${!isMainshopCustomer && data.items.some(i => (i as any).isPlugPlay || ((i as any).isNasalSpray && !(i as any).isNasalDiySet)) ? `<tr><td colspan="2" style="padding:6px 0 4px;"><div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:12px 14px;font-size:13px;color:#9a3412;"><strong>\u26a0\ufe0f Wichtiger Versandhinweis (K\u00fchlprodukte)</strong><br>Bestellungen mit Patronen (Plug &amp; Play) oder Nasensprays werden aus Gr\u00fcnden der K\u00fchlkettensicherheit ausschlie\u00dflich <strong>Montag bis Donnerstag</strong> versendet. Bestellungen die nach Donnerstag eingehen, werden am darauffolgenden <strong>Montag</strong> verschickt.</div></td></tr>` : ''}
           <tr><td style="padding:8px 0 0;font-size:18px;font-weight:700;color:#111827;border-top:1px solid #e5e7eb;">Gesamt</td><td style="padding:8px 0 0;font-size:18px;font-weight:700;text-align:right;color:#111827;border-top:1px solid #e5e7eb;">${data.total.toFixed(2)} €</td></tr>
         </table>
@@ -209,7 +231,7 @@ export function buildOrderConfirmationHtml(data: OrderEmailData, bankDetailsHtml
         ${bankDetailsHtml}
         <tr style="background:#dbeafe;">
           <td style="padding:12px;color:#1e40af;font-size:14px;font-weight:600;">Verwendungszweck</td>
-          <td style="padding:12px;font-size:16px;font-weight:700;color:#1e40af;letter-spacing:1px;">${data.orderId}</td>
+          <td style="padding:12px;font-size:16px;font-weight:700;color:#1e40af;letter-spacing:1px;">${escapeHtml(data.orderId)}</td>
         </tr>
         <tr><td style="padding:8px 12px;color:#6b7280;font-size:14px;">Betrag</td><td style="padding:8px 12px;font-size:14px;font-weight:600;">${data.total.toFixed(2)} €</td></tr>
       </table>
@@ -219,10 +241,10 @@ export function buildOrderConfirmationHtml(data: OrderEmailData, bankDetailsHtml
     <div style="background:#ffffff;border:1px solid #e5e7eb;border-top:none;padding:24px;">
       <h3 style="font-size:16px;color:#111827;margin:0 0 8px;">Lieferadresse</h3>
       <p style="font-size:14px;color:#374151;margin:0;line-height:1.6;">
-        ${data.customer.firstName} ${data.customer.lastName}${data.customer.company ? `<br>${data.customer.company}` : ""}<br>
-        ${data.customer.street} ${data.customer.houseNumber}<br>
-        ${data.customer.zip} ${data.customer.city}<br>
-        ${data.customer.country}
+        ${escapeHtml(data.customer.firstName)} ${escapeHtml(data.customer.lastName)}${data.customer.company ? `<br>${escapeHtml(data.customer.company)}` : ""}<br>
+        ${escapeHtml(data.customer.street)} ${escapeHtml(data.customer.houseNumber)}<br>
+        ${escapeHtml(data.customer.zip)} ${escapeHtml(data.customer.city)}<br>
+        ${escapeHtml(data.customer.country)}
       </p>
     </div>
 
@@ -257,7 +279,7 @@ export function buildEnglishOrderConfirmationHtml(data: OrderEmailData, bankDeta
     ? `Transfer <strong>${data.total.toFixed(2)} €</strong> to our Wise bank account using <strong>${data.orderId}</strong> as the payment reference.`
     : `Use the selected payment method and enter <strong>${data.orderId}</strong> as the payment reference.`;
 
-  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head><body style="margin:0;padding:0;background:#f9fafb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;"><div style="max-width:600px;margin:0 auto;padding:20px;"><header style="background:linear-gradient(135deg,#0f172a,#1e293b);border-radius:12px 12px 0 0;padding:32px;text-align:center;"><h1 style="color:#fff;margin:0;font-size:24px;">369 Research</h1><p style="color:#94a3b8;margin:8px 0 0;font-size:14px;">Order confirmation</p></header><section style="background:#fef3c7;border-left:4px solid #f59e0b;padding:16px 20px;"><strong style="font-size:14px;color:#92400e;">⚠ Important payment notice</strong><p style="margin:6px 0 0;font-size:13px;color:#78350f;">${isMainshopCustomer ? "Please transfer the amount independently. After payment is received, dispatch takes place within 48 hours on working days (Monday to Friday), excluding weekends and public holidays. Delivery time depends on the carrier." : "Please transfer the amount independently. Shipping starts only after the payment has reached our account."}</p></section><main style="background:#fff;padding:24px;border:1px solid #e5e7eb;"><h2 style="font-size:18px;color:#111827;margin:0 0 4px;">Order ${escapeHtml(data.orderId)}</h2><p style="font-size:14px;color:#6b7280;margin:0 0 24px;">Thank you for your order, ${escapeHtml(data.customer.firstName)}!</p><table style="width:100%;border-collapse:collapse;"><thead><tr style="background:#f9fafb;"><th style="padding:10px 12px;text-align:left;font-size:12px;color:#6b7280;">ITEM</th><th style="padding:10px 12px;text-align:center;font-size:12px;color:#6b7280;">QTY</th><th style="padding:10px 12px;text-align:right;font-size:12px;color:#6b7280;">PRICE</th></tr></thead><tbody>${itemRows}</tbody></table><table style="width:100%;border-collapse:collapse;margin-top:12px;border-top:2px solid #e5e7eb;"><tr><td style="padding:8px 0;color:#6b7280;">Subtotal</td><td style="padding:8px 0;text-align:right;">${data.subtotal.toFixed(2)} €</td></tr>${data.discount > 0 ? `<tr><td style="padding:4px 0;color:#059669;">Discount${data.discountCode ? ` (${escapeHtml(data.discountCode)})` : ""}</td><td style="padding:4px 0;text-align:right;color:#059669;">-${data.discount.toFixed(2)} €</td></tr>` : ""}<tr><td style="padding:4px 0;color:#6b7280;">Shipping${coldChain ? " ❄️" : ""}</td><td style="padding:4px 0;text-align:right;">${data.shipping > 0 ? `${data.shipping.toFixed(2)} €` : "Free"}</td></tr>${coldChain ? '<tr><td colspan="2" style="padding:4px 0 8px;font-size:12px;color:#0284c7;">❄️ Includes the cold-chain surcharge (+7 €) for specialised refrigerated packaging.</td></tr>' : ""}<tr><td style="padding:10px 0 0;border-top:1px solid #e5e7eb;font-weight:700;font-size:18px;">Total</td><td style="padding:10px 0 0;border-top:1px solid #e5e7eb;text-align:right;font-weight:700;font-size:18px;">${data.total.toFixed(2)} €</td></tr></table></main><section style="background:#eff6ff;border:1px solid #bfdbfe;border-top:none;padding:24px;"><h3 style="font-size:16px;color:#1e40af;margin:0 0 12px;">Payment information</h3>${buildBankTransferIntroHtml(bankDetailsHtml, "en")}<table style="width:100%;border-collapse:collapse;"><tr><td style="padding:8px 12px;color:#6b7280;">Payment method</td><td style="padding:8px 12px;font-weight:600;">${escapeHtml(getPaymentMethodLabelEn(isMainshopCustomer ? "wise" : data.paymentMethod))}</td></tr>${bankDetailsHtml}<tr style="background:#dbeafe;"><td style="padding:12px;color:#1e40af;font-weight:600;">Payment reference</td><td style="padding:12px;color:#1e40af;font-weight:700;letter-spacing:1px;">${escapeHtml(data.orderId)}</td></tr><tr><td style="padding:8px 12px;color:#6b7280;">Amount</td><td style="padding:8px 12px;font-weight:600;">${data.total.toFixed(2)} €</td></tr></table></section><section style="background:#fff;border:1px solid #e5e7eb;border-top:none;padding:24px;"><h3 style="font-size:16px;color:#111827;margin:0 0 8px;">Shipping address</h3><p style="margin:0;font-size:14px;color:#374151;line-height:1.6;">${escapeHtml(data.customer.firstName)} ${escapeHtml(data.customer.lastName)}${data.customer.company ? `<br>${escapeHtml(data.customer.company)}` : ""}<br>${escapeHtml(data.customer.street)} ${escapeHtml(data.customer.houseNumber)}<br>${escapeHtml(data.customer.zip)} ${escapeHtml(data.customer.city)}<br>${escapeHtml(data.customer.country)}</p></section><section style="background:#f0fdf4;border:1px solid #bbf7d0;border-top:none;border-radius:0 0 12px 12px;padding:24px;"><h3 style="font-size:16px;color:#166534;margin:0 0 12px;">Next steps</h3><ol style="margin:0;padding:0 0 0 20px;font-size:14px;color:#15803d;line-height:1.8;"><li>${paymentStep}</li><li>${isMainshopCustomer ? "After payment is received, we dispatch your order within 48 hours on working days (Monday to Friday), excluding public holidays." : "We will pack your order after payment is received."}</li><li>You will receive a shipping notification with your tracking number.</li></ol></section><footer style="text-align:center;padding:24px;font-size:12px;color:#9ca3af;"><p style="margin:0;">369 Research · Research materials</p><p style="margin:4px 0 0;">Questions? WhatsApp +4915510063537</p></footer></div></body></html>`;
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head><body style="margin:0;padding:0;background:#f9fafb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;"><div style="max-width:600px;margin:0 auto;padding:20px;"><header style="background:linear-gradient(135deg,#0f172a,#1e293b);border-radius:12px 12px 0 0;padding:32px;text-align:center;"><h1 style="color:#fff;margin:0;font-size:24px;">369 Research</h1><p style="color:#94a3b8;margin:8px 0 0;font-size:14px;">Order confirmation</p></header><section style="background:#fef3c7;border-left:4px solid #f59e0b;padding:16px 20px;"><strong style="font-size:14px;color:#92400e;">⚠ Important payment notice</strong><p style="margin:6px 0 0;font-size:13px;color:#78350f;">${isMainshopCustomer ? "Please transfer the amount independently. After payment is received, dispatch takes place within 48 hours on working days (Monday to Friday), excluding weekends and public holidays. Delivery time depends on the carrier." : "Please transfer the amount independently. Shipping starts only after the payment has reached our account."}</p></section><main style="background:#fff;padding:24px;border:1px solid #e5e7eb;"><h2 style="font-size:18px;color:#111827;margin:0 0 4px;">Order ${escapeHtml(data.orderId)}</h2><p style="font-size:14px;color:#6b7280;margin:0 0 24px;">Thank you for your order, ${escapeHtml(data.customer.firstName)}!</p><table style="width:100%;border-collapse:collapse;"><thead><tr style="background:#f9fafb;"><th style="padding:10px 12px;text-align:left;font-size:12px;color:#6b7280;">ITEM</th><th style="padding:10px 12px;text-align:center;font-size:12px;color:#6b7280;">QTY</th><th style="padding:10px 12px;text-align:right;font-size:12px;color:#6b7280;">PRICE</th></tr></thead><tbody>${itemRows}</tbody></table>${appendOrderDiscountHtml("", confirmationDiscount(data, "en"))}<table style="width:100%;border-collapse:collapse;margin-top:12px;border-top:2px solid #e5e7eb;"><tr><td style="padding:8px 0;color:#6b7280;">Subtotal</td><td style="padding:8px 0;text-align:right;">${data.subtotal.toFixed(2)} €</td></tr>${data.discount > 0 ? `<tr><td style="padding:4px 0;color:#059669;">Total deductions (discounts/credits)</td><td style="padding:4px 0;text-align:right;color:#059669;">-${data.discount.toFixed(2)} €</td></tr>` : ""}<tr><td style="padding:4px 0;color:#6b7280;">Shipping${coldChain ? " ❄️" : ""}</td><td style="padding:4px 0;text-align:right;">${data.shipping > 0 ? `${data.shipping.toFixed(2)} €` : "Free"}</td></tr>${coldChain ? '<tr><td colspan="2" style="padding:4px 0 8px;font-size:12px;color:#0284c7;">❄️ Refrigerated packaging; the recorded shipping amount is shown above.</td></tr>' : ""}<tr><td style="padding:10px 0 0;border-top:1px solid #e5e7eb;font-weight:700;font-size:18px;">Total</td><td style="padding:10px 0 0;border-top:1px solid #e5e7eb;text-align:right;font-weight:700;font-size:18px;">${data.total.toFixed(2)} €</td></tr></table></main><section style="background:#eff6ff;border:1px solid #bfdbfe;border-top:none;padding:24px;"><h3 style="font-size:16px;color:#1e40af;margin:0 0 12px;">Payment information</h3>${buildBankTransferIntroHtml(bankDetailsHtml, "en")}<table style="width:100%;border-collapse:collapse;"><tr><td style="padding:8px 12px;color:#6b7280;">Payment method</td><td style="padding:8px 12px;font-weight:600;">${escapeHtml(getPaymentMethodLabelEn(isMainshopCustomer ? "wise" : data.paymentMethod))}</td></tr>${bankDetailsHtml}<tr style="background:#dbeafe;"><td style="padding:12px;color:#1e40af;font-weight:600;">Payment reference</td><td style="padding:12px;color:#1e40af;font-weight:700;letter-spacing:1px;">${escapeHtml(data.orderId)}</td></tr><tr><td style="padding:8px 12px;color:#6b7280;">Amount</td><td style="padding:8px 12px;font-weight:600;">${data.total.toFixed(2)} €</td></tr></table></section><section style="background:#fff;border:1px solid #e5e7eb;border-top:none;padding:24px;"><h3 style="font-size:16px;color:#111827;margin:0 0 8px;">Shipping address</h3><p style="margin:0;font-size:14px;color:#374151;line-height:1.6;">${escapeHtml(data.customer.firstName)} ${escapeHtml(data.customer.lastName)}${data.customer.company ? `<br>${escapeHtml(data.customer.company)}` : ""}<br>${escapeHtml(data.customer.street)} ${escapeHtml(data.customer.houseNumber)}<br>${escapeHtml(data.customer.zip)} ${escapeHtml(data.customer.city)}<br>${escapeHtml(data.customer.country)}</p></section><section style="background:#f0fdf4;border:1px solid #bbf7d0;border-top:none;border-radius:0 0 12px 12px;padding:24px;"><h3 style="font-size:16px;color:#166534;margin:0 0 12px;">Next steps</h3><ol style="margin:0;padding:0 0 0 20px;font-size:14px;color:#15803d;line-height:1.8;"><li>${paymentStep}</li><li>${isMainshopCustomer ? "After payment is received, we dispatch your order within 48 hours on working days (Monday to Friday), excluding public holidays." : "We will pack your order after payment is received."}</li><li>You will receive a shipping notification with your tracking number.</li></ol></section><footer style="text-align:center;padding:24px;font-size:12px;color:#9ca3af;"><p style="margin:0;">369 Research · Research materials</p><p style="margin:4px 0 0;">Questions? WhatsApp +4915510063537</p></footer></div></body></html>`;
 }
 
 const PEPS4PETS_EMAIL_PROFILE = {
@@ -278,12 +300,13 @@ function buildPeps4petsOrderConfirmationHtml(data: OrderEmailData, customerRefer
   const itemRows = data.items.map((item) => `
     <tr><td style="padding:12px 0;border-bottom:1px solid #dce9df;color:#143d32;font-size:14px;">${escapeHtml(item.name)}${item.variant ? ` · ${escapeHtml(item.variant)}` : ""}</td><td style="padding:12px 8px;border-bottom:1px solid #dce9df;text-align:center;color:#486259;font-size:14px;">${item.quantity}×</td><td style="padding:12px 0;border-bottom:1px solid #dce9df;text-align:right;color:#143d32;font-weight:700;font-size:14px;">${(item.price * item.quantity).toFixed(2)} €</td></tr>`).join("");
 
-  return `<!doctype html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head><body style="margin:0;background:#f4f7f3;color:#143d32;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;"><main style="max-width:640px;margin:0 auto;padding:32px 18px;"><section style="background:#fff;border:1px solid #d9e4dc;border-radius:24px;overflow:hidden;"><header style="padding:28px 32px;background:#143d32;color:#fff;"><p style="margin:0 0 10px;font-size:11px;letter-spacing:1.5px;color:#cfe0d1;">PEPS4PETS · VETERINÄRWISSENSCHAFTLICHE FORSCHUNG</p><h1 style="margin:0;font-size:28px;line-height:1.2;">Deine Bestellung ist eingegangen.</h1></header><div style="padding:30px 32px;"><p style="margin:0 0 22px;color:#486259;line-height:1.6;">Vielen Dank für deine Bestellung, ${escapeHtml(data.customer.firstName)}.</p><div style="padding:18px 20px;border-radius:16px;background:#f1f6f1;margin-bottom:24px;"><p style="margin:0 0 8px;font-size:11px;letter-spacing:1px;color:#486259;">BESTELLREFERENZ</p><p style="margin:0;font-size:22px;font-weight:800;letter-spacing:.5px;color:#143d32;">${escapeHtml(customerReference)}</p></div><table style="width:100%;border-collapse:collapse;margin-bottom:20px;"><thead><tr><th style="padding:0 0 8px;text-align:left;font-size:11px;letter-spacing:1px;color:#789087;">ARTIKEL</th><th style="padding:0 8px 8px;text-align:center;font-size:11px;letter-spacing:1px;color:#789087;">MENGE</th><th style="padding:0 0 8px;text-align:right;font-size:11px;letter-spacing:1px;color:#789087;">PREIS</th></tr></thead><tbody>${itemRows}</tbody></table><div style="padding-top:14px;border-top:1px solid #dce9df;text-align:right;"><span style="color:#486259;font-size:14px;">Gesamtbetrag&nbsp;&nbsp;</span><strong style="font-size:22px;color:#143d32;">${data.total.toFixed(2)} €</strong></div></div><div style="padding:26px 32px;background:#edf5ee;border-top:1px solid #d9e4dc;"><h2 style="margin:0 0 10px;font-size:18px;color:#143d32;">Zahlungsdetails</h2><p style="margin:0 0 14px;color:#486259;line-height:1.55;">Zahlungsart: <strong>${escapeHtml(getPaymentMethodLabel(data.paymentMethod))}</strong></p><table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #d9e4dc;border-radius:12px;overflow:hidden;"><tbody>${bankDetailsHtml}<tr><td style="padding:10px 12px;color:#789087;font-size:13px;border-top:1px solid #d9e4dc;">Empfänger</td><td style="padding:10px 12px;color:#143d32;font-weight:700;font-size:13px;border-top:1px solid #d9e4dc;">369 Research</td></tr><tr><td style="padding:12px;color:#143d32;font-size:13px;font-weight:700;background:#dcecdf;">Verwendungszweck</td><td style="padding:12px;color:#143d32;font-size:16px;font-weight:800;background:#dcecdf;">${escapeHtml(customerReference)}</td></tr></tbody></table><p style="margin:14px 0 0;color:#486259;font-size:13px;line-height:1.55;">Bitte übernimm Gesamtbetrag und Verwendungszweck exakt. Nach erfolgreicher Zuordnung bereiten wir deine Bestellung weiter vor.</p></div><footer style="padding:20px 32px;text-align:center;color:#789087;font-size:12px;line-height:1.5;">Fragen zu deiner Bestellung? <a href="mailto:support@peps4pets.de" style="color:#143d32;font-weight:700;">support@peps4pets.de</a><br>Peps4pets · Ausschließlich für veterinärwissenschaftliche Forschungszwecke.</footer></section></main></body></html>`;
+  return `<!doctype html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head><body style="margin:0;background:#f4f7f3;color:#143d32;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;"><main style="max-width:640px;margin:0 auto;padding:32px 18px;"><section style="background:#fff;border:1px solid #d9e4dc;border-radius:24px;overflow:hidden;"><header style="padding:28px 32px;background:#143d32;color:#fff;"><p style="margin:0 0 10px;font-size:11px;letter-spacing:1.5px;color:#cfe0d1;">PEPS4PETS · VETERINÄRWISSENSCHAFTLICHE FORSCHUNG</p><h1 style="margin:0;font-size:28px;line-height:1.2;">Deine Bestellung ist eingegangen.</h1></header><div style="padding:30px 32px;"><p style="margin:0 0 22px;color:#486259;line-height:1.6;">Vielen Dank für deine Bestellung, ${escapeHtml(data.customer.firstName)}.</p><div style="padding:18px 20px;border-radius:16px;background:#f1f6f1;margin-bottom:24px;"><p style="margin:0 0 8px;font-size:11px;letter-spacing:1px;color:#486259;">BESTELLREFERENZ</p><p style="margin:0;font-size:22px;font-weight:800;letter-spacing:.5px;color:#143d32;">${escapeHtml(customerReference)}</p></div><table style="width:100%;border-collapse:collapse;margin-bottom:20px;"><thead><tr><th style="padding:0 0 8px;text-align:left;font-size:11px;letter-spacing:1px;color:#789087;">ARTIKEL</th><th style="padding:0 8px 8px;text-align:center;font-size:11px;letter-spacing:1px;color:#789087;">MENGE</th><th style="padding:0 0 8px;text-align:right;font-size:11px;letter-spacing:1px;color:#789087;">PREIS</th></tr></thead><tbody>${itemRows}</tbody></table>${appendOrderDiscountHtml("", confirmationDiscount(data, "de"))}<div style="padding-top:14px;border-top:1px solid #dce9df;text-align:right;"><span style="color:#486259;font-size:14px;">Gesamtbetrag&nbsp;&nbsp;</span><strong style="font-size:22px;color:#143d32;">${data.total.toFixed(2)} €</strong></div></div><div style="padding:26px 32px;background:#edf5ee;border-top:1px solid #d9e4dc;"><h2 style="margin:0 0 10px;font-size:18px;color:#143d32;">Zahlungsdetails</h2><p style="margin:0 0 14px;color:#486259;line-height:1.55;">Zahlungsart: <strong>${escapeHtml(getPaymentMethodLabel(data.paymentMethod))}</strong></p><table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #d9e4dc;border-radius:12px;overflow:hidden;"><tbody>${bankDetailsHtml}<tr><td style="padding:10px 12px;color:#789087;font-size:13px;border-top:1px solid #d9e4dc;">Empfänger</td><td style="padding:10px 12px;color:#143d32;font-weight:700;font-size:13px;border-top:1px solid #d9e4dc;">369 Research</td></tr><tr><td style="padding:12px;color:#143d32;font-size:13px;font-weight:700;background:#dcecdf;">Verwendungszweck</td><td style="padding:12px;color:#143d32;font-size:16px;font-weight:800;background:#dcecdf;">${escapeHtml(customerReference)}</td></tr></tbody></table><p style="margin:14px 0 0;color:#486259;font-size:13px;line-height:1.55;">Bitte übernimm Gesamtbetrag und Verwendungszweck exakt. Nach erfolgreicher Zuordnung bereiten wir deine Bestellung weiter vor.</p></div><footer style="padding:20px 32px;text-align:center;color:#789087;font-size:12px;line-height:1.5;">Fragen zu deiner Bestellung? <a href="mailto:support@peps4pets.de" style="color:#143d32;font-weight:700;">support@peps4pets.de</a><br>Peps4pets · Ausschließlich für veterinärwissenschaftliche Forschungszwecke.</footer></section></main></body></html>`;
 }
 
 export async function getOrderConfirmationPresentation(data: OrderEmailData): Promise<{
   subject: string;
   html: string;
+  plainText: string;
   profile?: typeof PEPS4PETS_EMAIL_PROFILE;
 } | null> {
   const isPeps4petsOrder = data.storeKey === "peps4pets";
@@ -303,6 +326,7 @@ export async function getOrderConfirmationPresentation(data: OrderEmailData): Pr
     ? {
         subject: `Bestellbestätigung ${customerReference} – Peps4pets`,
         html: buildPeps4petsOrderConfirmationHtml(data, customerReference!, bankDetailsHtml),
+        plainText: nativeMessagePlainText(buildPeps4petsOrderConfirmationHtml(data, customerReference!, bankDetailsHtml)),
         profile: PEPS4PETS_EMAIL_PROFILE,
       }
     : {
@@ -312,6 +336,7 @@ export async function getOrderConfirmationPresentation(data: OrderEmailData): Pr
         html: language === "en"
           ? buildEnglishOrderConfirmationHtml(data, bankDetailsHtml)
           : buildOrderConfirmationHtml(data, bankDetailsHtml),
+        plainText: nativeMessagePlainText(language === "en" ? buildEnglishOrderConfirmationHtml(data, bankDetailsHtml) : buildOrderConfirmationHtml(data, bankDetailsHtml)),
       };
 }
 
@@ -333,6 +358,7 @@ export async function sendOrderConfirmationEmail(data: OrderEmailData): Promise<
       recipientEmail,
       subject: presentation.subject,
       htmlBody: presentation.html,
+      plainText: presentation.plainText,
       bcc: [CUSTOMER_EMAIL_BCC],
       // Checkout-Wiederholungen dürfen keine zweite Bestellbestätigung erzeugen.
       idempotencyKey: `order-confirmation-${data.orderId}`,
@@ -385,9 +411,9 @@ export async function sendAdminOrderNotification(data: OrderEmailData): Promise<
       </table>
       <table style="width:100%;border-collapse:collapse;">
         <tr><td style="padding:3px 0;font-size:13px;color:#6b7280;">Zwischensumme</td><td style="padding:3px 0;font-size:13px;text-align:right;">${data.subtotal.toFixed(2)} €</td></tr>
-        ${data.discount > 0 ? `<tr><td style="padding:3px 0;font-size:13px;color:#059669;">Rabatt${data.discountCode ? ` (${data.discountCode})` : ""}</td><td style="padding:3px 0;font-size:13px;text-align:right;color:#059669;">-${data.discount.toFixed(2)} €</td></tr>` : ""}
+        ${data.discount > 0 ? `<tr><td style="padding:3px 0;font-size:13px;color:#059669;">Abzüge gesamt (Rabatte/Guthaben)</td><td style="padding:3px 0;font-size:13px;text-align:right;color:#059669;">-${data.discount.toFixed(2)} €</td></tr>` : ""}
         <tr><td style="padding:3px 0;font-size:13px;color:#6b7280;">Versand${data.items.some(i => (i as any).isPlugPlay || ((i as any).isNasalSpray && !(i as any).isNasalDiySet)) ? ' \u2744\ufe0f' : ''}</td><td style="padding:3px 0;font-size:13px;text-align:right;">${data.shipping > 0 ? data.shipping.toFixed(2) + " €" : "Kostenlos"}</td></tr>
-        ${data.items.some(i => (i as any).isPlugPlay || ((i as any).isNasalSpray && !(i as any).isNasalDiySet)) ? '<tr><td colspan="2" style="padding:1px 0 4px;font-size:11px;color:#0284c7;">\u2744\ufe0f Inkl. Aufpreis f\u00fcr gek\u00fchlten Versand (+7 \u20ac)</td></tr>' : ''}
+        ${data.items.some(i => (i as any).isPlugPlay || ((i as any).isNasalSpray && !(i as any).isNasalDiySet)) ? '<tr><td colspan="2" style="padding:1px 0 4px;font-size:11px;color:#0284c7;">\u2744\ufe0f Inkl. Aufpreis f\u00fcr gek\u00fchlten Versand </td></tr>' : ''}
         <tr><td style="padding:8px 0 0;font-size:16px;font-weight:700;color:#111827;border-top:2px solid #e5e7eb;">Gesamt</td><td style="padding:8px 0 0;font-size:16px;font-weight:700;text-align:right;color:#111827;border-top:2px solid #e5e7eb;">${data.total.toFixed(2)} €</td></tr>
       </table>
     </div>
@@ -478,6 +504,7 @@ export async function sendPackingNotificationEmail(data: {
   communicationLanguage?: "de" | "en";
   customerEmail: string;
   customerName: string;
+  orderDiscountSnapshot?: OrderDiscountMessageSnapshot;
 }): Promise<{ sent: boolean; error?: string }> {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
@@ -543,7 +570,8 @@ export async function sendPackingNotificationEmail(data: {
       orderId: data.orderId,
       recipientEmail: data.customerEmail,
       subject: copy.subject,
-      htmlBody: html,
+      htmlBody: data.orderDiscountSnapshot ? appendOrderDiscountHtml(html, buildOrderDiscountMessagePresentation(data.orderDiscountSnapshot, language)) : html,
+      plainText: data.orderDiscountSnapshot ? appendOrderDiscountText(nativeMessagePlainText(html), buildOrderDiscountMessagePresentation(data.orderDiscountSnapshot, language)) : nativeMessagePlainText(html),
       bcc: [CUSTOMER_EMAIL_BCC],
       idempotencyKey: `packing-notification-${data.orderId}`,
     });
@@ -564,6 +592,7 @@ export async function sendShippingNotificationEmail(data: {
   communicationLanguage?: "de" | "en";
   customerEmail: string;
   customerName: string;
+  orderDiscountSnapshot?: OrderDiscountMessageSnapshot;
   trackingNumber?: string;
   trackingCarrier?: string;
 }): Promise<{ sent: boolean; error?: string }> {
@@ -638,7 +667,8 @@ export async function sendShippingNotificationEmail(data: {
       orderId: data.orderId,
       recipientEmail: data.customerEmail,
       subject: copy.subject,
-      htmlBody: html,
+      htmlBody: data.orderDiscountSnapshot ? appendOrderDiscountHtml(html, buildOrderDiscountMessagePresentation(data.orderDiscountSnapshot, language)) : html,
+      plainText: data.orderDiscountSnapshot ? appendOrderDiscountText(nativeMessagePlainText(html), buildOrderDiscountMessagePresentation(data.orderDiscountSnapshot, language)) : nativeMessagePlainText(html),
       bcc: [CUSTOMER_EMAIL_BCC],
       idempotencyKey: `shipping-notification-${data.orderId}-${data.trackingNumber || "no-tracking"}`,
     });

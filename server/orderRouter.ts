@@ -1,8 +1,12 @@
 import { TRPCError } from "@trpc/server";
-import { canonicalizeMainshopLines, quantityPricing, allocateMoney, mainshopPromoDiscount, quoteHash, mainshopBusinessIntent, assertMainshopStock, type MainshopCatalogArticle, mainshopPolicySnapshot as buildMainshopPolicySnapshot, mainshopCatalogScope } from "./mainshopCanonicalPricing.js";
+import { canonicalizeMainshopLines, quantityPricing, allocateMoney, mainshopPromoDiscount, quoteHash, mainshopBusinessIntent, assertMainshopStock, type MainshopCatalogArticle, mainshopPolicySnapshot as buildMainshopPolicySnapshot, mainshopCatalogScope, mainshopBenefitCategories } from "./mainshopCanonicalPricing.js";
 import { checkoutShippingItems, is369CustomerCheckout } from "./mainshopCheckoutIntegration.js";
+import { readPersistedOrderMessageData, snapshotFromPersistedOrder } from "./orderDiscountMessageService.js";
 import { checkoutFingerprint, readCheckoutReceipt, lockCheckoutIntent, persistCheckoutReceipt, queueOrderTask, runOrderTask, resultRows, getOrderIntegrityIssues } from './priorityOrderIntegrity.js';
 import { lockOrder, returnOrderStock, recordOrderAction, deleteOrderAtomically, assertOrderFinanciallyEditable } from './orderStockReturnService.js';
+import { editMoneyCents, editBreakdownShape, validateEditAmounts, matchEditItems, orderEditError } from './orderEditValidation.js';
+import { orderEditDerivedTerms } from './orderEditPartnerTerms.js';
+import { orderCleanupPreview, orderCleanupError } from './orderCleanupPreview.js';
 import { reverseOrderFinancesInTransaction } from './priorityOrderFinancialAdapter.js';
 import {nextCustomerNumber} from './customerNumberService.js';
 import {checkCustomerCreationMaintenance} from './customerCreationMaintenance.js';
@@ -20,6 +24,7 @@ import { assertManualSaleRole } from "./manualSaleAuthorization.js";
 import { reassignOrderCustomer } from "./orderCustomerAssignmentService.js";
 import {applyStockMovement} from "./stockMovementService.js";
 import {orderHash} from "./jarvyOrderContract.js";
+import { screenshotHash } from "./screenshotOrderContract.js";
 import { eq, desc, inArray, and, or, getTableColumns } from "drizzle-orm";
 import { router, publicProcedure, adminProcedure, scopedOperationsReadProcedure, scopedOrderCleanupProcedure, type Context } from "./trpc.js";
 import { getDb, getPool, withReadOnlyDatabase } from "./db.js";
@@ -82,6 +87,10 @@ import {
   type ResolvedPartnerCode,
 } from "./partnerProgramService.js";
 import { isFinanciallyPaidStatus } from "./paidFinancialStatus.js";
+import { assertExclusiveCampaignAllowsBenefits, isStrictExclusiveCampaign } from "./exclusiveCampaignPolicy.js";
+import { resolveTrustedColdShippingItems, normalizePublicCheckoutPricingOptions } from "./coldShippingCatalog.js";
+import { getColdShippingAvailability } from "./coldShippingAvailability.js";
+import { authorizePublicGiftLines, type MultiBuyGiftConfig } from "./publicGiftAuthorization.js";
 import { reconcileFreeBacWaterForShopOrder } from "./freeBacWaterService.js";
 import { refreshCustomerOrderMetrics } from "./customerMetricsService.js";
 import { isCommercialOrder, isCompletedCommercialOrder } from "./commercialOrderMetrics.js";
@@ -189,7 +198,7 @@ export const createOrderSchema = z.object({
     type: z.string(),
     shopProductId: z.string().optional(), // product id from shop (e.g. '3g-triple-g')
     isNasalSpray: z.boolean().optional(),
-    // DIY-Set: Vial plus BAC Wasser, Flasche, Aufziehspritze und Kanüle (+7 €).
+    // Legacy/manual-only format. New regular 369 checkout rejects true; accessories are separate catalogue lines.
     isNasalDiySet: z.boolean().optional(),
     isPlugPlay: z.boolean().optional(),   // Plug&Play Patrone (Aufpreis wird serverseitig ermittelt)
     isFreeGift: z.boolean().optional(),   // Servergenerierte Gratisposition; Bestand wird ebenfalls geprüft und gebucht.
@@ -219,6 +228,8 @@ export const createOrderSchema = z.object({
   // Nur für authentifizierte WaWi-Aufträge: optionaler Kühlversand für
   // temperaturempfindliche Sendungen ohne Plug&Play- oder Nasenspray-Pflicht.
   coldShippingRequested: z.boolean().optional(),
+  // Effective only for authenticated manual WaWi sales. Public requests cannot grant free shipping.
+  freeBaseShippingRequested: z.boolean().optional(),
   total: z.number(),
   paymentMethod: z.enum(["bunq", "creditCard", "wise", "SEPA", "Bar", "Kreditkarte", "PayPal", "Crypto", "Guthaben", "Sonstige"]),
   date: z.string(),
@@ -286,6 +297,7 @@ export async function createOrderFromTrustedInput(
       const isPublic369Create = !options.quoteOnly && input.storeKey === '369research' && input.orderSource === 'shop' && !ctx.operationsPreview && !ctx.jarvyOrder;
       if (isPublic369Create && !input.checkoutIdempotencyKey) throw Error('CHECKOUT_INTENT_KEY_REQUIRED');
       if (isPublic369Create && !/^[a-f0-9]{64}$/.test(input.checkoutIdempotencyKey!)) throw Error('CHECKOUT_INTENT_KEY_INVALID');
+      if (ctx.screenshotOrder && (ctx.user?.role !== 'admin' || input.orderSource !== 'wawi_manual' || input.storeKey !== '369research' || input.stockOverride || input.partnerCode || input.partnerNumber || input.kwkCode || input.creditUsed || input.kwkCreditUsed || input.qrAttributionToken || input.sendOrderConfirmation)) throw Error('SCREENSHOT_ORDER_SCOPE');
       const db = await getDb();
       if (!db) throw new Error("Database not available");
       const normalCheckoutKey = !options.quoteOnly && input.storeKey === '369research' && !ctx.jarvyOrder ? input.checkoutIdempotencyKey : undefined;
@@ -302,9 +314,12 @@ export async function createOrderFromTrustedInput(
       const isAuthenticatedWawiManualSale = isRequestedWawiManualSale && Boolean(ctx.user);
       const isMainshopCustomer = is369CustomerCheckout({ storeKey: input.storeKey, isAuthenticatedWawiManualSale });
       const isRegularMainshopPricing = isMainshopCustomer && input.storeKey === "369research";
+      // Existing manual pickup is shipment-free; a public label cannot opt out of shipping.
+      const isAuthenticatedWawiPickup = isAuthenticatedWawiManualSale
+        && input.shippingCountry.trim().toLowerCase() === "abholung";
       // The manual workflow records discounts in discountBreakdown; labels such
       // as "25%" or "Kostenloser Versand" must never enter promo-code lookup.
-      input.discountCode = normalizeDiscountCodeForOrderSource(input.orderSource, input.discountCode);
+      input.discountCode = ctx.screenshotOrder ? input.discountCode?.trim().toUpperCase() || null : normalizeDiscountCodeForOrderSource(input.orderSource, input.discountCode);
 
       // Public checkout may only attach to a customer through one unique, real
       // contact identifier. No name or address is ever used as an identity key.
@@ -328,6 +343,18 @@ export async function createOrderFromTrustedInput(
         || requestedKwkCredit > 0
         || (input.kwkDiscount || 0) > 0;
       const configuredGlobalDiscount = await getActiveGlobalAutomaticDiscountFromDb();
+      const strictExclusiveCampaign = isStrictExclusiveCampaign(configuredGlobalDiscount);
+      // Guard before any code validation, wallet redemption, customer/order/stock write.
+      // The active campaign wins: a stale code cannot disable it to obtain another benefit.
+      assertExclusiveCampaignAllowsBenefits(configuredGlobalDiscount, {
+        discountCode: input.discountCode,
+        partnerCode: input.partnerCode,
+        kwkCode: input.kwkCode,
+        creditUsed: input.creditUsed,
+        kwkCreditUsed: input.kwkCreditUsed,
+        partnerDiscount: input.partnerDiscount,
+        kwkDiscount: input.kwkDiscount,
+      });
 
       // A public Creator/Partner code is a server-authoritative commercial term.
       // Its customer discount is never accepted from the browser. Creator codes
@@ -397,7 +424,7 @@ export async function createOrderFromTrustedInput(
       // A partner number identifies an authenticated self-order. Its monetary
       // terms are resolved below from the session-owned partner row; a public
       // code or any browser-provided percentage can never authorize this route.
-      const requiresPartnerSession = Boolean(input.partnerNumber?.trim()) || (input.creditUsed || 0) > 0;
+      const requiresPartnerSession = !strictExclusiveCampaign && (Boolean(input.partnerNumber?.trim()) || (input.creditUsed || 0) > 0);
       const requestPartnerPrincipal = isRegularMainshopPricing && !ctx.operationsPreview ? await getAuthenticatedPartnerFromRequest(ctx.req) : null;
       const authenticatedPartner = requiresPartnerSession
         ? ctx.operationsPreview?.partnerId
@@ -441,7 +468,7 @@ export async function createOrderFromTrustedInput(
           Number(authenticatedPartner.customerDiscountPercent || 0),
           Number(authenticatedPartner.commissionPercent || 0),
         );
-        selfOrderDiscountPercent = authenticatedSelfOrderTerms.discountPercent;
+        selfOrderDiscountPercent = strictExclusiveCampaign ? 0 : authenticatedSelfOrderTerms.discountPercent;
       }
 
       // Shared real/preview preflight, before pricing can clamp a requested
@@ -464,22 +491,28 @@ export async function createOrderFromTrustedInput(
       if (authenticatedPartner && resolvedPromoCode) {
         throw new Error("PARTNER_AKTIONSCODE_AUSGESCHLOSSEN: Partnerbestellungen können nur den zentralen Shop-Dauerrabatt kombinieren.");
       }
-      // The browser may show a free 3 ml BAC line for qualifying peptide vials,
-      // but it must never create one for cosmetics or other non-vial products.
-      // Rebuild that one generated gift from the catalogue before every public
-      // checkout is priced, stocked or persisted. Manual WaWi lines remain a
-      // separate, explicitly controlled workflow.
+      // A requested cold service is valid in public checkout too, but only after
+      // a server-owned destination check. A client cannot disable mandatory cooling.
+      const coldShippingRequested = !isMainshopCustomer && !isAuthenticatedWawiPickup && input.coldShippingRequested === true;
+      const coldShippingCatalog = await db.select({
+        sku: articles.sku, shopProductId: articles.shopProductId, name: articles.name,
+        category: articles.category, categories: articles.categories, shopVisible: articles.shopVisible, isActive: articles.isActive,
+      }).from(articles);
       if (!isAuthenticatedWawiManualSale && !isMainshopCustomer) {
-        const bacEligibilityCatalog = await db.select({
-          sku: articles.sku,
-          shopProductId: articles.shopProductId,
-          category: articles.category,
-          categories: articles.categories,
-        }).from(articles);
-        input.items = reconcileFreeBacWaterForShopOrder(input.items, bacEligibilityCatalog);
+        input.items = normalizePublicCheckoutPricingOptions(input.items, coldShippingCatalog);
       }
-      const coldShippingRequestedByWawi = isAuthenticatedWawiManualSale
-        && input.coldShippingRequested === true;
+      const trustedColdShippingItems = checkoutShippingItems({ storeKey: input.storeKey, isAuthenticatedWawiManualSale, items: resolveTrustedColdShippingItems(input.items, coldShippingCatalog) });
+      const mandatoryColdShipping = trustedColdShippingItems.some(requiresColdChainShipping);
+      if (!isAuthenticatedWawiPickup && (coldShippingRequested || mandatoryColdShipping)) {
+        const eligibility = await getColdShippingAvailability({
+          country: input.customer.country, zip: input.customer.zip, city: input.customer.city,
+        });
+        if (!eligibility.eligible) {
+          throw new Error(eligibility.status === "island"
+            ? "KUEHLVERSAND_INSEL_AUSGESCHLOSSEN: Gekühlter Versand und kühlpflichtige Artikel sind an Inseladressen nicht möglich. Bitte entferne die betroffenen Positionen oder ändere die Lieferadresse."
+            : "KUEHLVERSAND_ZIEL_UNGEKLAERT: Für diese Lieferadresse konnte gekühlter Versand nicht sicher freigegeben werden. Nicht kühlpflichtige Artikel bleiben mit Standardversand bestellbar.");
+        }
+      }
       // Der Shop-Checkout versendet wie bisher automatisch. Im manuellen
       // WaWi-Workflow ist Versand an den Kunden eine bewusste Einzelfreigabe;
       // der Browserwert ist erst nach erfolgreicher WaWi-Authentifizierung
@@ -527,8 +560,21 @@ export async function createOrderFromTrustedInput(
           mainshopPolicySnapshot = buildMainshopPolicySnapshot(originalMainshopItems, catalog, canonicalBundles, canonicalComponents);
           mainshopSettingsSnapshot = await db.select({ key: shopSettings.key, value: shopSettings.value }).from(shopSettings).where(inArray(shopSettings.key, ["global_automatic_discount", "promo_2for3_enabled", "promo_2for3_expires_at", "promo_2for3_mode", "promo_2for3_products"])).orderBy(shopSettings.key);
         }
+        if (!isRegularMainshopPricing) {
+          const nonBacGifts = input.items.some(item => item.isFreeGift && !["bac-wasser-3ml", "bac-water-3ml"].includes((item.shopProductId || "").trim().toLowerCase()));
+          let multiBuy: MultiBuyGiftConfig = { enabled: false, expiresAt: null, mode: "all", products: [] };
+          if (nonBacGifts && !strictExclusiveCampaign) {
+            const rows = await db.select({ key: shopSettings.key, value: shopSettings.value }).from(shopSettings).where(inArray(shopSettings.key, ["promo_2for3_enabled", "promo_2for3_expires_at", "promo_2for3_mode", "promo_2for3_products"]));
+            const settings = new Map(rows.map(row => [row.key, row.value]));
+            let products: string[] = [];
+            try { const parsed = JSON.parse(settings.get("promo_2for3_products") || "[]"); if (Array.isArray(parsed)) products = parsed.filter(value => typeof value === "string"); } catch { /* main fail-closed filtering */ }
+            const mode = settings.get("promo_2for3_mode");
+            multiBuy = { enabled: settings.get("promo_2for3_enabled") === "true", expiresAt: settings.get("promo_2for3_expires_at") || null, mode: mode === "include" || mode === "exclude" ? mode : "all", products };
+          }
+          authorizePublicGiftLines(input.items, catalog, multiBuy, strictExclusiveCampaign);
+        }
         const canonical = isRegularMainshopPricing
-          ? canonicalizeMainshopLines(input.items, catalog, canonicalBundles, canonicalComponents, mainshopPromotion2for3)
+          ? canonicalizeMainshopLines(input.items, catalog, canonicalBundles, canonicalComponents, strictExclusiveCampaign ? { enabled: false, mode: "all", products: [] } : mainshopPromotion2for3)
           : null;
         const repriced = canonical ? { items: canonical.items, subtotal: roundMoney(canonical.items.reduce((sum, i) => sum + i.price * i.quantity, 0)) } : repricePublicCheckoutItems(input.items, catalog);
         input.items = repriced.items;
@@ -538,7 +584,7 @@ export async function createOrderFromTrustedInput(
             sku: articles.sku, shopProductId: articles.shopProductId,
             category: articles.category, categories: articles.categories,
           }).from(articles);
-          input.items = reconcileFreeBacWaterForShopOrder(input.items, bacEligibilityCatalog, { storeKey: input.storeKey });
+          input.items = reconcileFreeBacWaterForShopOrder(input.items, bacEligibilityCatalog.map(a => ({ ...a, categories: mainshopBenefitCategories(a) })), { storeKey: input.storeKey });
           if (canonical) {
             input.items = input.items.map(i => {
               if (!i.isFreeGift || i.shopProductId !== "bac-wasser-3ml") return i;
@@ -547,9 +593,35 @@ export async function createOrderFromTrustedInput(
               return { ...i, shopProductId: bac.sku, canonicalProductId: "bac-wasser-3ml" };
             });
             quantity = quantityPricing(input.items, [...canonical.quantityEligible, ...input.items.slice(canonical.items.length).map(() => false)], canonical.quantityUnits);
+            if (strictExclusiveCampaign) quantity = { percentage: 0, units: 0, amount: 0, lineValues: input.items.map(i => roundMoney(i.price * i.quantity)) };
             assertMainshopStock(input.items, catalog, mainshopSubstitutionEnabled);
           }
         }
+      }
+      // The browser may show a free 3 ml BAC line for qualifying peptide vials,
+      // but it must never create one for cosmetics or other non-vial products.
+      // Rebuild that one generated gift from the catalogue before every public
+      // checkout is priced, stocked or persisted. Manual WaWi lines remain a
+      // separate, explicitly controlled workflow.
+      if (!isAuthenticatedWawiManualSale && !isMainshopCustomer) {
+        const bacEligibilityCatalog = await db.select({
+          sku: articles.sku,
+          shopProductId: articles.shopProductId,
+          category: articles.category,
+          categories: articles.categories,
+        }).from(articles);
+        const physicalBacForms = resolveTrustedColdShippingItems(input.items, coldShippingCatalog);
+        const qualifiedBacItems = input.items.map((item, index) => ({ ...item,
+          isPlugPlay: physicalBacForms[index].isPlugPlay,
+          isNasalSpray: physicalBacForms[index].isNasalSpray,
+          isNasalDiySet: physicalBacForms[index].isNasalDiySet,
+        }));
+        // Physical forms forbid BAC with fixed ready cartridges; restore billable
+        // options before any later canonical KWK repricing to avoid another +15.
+        input.items = normalizePublicCheckoutPricingOptions(
+          reconcileFreeBacWaterForShopOrder(qualifiedBacItems, bacEligibilityCatalog, configuredGlobalDiscount),
+          coldShippingCatalog,
+        );
       }
       // A standalone public code's minimum order is evaluated only after the
       // server owns every item price and the pre-discount merchandise subtotal.
@@ -588,6 +660,9 @@ export async function createOrderFromTrustedInput(
           country: input.customer.country,
           items: checkoutShippingItems({ storeKey: input.storeKey, isAuthenticatedWawiManualSale, items: input.items }),
           promoDescription: resolvedPromoCode?.description,
+          coldChainRequested: coldShippingRequested,
+          coldShippingSurcharge: configuredGlobalDiscount?.coldShippingSurcharge ?? undefined,
+          freeBaseShipping: globalBenefitResolution.globalFreeShippingApplies,
         });
         input.shippingCountry = resolveShippingRegion(input.customer.country);
       } else if (resolvedPromoCode) {
@@ -601,14 +676,20 @@ export async function createOrderFromTrustedInput(
         assertPromotionMinimumOrder(Number(promo.minOrder || 0), input.subtotal);
         input.shipping = calculateAuthoritativeShipping({
           country: input.customer.country,
-          items: input.items,
+          items: trustedColdShippingItems,
           promoDescription: resolvedPromoCode.description,
-          coldChainRequested: coldShippingRequestedByWawi,
+          coldChainRequested: coldShippingRequested,
+          coldShippingSurcharge: configuredGlobalDiscount?.coldShippingSurcharge ?? undefined,
+          freeBaseShipping: globalBenefitResolution.globalFreeShippingApplies,
         });
         input.shippingCountry = resolveShippingRegion(input.customer.country);
       }
-      if (globalBenefitResolution.globalFreeShippingApplies) {
-        input.shipping = 0;
+      if (globalBenefitResolution.globalFreeShippingApplies && !isAuthenticatedWawiPickup) {
+        input.shipping = calculateAuthoritativeShipping({
+          country: input.customer.country, items: trustedColdShippingItems,
+          coldChainRequested: coldShippingRequested, freeBaseShipping: true,
+          coldShippingSurcharge: configuredGlobalDiscount?.coldShippingSurcharge ?? undefined,
+        });
         input.shippingCountry = resolveShippingRegion(input.customer.country);
       }
       // The catalog-backed subtotal is available now. Every public shop term is
@@ -658,35 +739,42 @@ export async function createOrderFromTrustedInput(
       // mitgesendete Betrag wird ausschließlich dazu genutzt, die übrigen
       // bewusst gewährten Rabattanteile unverändert zu isolieren.
 
-        // Kühlversand darf nur einmal pro Auftrag berechnet werden. Plug&Play
-        // und fertig gemischte Nasensprays aktivieren ihn verpflichtend; ein
-        // authentifizierter WaWi-Auftrag kann ihn für andere Sendungen bewusst
-        // ergänzen. Ein bereits gewährter Gratisversand (0 €) bleibt erhalten.
-        const hasColdShippingService = !isMainshopCustomer && (coldShippingRequestedByWawi
-          || input.items.some(requiresColdChainShipping));
-        if (hasColdShippingService) {
-          (input as any)._coldShippingNote = coldShippingRequestedByWawi
-            ? "Kühlversand aktiv (manuell gewählt oder Plug&Play)"
-            : "Kühlversand aktiv (pflichtig durch Plug&Play/Nasenspray)";
-        }
-        const serverBaseShipping = calculateAuthoritativeShipping({
-          country: input.customer.country,
-          items: [],
-        });
-        const serverColdShipping = calculateAuthoritativeShipping({
-          country: input.customer.country,
-          items: checkoutShippingItems({ storeKey: input.storeKey, isAuthenticatedWawiManualSale, items: input.items }),
-          coldChainRequested: coldShippingRequestedByWawi,
-        });
-        if (
-          hasColdShippingService
-          && input.shipping >= serverBaseShipping
-          && Math.abs(input.shipping - serverColdShipping) > 0.02
-        ) {
-          input.shipping = serverColdShipping;
+      // Public prices were already rebuilt above; manual quotes keep their
+      // deliberate base price, but may never omit or duplicate a cold surcharge.
+      const hasColdShippingService = !isAuthenticatedWawiPickup && (coldShippingRequested || mandatoryColdShipping);
+      if (hasColdShippingService) {
+        (input as any)._coldShippingNote = mandatoryColdShipping
+          ? "Kühlversand aktiv (pflichtig durch Plug&Play/Nasenspray)"
+          : "Kühlversand aktiv (gewählt)";
+        if (isAuthenticatedWawiManualSale) {
+          input.shipping = calculateAuthoritativeShipping({
+            country: input.customer.country, items: trustedColdShippingItems,
+            promoDescription: resolvedPromoCode?.description,
+            coldChainRequested: coldShippingRequested,
+            freeBaseShipping: globalBenefitResolution.globalFreeShippingApplies || input.freeBaseShippingRequested === true || input.shipping === 0,
+            coldShippingSurcharge: configuredGlobalDiscount?.coldShippingSurcharge ?? undefined,
+          });
           input.shippingCountry = resolveShippingRegion(input.customer.country);
         }
+      }
 
+      // Screenshot requests are signed, server-reconstructed catalog orders.
+      // Rebuild base shipping for all combinations, including explicit free base
+      // plus promo; preserve the existing manual/public logic everywhere else.
+      if (ctx.screenshotOrder) {
+        input.shipping = calculateAuthoritativeShipping({
+          country: input.customer.country, items: trustedColdShippingItems,
+          promoDescription: resolvedPromoCode?.description, coldChainRequested: coldShippingRequested,
+          freeBaseShipping: globalBenefitResolution.globalFreeShippingApplies || input.freeBaseShippingRequested === true,
+          coldShippingSurcharge: configuredGlobalDiscount?.coldShippingSurcharge ?? undefined,
+        });
+        input.shippingCountry = resolveShippingRegion(input.customer.country);
+      }
+
+      if (isAuthenticatedWawiPickup) {
+        input.shipping = 0;
+        input.shippingCountry = "Abholung";
+      }
         const lineSubtotal = roundMoney(input.items.reduce((sum, item) => sum + item.price * item.quantity, 0));
       if (!hasKwkRequest && Math.abs(lineSubtotal - roundMoney(input.subtotal)) > 0.02) {
         throw new Error("Bestellsumme stimmt nicht mit den Artikelpositionen überein");
@@ -794,11 +882,10 @@ export async function createOrderFromTrustedInput(
           country: input.customer.country,
           items: checkoutShippingItems({ storeKey: input.storeKey, isAuthenticatedWawiManualSale, items: input.items }),
           promoDescription: promoDefinition?.description,
-          coldChainRequested: coldShippingRequestedByWawi,
+          coldChainRequested: coldShippingRequested,
+          freeBaseShipping: globalBenefitResolution.globalFreeShippingApplies,
+          coldShippingSurcharge: configuredGlobalDiscount?.coldShippingSurcharge ?? undefined,
         });
-        if (globalBenefitResolution.globalFreeShippingApplies) {
-          input.shipping = 0;
-        }
         input.shippingCountry = resolveShippingRegion(input.customer.country);
         const authoritative = calculateAuthoritativeKwkOrder({
           subtotal: input.subtotal,
@@ -825,7 +912,7 @@ export async function createOrderFromTrustedInput(
         const authoritativeWawiPricing = calculateAuthoritativeWawiManualOrder({
           subtotal: input.subtotal,
           shipping: input.shipping,
-          submittedDiscount: input.discount,
+          submittedDiscount: strictExclusiveCampaign ? submittedAutomaticGlobalDiscount : ctx.screenshotOrder && resolvedPromoCode ? authoritativePromoDiscount : input.discount,
           submittedAutomaticGlobalDiscount,
           authoritativeAutomaticGlobalDiscount: automaticGlobalDiscountAmount,
         });
@@ -907,6 +994,18 @@ export async function createOrderFromTrustedInput(
           amount: authoritativePartnerCredit,
           percentage: undefined,
         });
+      }
+      if (!isAuthenticatedWawiManualSale && !isRegularMainshopPricing) {
+        // All canonical repricing is complete. Persist trusted ready-form flags,
+        // but never feed fixed cartridge flags back into option pricing.
+        const physicalForms = resolveTrustedColdShippingItems(input.items, coldShippingCatalog);
+        input.items = input.items.map((item, index) => ({ ...item,
+          isPlugPlay: physicalForms[index].isPlugPlay,
+          isNasalSpray: physicalForms[index].isNasalSpray,
+          // The billable DIY option also owns kit-component insertion. A fixed
+          // catalogue DIY item must not generate a second component kit.
+          isNasalDiySet: item.isNasalDiySet,
+        }));
       }
       const submittedDiscountBreakdownTotal = roundMoney(
         submittedDiscountBreakdown.reduce((sum, entry) => sum + entry.amount, 0),
@@ -997,7 +1096,7 @@ export async function createOrderFromTrustedInput(
 
       // ── Hilfsfunktion: Checkout-Fehler als Backup speichern + E-Mail an Admin ──
       const saveFailedOrder = async (errorMsg: string, attemptedOrderId?: string) => {
-        if(ctx.jarvyOrder)return;
+        if(ctx.jarvyOrder || ctx.screenshotOrder)return;
         try {
           const pool = await getPool();
           if (pool) {
@@ -1069,6 +1168,13 @@ export async function createOrderFromTrustedInput(
         throw new Error(CUSTOMER_ORDER_BLOCKED_CODE);
       }
 
+      if (ctx.screenshotOrder) {
+        const preview = {input,discountBreakdown};
+        const hash = screenshotHash({input:{...input,checkoutIdempotencyKey:undefined},discountBreakdown});
+        if (ctx.screenshotOrder.mode === 'preview') return {screenshotPreview:preview,hash};
+        if (hash !== ctx.screenshotOrder.expectedHash) throw Error('QUOTE_CHANGED');
+      }
+
       // The dedicated Jarvy endpoint uses this same validation/pricing path.
       // Preview stops before sequence allocation, stock/order writes and messages.
       if (ctx.jarvyOrder) {
@@ -1127,6 +1233,7 @@ export async function createOrderFromTrustedInput(
           orderId = rows.rows[0].order_id;
         }
       } catch (err) {
+        if (ctx.screenshotOrder) throw Error('SCREENSHOT_ORDER_REFERENCE_UNAVAILABLE');
         console.warn('[Orders] Failed to generate sequential order ID, using fallback:', err);
       }
 
@@ -1137,7 +1244,7 @@ export async function createOrderFromTrustedInput(
       // Ein bewusst übergangener Hinweis wird sofort mit der finalen Bestellnummer
       // festgeschrieben. Der Nachweis enthält keine änderbare UI-Aktion.
       const persistConfirmedAddress = async () => {
-      if (addressWarningNeedsConfirmation) {
+      if (addressWarningNeedsConfirmation && !ctx.screenshotOrder) {
         await persistAddressValidation({
           input: input.customer,
           result: addressValidation,
@@ -1151,8 +1258,8 @@ export async function createOrderFromTrustedInput(
       };
       if (!isRegularMainshopPricing) await persistConfirmedAddress();
       // ── Partner logic: validate attribution and financial authorization ──
-      let partnerCode = input.partnerCode || null;
-      let partnerNumber = input.partnerNumber || null;
+      let partnerCode = strictExclusiveCampaign ? null : input.partnerCode || null;
+      let partnerNumber = strictExclusiveCampaign ? null : input.partnerNumber || null;
       let partnerDiscountAmount = roundMoney(input.partnerDiscount || 0);
       let partnerCommissionAmount = 0;
       let creditUsed = input.creditUsed || 0;
@@ -1162,7 +1269,7 @@ export async function createOrderFromTrustedInput(
       let partnerCommissionPercentSnapshot: number | null = resolvedPublicPartnerCode?.commissionPercent || null;
       let partnerCommissionBaseSnapshot: number | null = null;
 
-      if (authenticatedPartner) {
+      if (authenticatedPartner && !strictExclusiveCampaign) {
         if (partnerNumber && partnerNumber !== authenticatedPartner.partnerNumber) {
           throw new Error("PARTNER_GUTHABEN_PARTNER_MISMATCH");
         }
@@ -1192,7 +1299,7 @@ export async function createOrderFromTrustedInput(
 
       // Case 2: authenticated partner self-order. The session-owned partner is
       // the only authority for both direct discount and commission snapshots.
-      if (partnerNumber && authenticatedPartner) {
+      if (partnerNumber && authenticatedPartner && !strictExclusiveCampaign) {
         await resolvePartnerForOrder({ id: authenticatedPartner.id, code: null }, "Eigenbestellung");
         partnerProgram = authenticatedSelfOrderProgram;
         // Actual payout Creator conversion earns zero; explicit shop-credit
@@ -1237,6 +1344,7 @@ export async function createOrderFromTrustedInput(
       // form one transaction. A failure in this section cannot leave a partial P4P order.
       let customerId: number | null = null;
       let customerIntegrityTrigger: "order_customer_created" | "order_customer_changed" | null = null;
+      let persistedConfirmationData: (Awaited<ReturnType<typeof readPersistedOrderMessageData>>["emailData"] & { mainshopCustomerPresentation?: boolean }) | undefined;
       const transactionResponse = await db.transaction(async (tx) => {
       const db = tx;
       if (normalCheckoutKey) {
@@ -1276,6 +1384,7 @@ export async function createOrderFromTrustedInput(
         await allocateCanonicalOrderId();
         await persistConfirmedAddress();
       }
+      if (ctx.screenshotOrder?.mode === 'execute') await ctx.screenshotOrder.validateInTransaction(tx);
       if(ctx.jarvyOrder?.mode==='execute') {
         const actor=await db.execute(sql`SELECT id FROM users WHERE id=${ctx.user!.id} AND role='admin' FOR SHARE`);
         if(!actor.rows.length)throw new Error('JARVY_ACTOR_REVOKED');
@@ -1361,6 +1470,17 @@ export async function createOrderFromTrustedInput(
             // ── Stock check: verify all peptide items are in stock before creating order ──
       if(ctx.jarvyOrder)await db.select({id:articles.id}).from(articles).where(inArray(articles.sku,input.items.map(i=>i.shopProductId!))).orderBy(articles.id).for('update');
       const allArticlesForCheck = await db.select().from(articles).where(eq(articles.isActive, 1));
+      if (ctx.screenshotOrder) {
+        // validateInTransaction locked every price/eligibility/component dependency
+        // before this point. Validate the COMPLETE sum before any stock write.
+        const plan = ctx.screenshotOrder.stockPlan;
+        if (!plan?.length || new Set(plan.map(d => d.articleId)).size !== plan.length) throw Error('QUOTE_CHANGED');
+        for (const d of plan) {
+          const a = allArticlesForCheck.find(a => a.id === d.articleId);
+          if (!a || a.sku !== d.sku || a.stock !== d.expectedStock) throw Error('QUOTE_CHANGED');
+          if (!Number.isSafeInteger(d.quantity) || d.quantity <= 0 || a.stock < d.quantity) throw Error('STOCK_UNAVAILABLE');
+        }
+      }
       if (!isAuthenticatedWawiManualSale) {
         for (const item of input.items) {
           const family = allArticlesForCheck.filter(a => a.sku.toLowerCase() === item.shopProductId?.toLowerCase() || a.shopProductId?.toLowerCase() === item.shopProductId?.toLowerCase());
@@ -1373,7 +1493,7 @@ export async function createOrderFromTrustedInput(
       const ambiguousVariantItems: string[] = [];
 
       // Smart Substitution: prüfen ob Feature aktiv ist
-      const substitutionActive = isRegularMainshopPricing ? mainshopSubstitutionEnabled : input.storeKey !== "checkout-v2" && !ctx.jarvyOrder && await isSubstitutionEnabled();
+      const substitutionActive = isRegularMainshopPricing ? mainshopSubstitutionEnabled : input.storeKey !== "checkout-v2" && !ctx.jarvyOrder && !ctx.screenshotOrder && await isSubstitutionEnabled();
 
       // Helper: find articles matching a shop item by direct variant SKU or canonical
       // shop product ID plus dosage. Bundle items carry the selected variant SKU; it must
@@ -1389,7 +1509,7 @@ export async function createOrderFromTrustedInput(
         !dosageNorm || getArticleDosage(article) === dosageNorm;
       const findMatchingArticles = (item: { name: string; dosage?: string; shopProductId?: string }, allArts: typeof allArticlesForCheck) => {
         if (isRegularMainshopPricing) return allArts.filter(a => a.isActive === 1 && a.sku.toLowerCase() === item.shopProductId?.toLowerCase());
-        if(ctx.jarvyOrder) {
+        if(ctx.jarvyOrder || ctx.screenshotOrder) {
           const exact=allArts.filter(a=>a.sku===item.shopProductId);
           if(exact.length!==1||exact[0].name!==item.name)throw new Error('JARVY_ARTICLE_CHANGED');
           return exact;
@@ -1446,6 +1566,7 @@ export async function createOrderFromTrustedInput(
 
       for (let itemIdx = 0; itemIdx < stockRelevantItems.length; itemIdx++) {
         const item = stockRelevantItems[itemIdx];
+        if (ctx.screenshotOrder) continue;
         if (mainshopSubstitutions) {
           const sub = mainshopSubstitutions.get(item.shopProductId!.trim().toLocaleLowerCase("de-DE"));
           if (sub) substitutionMap.set(itemIdx, sub);
@@ -1516,7 +1637,7 @@ export async function createOrderFromTrustedInput(
           console.warn(`[Orders] Master-Admin stock override for order ${orderId}:`, { outOfStockItems, admin: ctx.user?.username, reason: overrideReason });
         } else {
           const errMsg = `Folgende Artikel sind nicht mehr verfügbar: ${outOfStockItems.join(', ')}. Bitte entferne sie aus dem Warenkorb.`;
-          console.warn(`[Orders] Stock check failed for order ${orderId}:`, outOfStockItems);
+          if (!ctx.screenshotOrder) console.warn(`[Orders] Stock check failed for order ${orderId}:`, outOfStockItems);
           await saveFailedOrder(errMsg, orderId);
           throw new Error(errMsg);
         }
@@ -1524,7 +1645,7 @@ export async function createOrderFromTrustedInput(
 
       // DIY-Nasenspray-Set darf nur für die zentral freigegebenen Produkte bestellt werden.
       // Der Checkout kann die Bestands- oder Produktfreigabe nicht über Namen manipulieren.
-      const diyNasalItems = input.items.filter((item) => item.isNasalDiySet === true);
+      const diyNasalItems = ctx.screenshotOrder || isRegularMainshopPricing ? [] : input.items.filter((item) => item.isNasalDiySet === true);
       for (const item of diyNasalItems) {
         const canonicalFamily = isRegularMainshopPricing ? mainshopCatalog.find(a => a.sku === item.shopProductId)?.shopProductId : item.shopProductId;
         if (!isNasalDiySetEligible(canonicalFamily)) {
@@ -1548,6 +1669,7 @@ export async function createOrderFromTrustedInput(
       // substitution and already catalogued BAC/DIY components. No whole-shop lock.
       const plannedIds=new Set<number>();
       stockRelevantItems.forEach((item,index) => {
+        if (ctx.screenshotOrder) return;
         if (isRegularMainshopPricing || item.type === 'peptide') {
           const sub=substitutionMap.get(index);
           if(sub?.possible)sub.components.forEach(c => plannedIds.add(c.articleId));
@@ -1559,6 +1681,14 @@ export async function createOrderFromTrustedInput(
       });
       const lockedInventory=plannedIds.size ? await db.select().from(articles).where(inArray(articles.id,[...plannedIds].sort((a,b)=>a-b))).orderBy(articles.id).for('update') : [];
       lockedInventory.forEach(fresh => {const a=allArticlesForCheck.find(a=>a.id===fresh.id);if(a)a.stock=fresh.stock;});
+      // Dedicated screenshot aggregate: every physical row exactly once, all
+      // billable forms/types and tracked native components, same stock journal.
+      if (ctx.screenshotOrder) {
+        for (const d of ctx.screenshotOrder.stockPlan) {
+          await applyStockMovement(db, { articleId:d.articleId, sku:d.sku, expectedStock:d.expectedStock,
+            change:-d.quantity, type:'verkauf', reason:`Screenshot-Bestandsabzug für Bestellung ${orderId}`, orderId, actor:'system' });
+        }
+      }
       if (isRegularMainshopPricing) {
         const lockedSubstitutions = assertMainshopStock(input.items, allArticlesForCheck, substitutionActive);
         // Never deduct a stale/different plan. Selected families are already
@@ -1569,6 +1699,7 @@ export async function createOrderFromTrustedInput(
       // Bei Substitution: Bestand der Ersatz-Varianten abziehen, nicht der bestellten Variante
       for (let itemIdx = 0; itemIdx < stockRelevantItems.length; itemIdx++) {
         const item = stockRelevantItems[itemIdx];
+        if (ctx.screenshotOrder) continue;
         if (input.storeKey === "peps4pets" || isAuthenticatedWawiManualSale) {
           if (item.type !== 'peptide') continue;
         } else if (!isRegularMainshopPricing && item.type !== 'peptide' && item.isFreeGift !== true) continue;
@@ -1596,7 +1727,7 @@ export async function createOrderFromTrustedInput(
               await applyStockMovement(db,{articleId:article.id,sku:article.sku,expectedStock:article.stock??0,change:-deduct,type:'verkauf',reason:`Bestandsabzug für Bestellung ${orderId}`,orderId,actor:'system',...(ctx.jarvyOrder?{expectedPrice:item.price}:{})});
               article.stock=newStock;
               remainingToDeduct -= deduct;
-              console.log(`[Orders] Stock deducted: ${article.name} ${newStock+deduct} → ${newStock} (order ${orderId})`);
+              if (!ctx.screenshotOrder) console.log(`[Orders] Stock deducted: ${article.name} ${newStock+deduct} → ${newStock} (order ${orderId})`);
             }
           }
           if (remainingToDeduct > 0 && !stockOverrideAuthorized) throw Error('ORDER_STOCK_DEMAND_NOT_COVERED');
@@ -1740,20 +1871,31 @@ export async function createOrderFromTrustedInput(
           type: item.type,
           price: item.price.toFixed(2),
           quantity: item.quantity,
+          ...(ctx.screenshotOrder ? {articleId: item.isFreeGift ? null : allArticlesForCheck.find(a=>a.sku===item.shopProductId)?.id ?? null} : {}),
           // Nasenspray- und Plug&Play-Flag speichern (für WaWi-Anzeige)
-          isNasalSpray: item.isNasalSpray === true ||
+          isNasalSpray: isRegularMainshopPricing ? false : ctx.screenshotOrder ? item.isNasalSpray === true : item.isNasalSpray === true ||
             item.name.toLowerCase().includes('[nasenspray]') ||
             item.name.toLowerCase().includes('nasenspray'),
-          isNasalDiySet: item.isNasalDiySet === true,
-          isPlugPlay: item.isPlugPlay === true ||
+          isNasalDiySet: !isRegularMainshopPricing && item.isNasalDiySet === true,
+          isPlugPlay: ctx.screenshotOrder ? item.isPlugPlay === true : item.isPlugPlay === true ||
             item.name.toLowerCase().includes('[plug&play') ||
             item.name.toLowerCase().includes('plug&play patrone'),
         });
       }
 
+      if (ctx.screenshotOrder) {
+        // The plan already deducted tracked components. Persist transparent kit
+        // lines only; legacy nasal loops are suppressed for this route.
+        for (const line of ctx.screenshotOrder.componentLines) {
+          await db.insert(orderItems).values({ orderId, name:line.name, dosage:null, variant:line.variant,
+            type:'accessory', price:'0.00', quantity:line.quantity, articleId:line.articleId,
+            isNasalDiySet:line.isNasalDiySet });
+        }
+      }
+
       // ── Nasenspray: automatisch BAC Wasser 10ml (0€) hinzufügen und Bestand abziehen ──
       // Erkennung über isNasalSpray-Flag (primär) oder Name-Fallback (Legacy)
-      const nasalSprayCount = input.items.filter(i =>
+      const nasalSprayCount = ctx.screenshotOrder || isRegularMainshopPricing ? 0 : input.items.filter(i =>
         i.isNasalDiySet !== true && (
           i.isNasalSpray === true ||
           i.name.toLowerCase().includes('[nasenspray]') ||
@@ -1881,7 +2023,7 @@ export async function createOrderFromTrustedInput(
         if (!found) throw new Error("Kunde nicht gefunden");
         if (found) {
           existingCustomer = found;
-          console.log(`[Customers] Using manually matched customer ID=${input.existingCustomerId} (${found.name})`);
+          if (!ctx.screenshotOrder) console.log(`[Customers] Using manually matched customer ID=${input.existingCustomerId} (${found.name})`);
         }
       } else if (transactionCustomerDataChangeResolution?.kind === "matched") {
         existingCustomer = transactionCustomerDataChangeResolution.customer;
@@ -1917,7 +2059,7 @@ export async function createOrderFromTrustedInput(
             changedFields: confirmedPublicChange.changedFields,
           });
           console.log(`[CustomerDataChange] Confirmed order snapshot recorded in order ${orderId}; profile unchanged`);
-        } else if (isAuthenticatedWawiManualSale && !ctx.jarvyOrder) {
+        } else if (isAuthenticatedWawiManualSale && !ctx.jarvyOrder && !ctx.screenshotOrder) {
           // The established authenticated WaWi workflow remains unchanged. The
           // public shop path above is deliberately the only changed behavior.
           const addressBoundOptionalFields = resolveAddressBoundOptionalFields(existingCustomer, input.customer);
@@ -1947,7 +2089,7 @@ export async function createOrderFromTrustedInput(
           // Guest language/address preferences belong to the new order only.
           // Even a no-change checkout cannot alter an existing profile.
         }
-        console.log(`[Customers] Linked order ${orderId} to existing customer #${existingCustomer.customerNumber} (${fullName})`);
+        if (!ctx.screenshotOrder) console.log(`[Customers] Linked order ${orderId} to existing customer #${existingCustomer.customerNumber} (${fullName})`);
       } else {
           // Generate next customer number (starting at 1210)
           const nextNum = await nextCustomerNumber(db);
@@ -1986,7 +2128,7 @@ export async function createOrderFromTrustedInput(
 
           customerId = newCustomer.id;
           customerIntegrityTrigger = "order_customer_created";
-          console.log(`[Customers] Created new customer #${nextNum} (${fullName}) for order ${orderId}`);
+          if (!ctx.screenshotOrder) console.log(`[Customers] Created new customer #${nextNum} (${fullName}) for order ${orderId}`);
       }
 
       // Link order to customer
@@ -2007,7 +2149,12 @@ export async function createOrderFromTrustedInput(
         );
       }
 
+      // Materialize final written rows inside the original transaction, after all writes.
+      const persistedMessage = await readPersistedOrderMessageData(tx, orderId);
+      persistedConfirmationData = { ...persistedMessage.emailData, mainshopCustomerPresentation: isRegularMainshopPricing };
       const response = {
+        ...(ctx.screenshotOrder ? {screenshotOrder: true, screenshotActorId:ctx.user!.id, screenshotDraftId:ctx.screenshotOrder.mode==='execute'?ctx.screenshotOrder.draftId:null, orderSnapshot: {...persistedMessage.orderSnapshot, customer: persistedMessage.emailData.customer, customerId, paymentMethod:input.paymentMethod}} : {}),
+        ...(!ctx.screenshotOrder ? {orderSnapshot: persistedMessage.orderSnapshot} : {}),
         success:true,orderId,paymentInstructions:null,externalOrderReference:externalOrderReference || undefined,
         ...(isRegularMainshopPricing ? { quote: authoritativeQuote } : {}),
         subtotal:input.subtotal,discount:input.discount,kwkDiscount:input.kwkDiscount || 0,
@@ -2015,13 +2162,21 @@ export async function createOrderFromTrustedInput(
       };
       if (normalCheckoutKey) await persistCheckoutReceipt(tx,normalCheckoutKey,normalFingerprint!,response);
       await queueOrderTask(tx,orderId,'customer_metrics');
-      if (customerIntegrityTrigger) await queueOrderTask(tx,orderId,'customer_duplicate_review');
+      if (customerIntegrityTrigger && !ctx.screenshotOrder) await queueOrderTask(tx,orderId,'customer_duplicate_review');
       await queueOrderTask(tx,orderId,'payment_instructions');
       if (shouldSendConfirmation) await queueOrderTask(tx,orderId,'order_confirmation');
+      if (ctx.screenshotOrder && addressWarningNeedsConfirmation) await queueOrderTask(tx,orderId,'screenshot_address_evidence');
       return response;
       });
       // Another concurrent attempt committed the receipt: no second communication.
       if (transactionResponse.orderId !== orderId) return transactionResponse;
+      // Screenshot checks must complete before any write, including the standalone
+      // address evidence service. Recording evidence is post-commit and never email.
+      if (ctx.screenshotOrder && addressWarningNeedsConfirmation) {
+        await runOrderTask(db,orderId,'screenshot_address_evidence',async () => {
+          await persistAddressValidation({input:input.customer,result:addressValidation,context:'manual_order',orderId,customerId,overrideConfirmed:true,confirmedBy:ctx.user?.username || 'admin'});
+        });
+      }
       await runOrderTask(db,orderId,'customer_metrics',async () => {
         if (customerId) await refreshCustomerOrderMetrics(customerId);
       });
@@ -2042,12 +2197,8 @@ export async function createOrderFromTrustedInput(
 
       // Only the durable claim holder invokes the normal automatic shop confirmation.
       if (shouldSendConfirmation && !options.suppressExternalNotifications) await runOrderTask(db,orderId,'order_confirmation',async () => {
-        const accepted = await sendOrderConfirmationEmail({
-          orderId,communicationLanguage,storeKey:input.storeKey,externalOrderReference,
-          customer:input.customer,items:input.items.map(i => ({...i,dosage:i.dosage || null,variant:i.variant || null})),
-          subtotal:input.subtotal,discount:input.discount,discountCode:input.discountCode,
-          shipping:input.shipping,total:input.total,paymentMethod:input.paymentMethod,
-        });
+        if (!persistedConfirmationData) throw Error('ORDER_CONFIRMATION_SNAPSHOT_MISSING');
+        const accepted = await sendOrderConfirmationEmail(persistedConfirmationData);
         if (!accepted) throw Error('ORDER_CONFIRMATION_NOT_ACCEPTED');
       },true);
 
@@ -2311,6 +2462,7 @@ export const orderRouter = router({
             emailResult = await sendShippingNotificationEmail({
               orderId: input.orderId,
               communicationLanguage: normalizeCommunicationLanguage(order.communicationLanguage),
+              orderDiscountSnapshot: snapshotFromPersistedOrder(order),
               customerEmail: order.email,
               customerName: order.firstName,
               trackingNumber: input.trackingNumber,
@@ -2600,13 +2752,17 @@ export const orderRouter = router({
     }),
 
   // Both deletion paths preserve audit and are atomic; financial/shipping links require review.
-  deleteNoRestock: scopedOrderCleanupProcedure.input(z.object({orderId:z.string()})).mutation(async ({input,ctx}) => {
+  cleanupPreview: scopedOperationsReadProcedure.input(z.object({orderId:z.string()})).query(async ({input}) => {
     const db=await getDb(); if(!db) throw Error('Database not available');
-    return deleteOrderAtomically(db,input.orderId,false,ctx.user?.username || 'Admin');
+    return orderCleanupPreview(db,input.orderId);
   }),
-  delete: scopedOrderCleanupProcedure.input(z.object({orderId:z.string()})).mutation(async ({input,ctx}) => {
+  deleteNoRestock: scopedOrderCleanupProcedure.input(z.object({orderId:z.string(),expectedTotal:z.number().finite().nonnegative().optional(),expectedVersion:z.string().datetime().optional()})).mutation(async ({input,ctx}) => {
     const db=await getDb(); if(!db) throw Error('Database not available');
-    return deleteOrderAtomically(db,input.orderId,true,ctx.user?.username || 'Admin');
+    try { return await deleteOrderAtomically(db,input.orderId,false,ctx.user?.username || 'Admin',input); } catch(error) { orderCleanupError(error); }
+  }),
+  delete: scopedOrderCleanupProcedure.input(z.object({orderId:z.string(),expectedTotal:z.number().finite().nonnegative().optional(),expectedVersion:z.string().datetime().optional()})).mutation(async ({input,ctx}) => {
+    const db=await getDb(); if(!db) throw Error('Database not available');
+    try { return await deleteOrderAtomically(db,input.orderId,true,ctx.user?.username || 'Admin',input); } catch(error) { orderCleanupError(error); }
   }),
 
   // ADMIN: Add internal note
@@ -2635,30 +2791,36 @@ export const orderRouter = router({
         name: z.string(),
         dosage: z.string().optional(),
         variant: z.string().optional(),
-        price: z.number(),
+        price: z.number().finite().nonnegative(),
         quantity: z.number().int().positive(),
         type: z.string(),
-        articleId: z.number().optional(),
+        articleId: z.number().int().positive().optional(),
       })),
-      subtotal: z.number(),
-      discount: z.number(),
+      subtotal: z.number().finite().nonnegative(),
+      discount: z.number().finite().nonnegative(),
       discountCode: z.string().nullable().optional(),
       discountBreakdown: z.array(discountBreakdownEntrySchema).max(30).optional(),
-      shipping: z.number(),
-      total: z.number(),
+      shipping: z.number().finite().nonnegative(),
+      total: z.number().finite().nonnegative(),
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
 
-      return db.transaction(async tx => {
+      try { return await db.transaction(async tx => {
       const db=tx;
       const order=await lockOrder(tx,input.orderId);
-      await assertOrderFinanciallyEditable(tx,order);
-      if (order.status === 'storniert') throw Error('ORDER_CANCELLED_EDIT_REVIEW_REQUIRED');
+      validateEditAmounts(input); // Before any stock/header write AND before no-op.
       const oldItems=await tx.select().from(orderItems).where(eq(orderItems.orderId,input.orderId));
+      const itemMatch=matchEditItems(input.items,oldItems);
+      const sameAmounts=['subtotal','discount','shipping','total'].every(key => editMoneyCents((order as any)[key]) === editMoneyCents((input as any)[key]));
+      const sameCode=(order.discountCode || null) === (input.discountCode || null);
+      const sameBreakdown=input.discountBreakdown === undefined || editBreakdownShape(order.discountBreakdown) === editBreakdownShape(input.discountBreakdown);
+      if (sameAmounts && sameCode && sameBreakdown && itemMatch.unchanged) return { success:true, unchanged:true };
+      await assertOrderFinanciallyEditable(tx,order);
+      if (order.status === 'storniert' || order.cancelledAt) throw Error('ORDER_CANCELLED_EDIT_REVIEW_REQUIRED');
+      const derivedTerms=await orderEditDerivedTerms(tx,order,input);
       const history=await tx.select().from(stockHistory).where(eq(stockHistory.orderId,input.orderId));
-      if (input.items.some(i => i.id && !oldItems.some(old => old.id === i.id))) throw Error('ORDER_ITEM_ID_CONFLICT');
       const returns=resultRows(await tx.execute(sql`SELECT original_movement_id,return_movement_id FROM priority_stock_returns WHERE order_id=${input.orderId}`));
       const reversedOriginals=new Set(returns.map(r=>r.original_movement_id));
       const returnMovements=new Set(returns.map(r=>r.return_movement_id));
@@ -2685,43 +2847,46 @@ export const orderRouter = router({
           if(qty)await applyStockMovement(tx,{articleId:id,sku:article.sku,expectedStock:article.stock,change:-qty,type:'verkauf',reason:'Explicit unpaid order item edit',orderId:input.orderId,actor:'Admin'});
         }
       }
-      if (!Number.isFinite(input.total) || input.total < 0 || input.subtotal < 0 || input.discount < 0 || input.shipping < 0 || Math.abs(input.total-(input.subtotal-input.discount+input.shipping)) > 0.011 || Math.abs(input.subtotal-input.items.reduce((sum,i)=>sum+i.price*i.quantity,0)) > 0.011) throw Error('ORDER_EDIT_AMOUNTS_INVALID');
 
       // Update order financials
       await db.update(orders).set({
-        subtotal: input.subtotal.toFixed(2),
-        discount: input.discount.toFixed(2),
+        subtotal: (editMoneyCents(input.subtotal)/100).toFixed(2),
+        discount: (editMoneyCents(input.discount)/100).toFixed(2),
         discountCode: input.discountCode || null,
-        ...(input.discountBreakdown !== undefined ? { discountBreakdown: input.discountBreakdown } : {}),
-        shipping: input.shipping.toFixed(2),
-        total: input.total.toFixed(2),
+        ...(input.discountBreakdown !== undefined ? { discountBreakdown: input.discountBreakdown.map(entry=>({...entry,amount:editMoneyCents(entry.amount)/100})) } : {}),
+        shipping: (editMoneyCents(input.shipping)/100).toFixed(2),
+        total: (editMoneyCents(input.total)/100).toFixed(2),
+        ...derivedTerms,
         updatedAt: new Date(),
       }).where(eq(orders.orderId, input.orderId));
 
-      // Delete old items
-      await db.delete(orderItems).where(eq(orderItems.orderId, input.orderId));
-
-      // Insert new items
-      for (const item of input.items) {
-        await db.insert(orderItems).values({
-          orderId: input.orderId,
+      // Existing positions retain identity, flags and createdAt. Only explicit
+      // removals are deleted; new rows receive the established stock-shape flags.
+      const retained=new Set(itemMatch.matches.filter(Boolean).map(old => old.id));
+      const removed=oldItems.filter(old => !retained.has(old.id));
+      if (removed.length) await db.delete(orderItems).where(and(eq(orderItems.orderId,input.orderId),inArray(orderItems.id,removed.map(old=>old.id))));
+      for (const [index,item] of input.items.entries()) {
+        const values={
           name: item.name,
           dosage: item.dosage || null,
           variant: item.variant || null,
           type: item.type,
-          price: item.price.toFixed(2),
+          price: (editMoneyCents(item.price)/100).toFixed(2),
           quantity: item.quantity,
           articleId: item.articleId || null,
-          isNasalSpray: (oldItems.find(old => old.id === item.id) || oldItems.find(old => stockShape([old])===stockShape([item])))?.isNasalSpray || false,
-          isNasalDiySet: (oldItems.find(old => old.id === item.id) || oldItems.find(old => stockShape([old])===stockShape([item])))?.isNasalDiySet || false,
-          isPlugPlay: (oldItems.find(old => old.id === item.id) || oldItems.find(old => stockShape([old])===stockShape([item])))?.isPlugPlay || false,
-        });
+        };
+        const matched=itemMatch.matches[index];
+        if (matched) await db.update(orderItems).set(values).where(and(eq(orderItems.orderId,input.orderId),eq(orderItems.id,matched.id)));
+        else {
+          const previous=oldItems.find(old => stockShape([old])===stockShape([item]));
+          await db.insert(orderItems).values({orderId:input.orderId,...values,isNasalSpray:previous?.isNasalSpray || false,isNasalDiySet:previous?.isNasalDiySet || false,isPlugPlay:previous?.isPlugPlay || false});
+        }
       }
 
       console.log(`[Orders] Updated order ${input.orderId} – ${input.total.toFixed(2)} EUR – ${input.items.length} items`);
 
-      return { success: true };
-      });
+      return { success: true, unchanged:false };
+      }); } catch (error) { orderEditError(error); }
     }),
 
   // Send packing notification to customer (WhatsApp link + Email)
@@ -2746,6 +2911,7 @@ export const orderRouter = router({
         const emailResult = await sendPackingNotificationEmail({
           orderId: order.orderId,
           communicationLanguage: normalizeCommunicationLanguage(order.communicationLanguage),
+          orderDiscountSnapshot: snapshotFromPersistedOrder(order),
           customerEmail: order.email,
           customerName,
         });
@@ -2764,6 +2930,7 @@ export const orderRouter = router({
         customerName,
         orderId: order.orderId,
         communicationLanguage: order.communicationLanguage,
+        orderDiscountSnapshot: snapshotFromPersistedOrder(order),
       });
 
       console.log(`[Orders] Packing notification for ${order.orderId}: email=${input.sendEmail}, phone=${phone}`);
@@ -2773,6 +2940,7 @@ export const orderRouter = router({
         whatsappPhone: phone,
         communicationPhoneSource: communicationPhone.source,
         whatsappMessage: waMessage,
+        orderDiscountSnapshot: snapshotFromPersistedOrder(order),
         customerName,
         orderId: order.orderId,
       };

@@ -1,0 +1,471 @@
+import { createHash } from "node:crypto";
+import { TRPCError } from "@trpc/server";
+import { and, asc, eq, getTableColumns, getTableName, inArray, sql } from "drizzle-orm";
+import { z } from "zod";
+import { articles, articleSeo, articleMerchant, articleTranslations, articleFaq,
+  articleUseCases, useCases, productAuditLog, stockHistory } from "../drizzle/schema.js";
+import { getDb } from "./db.js";
+import { applyStockMovement } from "./stockMovementService.js";
+import { validateProductData } from "./productValidation.js";
+import { requiresResearchOnlyValidation } from "./productValidationPolicy.js";
+import { singleBlendCompositionSchema, getSingleBlendComposition, hasNoCommonBlendChemistry,
+  type SingleBlendComposition } from "./singleBlendComposition.js";
+
+type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
+type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+type ProductDb = Db | Tx;
+const text = (max: number) => z.string().trim().min(1).max(max);
+const slug = text(100).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
+const lang = text(5).regex(/^[a-z]{2}(?:-[a-z]{2})?$/);
+const httpsUrl = text(2000).url().refine(value => {
+  const url = new URL(value);
+  return url.protocol === "https:" && !url.username && !url.password;
+}, "HTTPS URL ohne Zugangsdaten erforderlich");
+const mgLabel = text(30).regex(/^(?:[1-9]\d*(?:\.\d+)?|0\.\d*[1-9]\d*) ?mg$/, "Exakte positive mg-Angabe erforderlich");
+const money = z.number().finite().positive().max(99999999.99).refine(
+  value => Math.abs(value * 100 - Math.round(value * 100)) < 0.000001,
+  "Preis darf höchstens zwei Nachkommastellen haben");
+const stock = z.number().int().min(0).max(2147483647);
+
+// Bounded, real JSON object: no arbitrary nested write keys or non-JSON values.
+const description = z.record(z.unknown()).superRefine((value, ctx) => {
+  const pending: Array<{ value: unknown; depth: number }> = [{ value, depth: 0 }];
+  let count = 0;
+  while (pending.length) {
+    const entry = pending.pop()!;
+    if (++count > 2000 || entry.depth > 6) {
+      ctx.addIssue({ code: "custom", message: "Beschreibung zu groß/tief" }); return;
+    }
+    const v = entry.value;
+    if (v === null || typeof v === "string" || typeof v === "boolean" || (typeof v === "number" && Number.isFinite(v))) continue;
+    if (typeof v !== "object" || (!Array.isArray(v) && Object.getPrototypeOf(v) !== Object.prototype)) {
+      ctx.addIssue({ code: "custom", message: "Beschreibung muss JSON enthalten" }); return;
+    }
+    pending.push(...Object.values(v).map(child => ({ value: child, depth: entry.depth + 1 })));
+  }
+  if (Buffer.byteLength(JSON.stringify(value), "utf8") > 50000)
+    ctx.addIssue({ code: "custom", message: "Beschreibung maximal 50 KB" });
+  for (const key of ["kurztext", "wirkung", "fazit", "risiko"]) {
+    if (typeof value[key] !== "string" || !(value[key] as string).trim())
+      ctx.addIssue({ code: "custom", message: `Beschreibung: ${key} fehlt` });
+  }
+});
+const seoSchema = z.object({ seoTitle: text(60), seoDescription: text(155),
+  canonical: httpsUrl, imageAlt: text(200), ogImage: httpsUrl }).strict();
+const merchantSchema = z.object({ merchantTitle: text(150), merchantDescription: text(5000),
+  brand: text(100), googleProductCategory: text(10), productType: text(200) }).strict();
+const faqSchema = z.object({ lang, question: text(1000), answer: text(5000) }).strict();
+const translationSchema = z.object({ lang, name: text(200), shortDescription: text(2000),
+  description, merchantTitle: text(150), merchantDescription: text(5000) }).strict();
+const variantSchema = z.object({ label: mgLabel, sku: text(50), price: money, stock, imageUrl: httpsUrl }).strict();
+const singleBlendMerchantSchema = merchantSchema.extend({ googleProductCategory: text(10).nullable() });
+
+const familyBaseInput = z.object({
+  requestKey: z.string().uuid().transform(value => value.toLowerCase()),
+  shopProductId: slug, name: text(160), category: text(100),
+  categories: z.array(text(100)).min(1).max(20), shortDescription: text(2000),
+  badge: text(100), casNumber: text(50), molecularWeight: text(50), purity: text(20), description,
+  variants: z.array(variantSchema).min(2).max(10), seo: seoSchema, merchant: merchantSchema,
+  faqs: z.array(faqSchema).min(4).max(6), useCaseSlugs: z.array(slug).max(20).default([]),
+  translations: z.array(translationSchema).max(10).default([]),
+}).strict();
+type SharedCreateInput = Omit<z.infer<typeof familyBaseInput>, "casNumber" | "molecularWeight" | "merchant"> & {
+  casNumber: string | null; molecularWeight: string | null;
+  merchant: z.infer<typeof singleBlendMerchantSchema>;
+};
+function refineCreate(input: SharedCreateInput, ctx: z.RefinementCtx) {
+  const issue = (message: string) => ctx.addIssue({ code: "custom", message });
+  if (input.seo.canonical !== canonicalFor(input.shopProductId)) issue("Canonical muss exakt zur Familien-URL passen");
+  if (new Set(input.variants.map(v => v.sku.toLowerCase())).size !== input.variants.length) issue("Doppelte SKU im Payload");
+  // 5mg and 5 mg (or 5.0 mg) must not represent two inventory variants.
+  if (new Set(input.variants.map(v => Number(v.label.replace(/ ?mg$/, "")))).size !== input.variants.length) issue("Doppelte mg-Variante");
+  if (input.variants.some(v => `${input.name} (${v.label})`.length > 200)) issue("Variantenname maximal 200 Zeichen");
+  if (new Set(input.categories).size !== input.categories.length) issue("Doppelte Kategorie");
+  if (new Set(input.useCaseSlugs).size !== input.useCaseSlugs.length) issue("Doppelter Use Case");
+  if (new Set(input.translations.map(t => t.lang)).size !== input.translations.length) issue("Doppelte Übersetzungssprache");
+  if (input.faqs.filter(f => f.lang === "de").length < 4) issue("Mindestens vier deutsche FAQs erforderlich");
+  if (new Set(input.faqs.map(f => `${f.lang}:${f.question}`)).size !== input.faqs.length) issue("Doppelte FAQ");
+  const de = input.translations.find(t => t.lang === "de");
+  if (de && canonicalJson(de) !== canonicalJson(defaultDe(input))) issue("Optionale DE-Übersetzung muss den Basistexten entsprechen");
+}
+export const createFamilyInput = familyBaseInput.superRefine(refineCreate);
+export const createSingleBlendInput = familyBaseInput.extend({
+  shopProductId: z.literal("somatide"), name: z.literal("SOMATIDE"),
+  casNumber: z.literal("").nullable(), molecularWeight: z.literal("").nullable(),
+  variants: z.tuple([variantSchema.extend({ label: z.literal("15 mg"), sku: z.literal("SOMATIDE-15MG") })]),
+  merchant: singleBlendMerchantSchema, composition: singleBlendCompositionSchema,
+}).superRefine((input, ctx) => {
+  refineCreate(input, ctx);
+  if (input.description.composition !== undefined
+    && canonicalJson(input.description.composition) !== canonicalJson(input.composition))
+    ctx.addIssue({ code: "custom", message: "Beschreibung widerspricht kanonischer Composition" });
+}).transform(input => ({ ...input, description: { ...input.description, composition: input.composition },
+  translations: input.translations.map(t => t.lang === "de"
+    ? { ...t, description: { ...t.description, composition: input.composition } } : t),
+}));
+export const getFamilyInput = z.object({ shopProductId: slug }).strict();
+export const publishFamilyInput = z.object({ shopProductId: slug, masterArticleId: z.number().int().positive(),
+  requestKey: z.string().uuid().transform(value => value.toLowerCase()) }).strict();
+export const publishSingleBlendInput = publishFamilyInput.extend({ shopProductId: z.literal("somatide") });
+export type CreateFamilyInput = z.infer<typeof createFamilyInput>;
+export type PublishFamilyInput = z.infer<typeof publishFamilyInput>;
+export type CreateSingleBlendInput = z.infer<typeof createSingleBlendInput>;
+export type PublishSingleBlendInput = z.infer<typeof publishSingleBlendInput>;
+
+function canonicalFor(shopProductId: string) { return `https://www.369research.eu/product/${shopProductId}`; }
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") return `{${Object.keys(value).sort().map(key =>
+    `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+function defaultDe(input: Pick<SharedCreateInput, "name" | "shortDescription" | "description" | "merchant">) {
+  return { lang: "de", name: input.name, shortDescription: input.shortDescription, description: input.description,
+    merchantTitle: input.merchant.merchantTitle, merchantDescription: input.merchant.merchantDescription };
+}
+function fail(message: string, code: "BAD_REQUEST" | "CONFLICT" | "NOT_FOUND" = "BAD_REQUEST"): never {
+  throw new TRPCError({ code, message });
+}
+function assertParsed<T>(schema: z.ZodType<T, any, any>, value: unknown, label: string): T {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) fail(`${label}: ${parsed.error.issues.map(i => i.message).join("; ")}`);
+  return parsed.data;
+}
+
+// Only these fixed product relations are inspected. No caller-supplied SQL,
+// schema names, credentials, row contents or unrelated catalog metadata.
+const mandatoryProductTables = { articles, article_seo: articleSeo, article_merchant: articleMerchant,
+  article_translations: articleTranslations, article_faq: articleFaq,
+  product_audit_log: productAuditLog, stock_history: stockHistory };
+type ProductTableName = keyof typeof mandatoryProductTables | "use_cases" | "article_use_cases";
+type ProductSchemaStatus = { tables: Record<ProductTableName, boolean>; missingRequiredFields: string[];
+  faqLayout?: "current" | "legacy-active" | "unavailable" };
+type ProductSchema = { status: ProductSchemaStatus; columns: Record<ProductTableName, Map<string, number>> };
+async function inspectProductSchema(db: ProductDb): Promise<ProductSchema> {
+  const result = await db.execute<{ name: ProductTableName; present: boolean; fields: Array<{ name: string; type: number }> }>(sql`
+    WITH known(name) AS (VALUES ('articles'), ('article_seo'), ('article_merchant'),
+      ('article_translations'), ('article_faq'), ('article_use_cases'), ('use_cases'),
+      ('product_audit_log'), ('stock_history')),
+    relations AS (SELECT name, to_regclass(name) AS oid FROM known)
+    SELECT r.name, r.oid IS NOT NULL AS present,
+      COALESCE(jsonb_agg(jsonb_build_object('name', a.attname, 'type', a.atttypid::int)
+        ORDER BY a.attnum) FILTER (WHERE a.attname IS NOT NULL), '[]'::jsonb) AS fields
+    FROM relations r LEFT JOIN pg_attribute a
+      ON a.attrelid = r.oid AND a.attnum > 0 AND NOT a.attisdropped
+    GROUP BY r.name, r.oid ORDER BY r.name`);
+  const tables = {} as ProductSchemaStatus["tables"], columns = {} as ProductSchema["columns"];
+  for (const row of result.rows) {
+    tables[row.name] = row.present;
+    columns[row.name] = new Map(row.fields.map(f => [f.name, f.type]));
+  }
+  // Full declared mandatory rows, except the explicit FAQ visibility alias and
+  // optional updated_at. Report only known names, never arbitrary live fields.
+  const missingRequiredFields = Object.values(mandatoryProductTables).flatMap(table => {
+    const name = getTableName(table) as ProductTableName;
+    return Object.values(getTableColumns(table)).filter(c => !(name === "article_faq"
+      && (c.name === "updated_at" || (c.name === "is_visible" && columns[name].has("active"))))
+      && !columns[name].has(c.name))
+      .map(c => `${name}.${c.name}`);
+  }).sort();
+  const faqLayout = missingRequiredFields.some(f => f.startsWith("article_faq.")) ? "unavailable"
+    : columns.article_faq.has("is_visible") ? "current" : "legacy-active";
+  return { status: { tables, missingRequiredFields, faqLayout }, columns };
+}
+function requireProductSchema(schema: ProductSchema, fields = schema.status.missingRequiredFields) {
+  if (fields.length) fail(`Produkt-Schema unvollständig: ${fields.join(", ")}`, "CONFLICT");
+}
+async function readFamilyFaqs(db: ProductDb, schema: ProductSchema, ids: number[]) {
+  // Identifiers come ONLY from this fixed whitelist, never from the payload.
+  const visible = sql.identifier(schema.columns.article_faq.has("is_visible") ? "is_visible" : "active");
+  const updated = schema.columns.article_faq.has("updated_at") ? sql`updated_at::text` : sql`NULL`;
+  const rows = await db.execute<{ id: number; article_id: number; lang: string; question: string;
+    answer: string; sort_order: number | null; is_visible: number | null; created_at: string; updated_at: string | null }>(sql`
+    SELECT id, article_id, lang, question, answer, sort_order, ${visible} AS is_visible,
+      created_at::text AS created_at, ${updated} AS updated_at
+    FROM article_faq WHERE article_id IN (${sql.join(ids.map(id => sql`${id}`), sql`, `)})
+    ORDER BY sort_order, id`);
+  return rows.rows.map(f => ({ id: f.id, articleId: f.article_id, lang: f.lang, question: f.question,
+    answer: f.answer, sortOrder: f.sort_order, isVisible: f.is_visible,
+    createdAt: articleFaq.createdAt.mapFromDriverValue(f.created_at),
+    updatedAt: f.updated_at === null ? null : articleFaq.updatedAt.mapFromDriverValue(f.updated_at) }));
+}
+async function insertFamilyFaqs(tx: Tx, schema: ProductSchema, masterId: number, faqs: CreateFamilyInput["faqs"]) {
+  // Only new rows; set both flags when present so the legacy public reader agrees.
+  // Omit timestamps to retain actual DB defaults, with no invented updated time.
+  const flags = (["is_visible", "active"] as const).filter(name => schema.columns.article_faq.has(name));
+  if (!flags.length) fail("Produkt-Schema unvollständig: article_faq.is_visible", "CONFLICT");
+  const columns = sql.join(flags.map(name => sql.identifier(name)), sql`, `);
+  const rows = faqs.map((f, index) => sql`(${masterId}, ${f.lang}, ${f.question}, ${f.answer}, ${index + 1},
+    ${sql.join(flags.map(() => sql`1`), sql`, `)})`);
+  await tx.execute(sql`INSERT INTO article_faq (article_id, lang, question, answer, sort_order, ${columns})
+    VALUES ${sql.join(rows, sql`, `)}`);
+}
+function canReadUseCases(schema: ProductSchema) {
+  const c = schema.columns.use_cases;
+  // Integer IDs and text/varchar slugs match the existing data model.
+  return schema.status.tables.use_cases && c.get("id") === 23 && [25, 1043].includes(c.get("slug") ?? 0);
+}
+function canLinkUseCases(schema: ProductSchema) {
+  const c = schema.columns.article_use_cases;
+  return canReadUseCases(schema) && schema.status.tables.article_use_cases
+    && ["id", "article_id", "use_case_id"].every(name => c.get(name) === 23);
+}
+async function readAvailableUseCases(db: ProductDb, schema: ProductSchema) {
+  if (!canReadUseCases(schema)) return [] as Array<{ id: number; slug: string; visible?: number | boolean }>;
+  const rows = await db.select({ id: useCases.id, slug: useCases.slug,
+    // Row JSON avoids referencing an obsolete optional column in SQL.
+    visible: sql<unknown>`to_jsonb(${useCases})->'visible'` }).from(useCases).orderBy(asc(useCases.slug));
+  return rows.map(row => {
+    const item: { id: number; slug: string; visible?: number | boolean } = { id: row.id, slug: row.slug };
+    if (schema.columns.use_cases.has("visible") && (row.visible === 0 || row.visible === 1 || typeof row.visible === "boolean"))
+      item.visible = row.visible;
+    return item;
+  });
+}
+async function lock(tx: Tx, key: string) {
+  // Both creation paths must serialize aliases of the same SKU identically.
+  const canonicalKey = key.startsWith("sku:") ? `sku:${key.slice(4).toLowerCase()}` : key;
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`product-family:${canonicalKey}`}, 0))`);
+}
+async function replay<T>(tx: Tx, requestKey: string, action: string, input: unknown): Promise<{ fingerprint: string; response?: T }> {
+  const fingerprint = createHash("sha256").update(canonicalJson({ action, input })).digest("hex");
+  const prior = await tx.select().from(productAuditLog).where(eq(productAuditLog.fieldName, `request:${requestKey}`)).orderBy(asc(productAuditLog.id));
+  if (!prior.length) return { fingerprint };
+  if (prior.length !== 1) fail("Request-Audit mehrdeutig", "CONFLICT");
+  let stored: { fingerprint?: string; response?: T };
+  try { stored = JSON.parse(prior[0].newValue ?? "null"); } catch { fail("Request-Audit ungültig", "CONFLICT"); }
+  if (!stored || prior[0].action !== action || stored.fingerprint !== fingerprint || !stored.response)
+    fail("requestKey bereits mit anderem Payload verwendet", "CONFLICT");
+  return { fingerprint, response: stored.response };
+}
+async function audit(tx: Tx, articleId: number, action: string, requestKey: string, fingerprint: string,
+  response: unknown, actor: string, details: unknown, oldValue?: unknown) {
+  // Mandatory audit INSIDE the same transaction. Never use the legacy swallowing helper.
+  await tx.insert(productAuditLog).values({ articleId, action, fieldName: `request:${requestKey}`,
+    changedBy: actor.slice(0, 100), oldValue: oldValue === undefined ? null : JSON.stringify(oldValue),
+    newValue: JSON.stringify({ fingerprint, response, details }) });
+}
+
+export async function readFamily(db: ProductDb, shopProductId: string, forUpdate = false) {
+  const family = await readFamilyData(db, shopProductId, forUpdate);
+  if (shopProductId === "somatide" && family.validation
+    && (family.articles.length === 1 || (family.master?.sku === "SOMATIDE-15MG"
+      && Array.isArray(family.master.variants) && family.master.variants.length === 1))) {
+    try { validateFamily(family, true); } catch (error) {
+      if (!(error instanceof TRPCError)) throw error;
+      family.validation = { ...family.validation, isValid: false, score: 0,
+        issues: [...family.validation.issues, error.message] };
+    }
+  }
+  return family;
+}
+async function readFamilyData(db: ProductDb, shopProductId: string, forUpdate = false) {
+  const schema = await inspectProductSchema(db), productSchemaStatus = schema.status;
+  requireProductSchema(schema, ["articles.id", "articles.shop_product_id"].filter(field => productSchemaStatus.missingRequiredFields.includes(field)));
+  const existing = db.select({ id: articles.id }).from(articles).where(eq(articles.shopProductId, shopProductId));
+  const exists = await (forUpdate ? existing.for("update") : existing);
+  if (exists.length) requireProductSchema(schema);
+  const availableUseCases = await readAvailableUseCases(db, schema);
+  if (!exists.length) return { shopProductId, masterArticleId: null, master: null, articles: [], variants: [],
+    composition: null, seo: null, merchant: null, translations: [], faqs: [], useCases: [], availableUseCases, validation: null, productSchemaStatus };
+  const query = db.select().from(articles).where(eq(articles.shopProductId, shopProductId)).orderBy(asc(articles.id));
+  const family = await (forUpdate ? query.for("update") : query);
+  const masters = family.filter(a => Array.isArray(a.variants) && a.variants.length > 0);
+  if (masters.length !== 1) fail("Familie benötigt genau einen eindeutigen Master mit Varianten", "CONFLICT");
+  const master = masters[0];
+  const ids = family.map(a => a.id);
+  const seo = await db.select().from(articleSeo).where(inArray(articleSeo.articleId, ids)).orderBy(asc(articleSeo.id));
+  const merchant = await db.select().from(articleMerchant).where(inArray(articleMerchant.articleId, ids)).orderBy(asc(articleMerchant.id));
+  const translations = await db.select().from(articleTranslations).where(inArray(articleTranslations.articleId, ids)).orderBy(asc(articleTranslations.lang), asc(articleTranslations.id));
+  const faqs = await readFamilyFaqs(db, schema, ids);
+  const links = canLinkUseCases(schema) ? await db.select({ id: articleUseCases.id, articleId: articleUseCases.articleId,
+    useCaseId: articleUseCases.useCaseId, slug: useCases.slug,
+    ...(schema.columns.article_use_cases.has("sort_order") ? { sortOrder: articleUseCases.sortOrder } : {}),
+    ...(schema.columns.article_use_cases.has("is_primary") ? { isPrimary: articleUseCases.isPrimary } : {}) })
+    .from(articleUseCases).innerJoin(useCases, eq(articleUseCases.useCaseId, useCases.id))
+    .where(inArray(articleUseCases.articleId, ids)).orderBy(asc(useCases.slug), asc(articleUseCases.id)) : [];
+  if (seo.length !== 1 || merchant.length !== 1 || [...seo, ...merchant, ...translations, ...faqs, ...links].some(r => r.articleId !== master.id)
+    || new Set(translations.map(t => t.lang)).size !== translations.length)
+    fail("Familien-Metadaten fehlen, sind mehrdeutig oder liegen auf einem Kindartikel", "CONFLICT");
+  const de = translations.find(t => t.lang === "de");
+  return { shopProductId, masterArticleId: master.id, master, articles: family,
+    composition: family.length === 1 ? getSingleBlendComposition(master) : null,
+    variants: master.variants as unknown[], seo: seo[0], merchant: merchant[0], translations, faqs,
+    useCases: links, availableUseCases, validation: validateProductData(master, seo[0], merchant[0], de), productSchemaStatus };
+}
+
+// Shared exact-master validation for creation and publication; no LIMIT 1 or fallback.
+function validateFamily(family: Awaited<ReturnType<typeof readFamilyData>>, singleBlend = false) {
+  const master = family.master;
+  if (!master || !family.seo || !family.merchant || !family.validation) fail("Familie nicht gefunden", "NOT_FOUND");
+  const rows = family.articles;
+  if ((singleBlend ? rows.length !== 1 : rows.length < 2 || rows.length > 10)
+    || family.variants.length !== rows.length) fail("Variantenanzahl oder Lagerzuordnung ungültig");
+  if (singleBlend && (!family.composition || !hasNoCommonBlendChemistry(master)
+    || master.name !== "SOMATIDE (15 mg)")) fail("Single-Blend-Identität/Composition oder skalare Chemie ungültig");
+  if (master.shopVisible !== 0 && master.shopVisible !== 1) fail("Master-Sichtbarkeit ungültig");
+  if (rows.some(a => a.isActive !== 1 || (a.id !== master.id && (a.shopVisible !== 0 || a.variants !== null))))
+    fail("Kindartikel müssen aktiv, verborgen und ohne variants JSON sein");
+  const ids = new Set<number>(), labels = new Set<number>();
+  for (const raw of family.variants) {
+    const v = assertParsed(z.object({ dosage: mgLabel, label: mgLabel, sku: text(50), price: money, stock,
+      inventoryArticleId: z.number().int().positive(), image: httpsUrl, imageUrl: httpsUrl,
+      images: z.array(httpsUrl).min(1).max(10) }).strict(), raw, "Variante");
+    const row = rows.find(a => a.id === v.inventoryArticleId);
+    const amount = Number(v.label.replace(/ ?mg$/, ""));
+    if (!row || ids.has(row.id) || labels.has(amount) || row.shopProductId !== family.shopProductId
+      || row.sku !== v.sku || Number(row.sellingPrice) !== v.price || row.stock !== v.stock || v.dosage !== v.label
+      || !row.name.endsWith(` (${v.label})`) || row.mockupImageUrl !== v.image || v.imageUrl !== v.image
+      || v.images[0] !== v.image || row.salePrice !== null) fail("Variante stimmt nicht exakt mit ihrer Lagerzeile überein");
+    ids.add(row.id); labels.add(amount);
+  }
+  const first = family.variants[0] as { inventoryArticleId: number };
+  if (first.inventoryArticleId !== master.id) fail("Erste Variante ist nicht der exakte Master");
+  const seo = assertParsed(seoSchema, { seoTitle: family.seo.seoTitle, seoDescription: family.seo.seoDescription,
+    canonical: family.seo.canonical, imageAlt: family.seo.imageAlt, ogImage: family.seo.ogImage }, "SEO");
+  if (family.seo.slug !== family.shopProductId || seo.canonical !== canonicalFor(family.shopProductId)
+    || family.seo.faqEnabled !== 1 || family.seo.schemaEnabled !== 1) fail("SEO-Slug/Canonical/FAQ-Konfiguration ungültig");
+  const merchant = assertParsed(singleBlend ? singleBlendMerchantSchema : merchantSchema, { merchantTitle: family.merchant.merchantTitle,
+    merchantDescription: family.merchant.merchantDescription, brand: family.merchant.brand,
+    googleProductCategory: family.merchant.googleProductCategory, productType: family.merchant.productType }, "Merchant");
+  const de = family.translations.find(t => t.lang === "de");
+  if (!de || de.merchantTitle !== merchant.merchantTitle || de.merchantDescription !== merchant.merchantDescription
+    || !de.name || de.shortDescription !== master.shortDescription || canonicalJson(de.description) !== canonicalJson(master.description)
+    || de.seoTitle !== seo.seoTitle || de.seoDescription !== seo.seoDescription || de.imageAlt !== seo.imageAlt)
+    fail("Deutsche Übersetzung fehlt oder widerspricht Master/SEO/Merchant");
+  assertParsed(description, master.description, "Beschreibung");
+  assertParsed(text(2000), master.shortDescription, "Kurzbeschreibung");
+  assertParsed(text(20), master.purity, "Reinheit");
+  if (!singleBlend) {
+    assertParsed(text(50), master.casNumber, "CAS");
+    assertParsed(text(50), master.molecularWeight, "Molekulargewicht");
+  }
+  assertParsed(z.array(text(100)).min(1).max(20), master.categories, "Kategorien");
+  assertParsed(text(100), master.category, "Kategorie");
+  const faq = family.faqs.map(f => assertParsed(faqSchema, { lang: f.lang, question: f.question, answer: f.answer }, "FAQ"));
+  if (faq.length < 4 || faq.length > 6 || faq.filter(f => f.lang === "de").length < 4
+    || family.faqs.some(f => f.isVisible !== 1) || new Set(faq.map(f => `${f.lang}:${f.question}`)).size !== faq.length)
+    fail("Vier bis sechs eindeutige sichtbare FAQs erforderlich (mindestens vier DE)");
+  if (new Set(family.useCases.map(u => u.useCaseId)).size !== family.useCases.length) fail("Doppelte Use-Case-Verknüpfung");
+  if (!family.validation.isValid || family.validation.warnings.length > 0)
+    fail(`Produktvalidierung fehlgeschlagen: ${[...family.validation.issues, ...family.validation.warnings].join("; ")}`);
+  if ((singleBlend || requiresResearchOnlyValidation(master)) && !family.validation.hasResearchNote) fail("Research Use Only Hinweis erforderlich");
+  return family.validation;
+}
+
+export async function createProductFamily(db: Db, input: CreateFamilyInput, actor: string): Promise<CreateResponse> {
+  return await createAtomicProduct(db, input, actor, false);
+}
+export async function createSingleBlend(db: Db, input: CreateSingleBlendInput, actor: string) {
+  return await createAtomicProduct(db, input, actor, true) as CreateSingleBlendResponse;
+}
+async function createAtomicProduct(db: Db, input: SharedCreateInput, actor: string, singleBlend: boolean) {
+  const action = singleBlend ? "CREATE_SINGLE_BLEND" : "CREATE_FAMILY";
+  // First variant owns the canonical source; its stock is never a family sum.
+  return db.transaction(async tx => {
+    const schema = await inspectProductSchema(tx);
+    requireProductSchema(schema);
+    if (input.useCaseSlugs.length && !canLinkUseCases(schema))
+      fail("Use-Case-Slugs können nicht verknüpft werden: optionale use_cases/article_use_cases Tabellen oder ID-/Slug-Felder fehlen oder sind inkompatibel");
+    await lock(tx, `request:${input.requestKey}`);
+    await lock(tx, `family:${input.shopProductId}`);
+    for (const sku of [...new Set(input.variants.map(v => v.sku.toLowerCase()))].sort()) await lock(tx, `sku:${sku}`);
+    const prior = await replay<CreateResponse | CreateSingleBlendResponse>(tx, input.requestKey, action, input);
+    if (prior.response) return prior.response;
+    if ((await tx.select({ id: articles.id }).from(articles).where(eq(articles.shopProductId, input.shopProductId))).length)
+      fail("Produktfamilie existiert bereits", "CONFLICT");
+    if ((await tx.select({ id: articles.id }).from(articles).where(inArray(sql`lower(${articles.sku})`, input.variants.map(v => v.sku.toLowerCase())))).length)
+      fail("SKU existiert bereits", "CONFLICT");
+    if ((await tx.select({ id: articleSeo.id }).from(articleSeo).where(eq(articleSeo.slug, input.shopProductId))).length)
+      fail("SEO-Slug existiert bereits", "CONFLICT");
+    const selectedUseCases = input.useCaseSlugs.length ? await tx.select({ id: useCases.id, slug: useCases.slug })
+      .from(useCases).where(inArray(useCases.slug, input.useCaseSlugs)) : [];
+    if (selectedUseCases.length !== input.useCaseSlugs.length || new Set(selectedUseCases.map(u => u.slug)).size !== input.useCaseSlugs.length)
+      fail("Use-Case-Slug existiert nicht oder ist mehrdeutig");
+    const articleIds: number[] = [];
+    const variants: FamilyVariant[] = [];
+    for (const v of input.variants) {
+      const [a] = await tx.insert(articles).values({ name: `${input.name} (${v.label})`, sku: v.sku,
+        shopProductId: input.shopProductId, category: input.category, categories: input.categories,
+        shortDescription: input.shortDescription, badge: input.badge, casNumber: input.casNumber,
+        molecularWeight: input.molecularWeight, purity: input.purity, description: input.description,
+        sellingPrice: v.price.toFixed(2), salePrice: null, stock: 0, isActive: 1, shopVisible: 0,
+        mockupImageUrl: v.imageUrl, labelImageUrl: v.imageUrl, galleryImages: [v.imageUrl], variants: null,
+      }).returning();
+      const movement = await applyStockMovement(tx, { articleId: a.id, sku: a.sku, expectedStock: 0,
+        change: v.stock, type: "wareneingang", reason: "Produktanlage", actor: actor.slice(0, 100) });
+      articleIds.push(a.id);
+      variants.push({ dosage: v.label, label: v.label, sku: a.sku, price: Number(a.sellingPrice), stock: movement.after,
+        inventoryArticleId: a.id, image: v.imageUrl, imageUrl: v.imageUrl, images: [v.imageUrl] });
+    }
+    const masterArticleId = articleIds[0];
+    await tx.update(articles).set({ variants, galleryImages: input.variants.map(v => v.imageUrl) }).where(eq(articles.id, masterArticleId));
+    await tx.insert(articleSeo).values({ articleId: masterArticleId, slug: input.shopProductId,
+      ...input.seo, faqEnabled: 1, schemaEnabled: 1 });
+    await tx.insert(articleMerchant).values({ articleId: masterArticleId, ...input.merchant,
+      availability: variants.some(v => v.stock > 0) ? "in_stock" : "out_of_stock", condition: "new" });
+    await tx.insert(articleTranslations).values({ articleId: masterArticleId, ...defaultDe(input),
+      seoTitle: input.seo.seoTitle, seoDescription: input.seo.seoDescription, imageAlt: input.seo.imageAlt });
+    for (const t of input.translations.filter(t => t.lang !== "de"))
+      await tx.insert(articleTranslations).values({ articleId: masterArticleId, ...t });
+    await insertFamilyFaqs(tx, schema, masterArticleId, input.faqs);
+    for (const u of selectedUseCases.sort((a, b) => a.slug.localeCompare(b.slug)))
+      await tx.execute(sql`INSERT INTO article_use_cases (article_id, use_case_id) VALUES (${masterArticleId}, ${u.id})`);
+    const created = await readFamilyData(tx, input.shopProductId);
+    if (created.articles.some(a => a.shopVisible !== 0 || a.publishedAt !== null)) fail("Neuanlage muss vollständig verborgen sein");
+    const validation = validateFamily(created, singleBlend);
+    const response: CreateResponse | CreateSingleBlendResponse = { success: true, shopProductId: input.shopProductId,
+      masterArticleId, articleIds, variants, shopVisible: false, ...(singleBlend ? { composition: created.composition! } : {}) };
+    await audit(tx, masterArticleId, action, input.requestKey, prior.fingerprint, response, actor,
+      { articleIds, validation, ...(singleBlend ? { composition: created.composition } : {}),
+        initialStock: variants.map(v => ({ articleId: v.inventoryArticleId, stock: v.stock, reason: "Produktanlage" })) });
+    return response;
+  });
+}
+
+type FamilyVariant = { dosage: string; label: string; sku: string; price: number; stock: number;
+  inventoryArticleId: number; image: string; imageUrl: string; images: string[] };
+type CreateResponse = { success: true; shopProductId: string; masterArticleId: number; articleIds: number[];
+  variants: FamilyVariant[]; shopVisible: false };
+type CreateSingleBlendResponse = Omit<CreateResponse, "shopProductId"> & { shopProductId: "somatide"; composition: SingleBlendComposition };
+type PublishResponse = { success: true; shopProductId: string; masterArticleId: number; shopVisible: true };
+
+// Shared fixed-schema/FAQ/idempotency utilities; existing contracts stay unchanged.
+export { canonicalFor, canonicalJson, fail, assertParsed, inspectProductSchema, requireProductSchema,
+  readFamilyFaqs, insertFamilyFaqs, canLinkUseCases, lock, replay, audit };
+export type { Db as ProductDraftDb, ProductDb, ProductSchema };
+
+export function publishProductFamily(db: Db, input: PublishFamilyInput, actor: string) {
+  return publishAtomicProduct(db, input, actor, false);
+}
+export function publishSingleBlend(db: Db, input: PublishSingleBlendInput, actor: string) {
+  return publishAtomicProduct(db, input, actor, true);
+}
+async function publishAtomicProduct(db: Db, input: PublishFamilyInput, actor: string, singleBlend: boolean) {
+  const action = singleBlend ? "PUBLISH_SINGLE_BLEND" : "PUBLISH_FAMILY";
+  return db.transaction(async tx => {
+    requireProductSchema(await inspectProductSchema(tx));
+    await lock(tx, `request:${input.requestKey}`);
+    await lock(tx, `family:${input.shopProductId}`);
+    const prior = await replay<PublishResponse>(tx, input.requestKey, action, input);
+    const family = await readFamilyData(tx, input.shopProductId, true);
+    if (!family.master) fail("Produktfamilie nicht gefunden", "NOT_FOUND");
+    if (family.masterArticleId !== input.masterArticleId) fail("masterArticleId gehört nicht zum exakten Familienmaster", "CONFLICT");
+    const validation = validateFamily(family, singleBlend);
+    if (prior.response) {
+      if (family.master.shopVisible !== 1) fail("Veröffentlichter Replay-Zustand wurde verändert", "CONFLICT");
+      return prior.response;
+    }
+    const response: PublishResponse = { success: true, shopProductId: input.shopProductId, masterArticleId: input.masterArticleId, shopVisible: true };
+    if (family.master.shopVisible !== 0 && family.master.shopVisible !== 1) fail("Master-Sichtbarkeit ungültig");
+    if (family.master.shopVisible === 0) {
+      await tx.update(articles).set({ shopVisible: 1, publishedAt: new Date(), updatedAt: new Date() })
+        .where(and(eq(articles.id, input.masterArticleId), eq(articles.shopProductId, input.shopProductId)));
+    }
+    // A new request UUID is recorded even for a no-op; exact replays add no audit.
+    await audit(tx, input.masterArticleId, action, input.requestKey, prior.fingerprint, response, actor,
+      { validation, articleIds: family.articles.map(a => a.id), ...(singleBlend ? { composition: family.composition } : {}) },
+      { shopVisible: family.master.shopVisible, publishedAt: family.master.publishedAt });
+    return response;
+  });
+}

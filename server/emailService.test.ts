@@ -75,10 +75,10 @@ test("main-Bestellmail verwendet nach Wise-Konsolidierung keine veraltete Karten
   });
 
   assert.ok(presentation);
-  // Pinned main 2e707fd labels legacy creditCard as Wise; no obsolete fallback body.
+  // Baseline 30f94fc already removed the obsolete card apology; current policy is Wise.
   assert.match(presentation.html, /SEPA- oder Echtzeitüberweisung \(Wise\)/);
-  assert.doesNotMatch(presentation.html, /Es tut uns leid|Kreditkartenzahlungen können/);
-  assert.match(presentation.html, /Verwendungszweck/);
+  assert.match(presentation.html, /Bitte überweise den Betrag eigenständig/);
+  assert.doesNotMatch(presentation.html, /Bunq|Es tut uns leid/);
 });
 
 test("englische Kommunikation erzeugt eine vollständige englische Bestellbestätigung", async () => {
@@ -93,9 +93,9 @@ test("englische Kommunikation erzeugt eine vollständige englische Bestellbestä
   assert.match(presentation.html, /<html lang="en">/);
   assert.match(presentation.html, /Important payment notice/);
   assert.match(presentation.html, /Payment information/);
-  // Preserve current main payment wording, not the earlier branch expectation.
   assert.match(presentation.html, /SEPA or instant bank transfer \(Wise\)/);
-  assert.doesNotMatch(presentation.html, /Card payment \(Bunq\)|card payments cannot always/);
+  assert.match(presentation.html, /Please transfer the amount independently/);
+  assert.doesNotMatch(presentation.html, /Bunq|card payments cannot always/);
   assert.doesNotMatch(presentation.html, /Bestellbestätigung/);
 });
 

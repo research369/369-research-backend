@@ -56,6 +56,7 @@ export async function sendAndArchiveAutomaticOrderEmail(input: {
   recipientEmail: string;
   subject: string;
   htmlBody: string;
+  plainText?: string;
   bcc?: string[];
   idempotencyKey?: string;
   senderName?: string;
@@ -69,6 +70,7 @@ export async function sendAndArchiveAutomaticOrderEmail(input: {
     recipientEmail: input.recipientEmail,
     subject: input.subject,
     htmlBody: input.htmlBody,
+    plainText: input.plainText,
     orderId: input.orderId,
     createdBy: "system",
     source: "automatic",

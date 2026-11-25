@@ -1,0 +1,280 @@
+import { randomUUID } from 'node:crypto';
+import { TRPCError } from '@trpc/server';
+import { sql, eq } from 'drizzle-orm';
+import { articles, customers, promoCodes, shopSettings } from '../drizzle/schema.js';
+import { getDb, withReadOnlyDatabase } from './db.js';
+import type { Context } from './trpc.js';
+import { orderRouter } from './orderRouter.js';
+import { communicationTemplateRouter } from './communicationTemplateRouter.js';
+import { normalizeWhatsappContactPhone } from './whatsappContactIdentity.js';
+import { normalizeOrderCommunicationPhone } from './orderCommunicationPhoneService.js';
+import { calculateAuthoritativeShipping, calculateAutomaticGlobalDiscount, calculatePromoDiscount, resolveShippingRegion, roundMoney, parsePromoMetadata } from './kwkCheckoutPricing.js';
+import { getActiveGlobalAutomaticDiscount, parseGlobalAutomaticDiscountConfig, resolveGlobalAutomaticDiscountBenefits } from './globalAutomaticDiscountConfig.js';
+import { reconcileFreeBacWaterForShopOrder } from './freeBacWaterService.js';
+import { isPromoCodeExpired } from './promoCodeRouter.js';
+import { resultRows } from './priorityOrderIntegrity.js';
+import { screenshotHash, screenshotIntentKey, signScreenshotQuote, verifyScreenshotQuote, screenshotCustomerSchema, type ScreenshotQuoteInput, type ScreenshotQuoteEnvelope } from './screenshotOrderContract.js';
+import { readPersistedOrderMessageData } from './orderDiscountMessageService.js';
+import { getReleasedBankTransferInstructions } from './paymentInstructionsConfig.js';
+import { assertNoActiveCheckoutBlock } from './customerOrderBlockService.js';
+import { projectDiscountRules } from './guardianDiscounts.js';
+import { resolveTrustedColdShippingItems } from './coldShippingCatalog.js';
+import { screenshotCatalogProjection, screenshotSelection, screenshotInventoryPolicy } from './screenshotOrderInventory.js';
+export { screenshotCatalogProjection } from './screenshotOrderInventory.js';
+
+const revisions=new Map<string,{revision:string;expiresAt:number}>();
+const email=(v:unknown)=>String(v??'').trim().toLowerCase();
+const phone=(v:unknown)=>normalizeWhatsappContactPhone(String(v??''));
+const norm=(v:unknown)=>String(v??'').toLowerCase().replace(/retatrutid[e]?|r3ta|\breta\b|triple\s*g/g,'3g').replace(/\b(tierze|tirze)\b/g,'tirzepatide').replace(/[^a-z0-9äöüß]+/g,' ').trim();
+const strength=(v:unknown)=>String(v??'').toLowerCase().replace(/,/g,'.').replace(/\s+/g,'').trim();
+// Customer search must not use product aliases or treat names as identity.
+const customerSearchText=(v:unknown)=>String(v??'').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g,'').replace(/ı/g,'i').replace(/ß/g,'ss').replace(/[^a-z0-9]+/g,' ').trim();
+const customerName=(c:any)=>[c.name,c.firstName,c.lastName].filter(Boolean).join(' ');
+const sqlCustomerText=(value:any)=>sql`btrim(regexp_replace(replace(replace(regexp_replace(lower(normalize(coalesce(${value}, ''), NFKD)), '[̀-ͯ]', '', 'g'), 'ı', 'i'), 'ß', 'ss'), '[^a-z0-9]+', ' ', 'g'))`;
+const searchPhone=(v:unknown)=>/^[+\d()\s./-]+$/.test(String(v??''))?phone(v):'';
+const searchNames=(v:unknown)=>String(v??'').includes('@')?[]:customerSearchText(v).split(' ').filter(Boolean);
+const sqlCustomerPhone=()=>sql`CASE WHEN digits LIKE '490%' THEN '49'||substring(digits from 4) WHEN digits LIKE '0%' THEN '49'||ltrim(digits, '0') ELSE digits END`;
+function customerPhoneExpression(){
+  // Mirrors normalizeWhatsappContactPhone, including +49(0), 0049 and local 0.
+  return sql`(SELECT ${sqlCustomerPhone()} FROM (SELECT regexp_replace(regexp_replace(coalesce(${customers.phone}, ''), '[^0-9]', '', 'g'), '^00', '') AS digits) normalized_phone)`;
+}
+async function screenshotContactRows(db:any,input:{phone?:string;email?:string}){
+  const p=phone(input.phone),e=email(input.email);
+  const ps=p?await db.select().from(customers).where(sql`${customerPhoneExpression()}=${p}`).orderBy(customers.id).limit(2):[];
+  const es=e?await db.select().from(customers).where(sql`lower(btrim(${customers.email}))=${e}`).orderBy(customers.id).limit(2):[];
+  // Two per contact suffice to detect ambiguity; never limit one combined OR,
+  // which could conceal a split email/phone identity behind duplicates.
+  return [...new Map([...ps,...es].map((c:any)=>[c.id,c])).values()];
+}
+function screenshotSuggestionMatches(c:any,input:{phone?:string;email?:string;name?:string}){
+  const tokens=searchNames(input.name);
+  const searchable=customerSearchText(`${customerName(c)} ${c.customerNumber??''} ${c.email??''}`);
+  return Boolean((tokens.length&&tokens.every(t=>searchable.includes(t)))
+    || (searchPhone(input.name).length>=3&&phone(c.phone).includes(searchPhone(input.name)))
+    || (input.name?.includes('@')&&email(c.email).includes(email(input.name)))
+    || (input.phone&&phone(input.phone).length>=3&&phone(c.phone).includes(phone(input.phone)))
+    || (input.email&&email(input.email).length>=3&&email(c.email).includes(email(input.email))));
+}
+export function screenshotCustomerResolution(rows:any[],input:{phone?:string;email?:string;name?:string}){
+  const p=phone(input.phone),e=email(input.email);
+  const ps=p?rows.filter(c=>phone(c.phone)===p):[],es=e?rows.filter(c=>email(c.email)===e):[];
+  const contacts=[...new Map([...ps,...es].map(c=>[c.id,c])).values()];
+  const conflict=ps.length>1||es.length>1||contacts.length>1;
+  const names=rows.filter(c=>screenshotSuggestionMatches(c,input)).slice(0,20);
+  const candidates=[...contacts,...names.filter(c=>!contacts.some(x=>x.id===c.id))].map(c=>({
+    id:c.id,customerNumber:c.customerNumber??null,name:c.name??'',firstName:c.firstName??'',lastName:c.lastName??'',email:c.email??null,phone:c.phone??null,
+    street:c.street??'',houseNumber:c.houseNumber??'',zip:c.zip??'',city:c.city??'',country:c.country??'',company:c.company??null,dhlPostNumber:c.dhlPostNumber??null,deliveryType:/^packstation\b/i.test(String(c.street??'').trim())?'packstation':/^postfiliale\b/i.test(String(c.street??'').trim())?'postfiliale':c.preferredDeliveryType==='packstation'||c.preferredDeliveryType==='postfiliale'?c.preferredDeliveryType:'home',
+    matchBasis:ps.some(x=>x.id===c.id)?es.some(x=>x.id===c.id)?'phone_email':'phone':es.some(x=>x.id===c.id)?'email':'name',
+  }));
+  return {match:conflict?'conflict' as const:contacts.length===1?'exact' as const:'none' as const,...(!conflict&&contacts.length===1?{exactCustomerId:contacts[0].id}:{}),candidates,...(conflict?{reason:'duplicate_or_split_contacts'}:{})};
+}
+export async function lookupScreenshotCustomers(input:{phone?:string;email?:string;name?:string}){return withReadOnlyDatabase(async()=>{
+  const db=await getDb();if(!db)throw Error('DATABASE_UNAVAILABLE');
+  const contacts=await screenshotContactRows(db,input),predicates=[];
+  const tokens=searchNames(input.name);
+  if(tokens.length)predicates.push(sql`(${sql.join(tokens.map(t=>sql`position(${t} in ${sqlCustomerText(sql`concat_ws(' ', ${customers.name}, ${customers.firstName}, ${customers.lastName}, ${customers.customerNumber}, ${customers.email})`)})>0`),sql` AND `)})`);
+  for(const raw of [input.name,input.phone]){const p=searchPhone(raw);if(p.length>=3)predicates.push(sql`position(${p} in ${customerPhoneExpression()})>0`);}
+  for(const raw of [input.name?.includes('@')?input.name:undefined,input.email])if(raw&&email(raw).length>=3)predicates.push(sql`position(${email(raw)} in lower(coalesce(${customers.email}, '')))>0`);
+  const suggestions=predicates.length?await db.select().from(customers).where(sql`(${sql.join(predicates,sql` OR `)})`).orderBy(customers.id).limit(20):[];
+  return screenshotCustomerResolution([...new Map([...contacts,...suggestions].map(c=>[c.id,c])).values()],input);
+});}
+export async function lookupScreenshotCatalog(input:any){return withReadOnlyDatabase(async()=>{const db=await getDb();if(!db)throw Error('DATABASE_UNAVAILABLE');const words=norm(input.query).split(' ').filter(Boolean);const candidates=screenshotCatalogProjection(await db.select().from(articles)).filter(c=>c.available&&words.every(w=>norm(c.name+' '+c.sku+' '+c.shopProductId).includes(w))&&(!input.strength||strength(c.dosage)===strength(input.strength))&&(!input.form||c.form===input.form)).slice(0,100).map(({articleId,parentId,dependencyIds,componentLines,stockDemands,...c})=>({...c,stockDemands:stockDemands.map(({articleId,...d})=>d)}));return {candidates};});}
+async function source(db:any,request:ScreenshotQuoteInput){
+  const validatedCustomer=screenshotCustomerSchema.parse(request.customer);
+  const arts=await db.select().from(articles);const profiles=await screenshotContactRows(db,validatedCustomer);
+  if(request.existingCustomerId&&!profiles.some((c:any)=>c.id===request.existingCustomerId))profiles.push(...await db.select().from(customers).where(eq(customers.id,request.existingCustomerId)).limit(1));
+  const settings=await db.select().from(shopSettings);const globalValue=settings.find((s:any)=>s.key==='global_automatic_discount')?.value;
+  const global=getActiveGlobalAutomaticDiscount(parseGlobalAutomaticDiscountConfig(globalValue));
+  const resolution=screenshotCustomerResolution(profiles,request.customer);if(resolution.match==='conflict')throw Error('CUSTOMER_CONTACT_CONFLICT');
+  const selectedId=request.existingCustomerId??resolution.exactCustomerId;
+  if(request.existingCustomerId&&resolution.exactCustomerId&&resolution.exactCustomerId!==request.existingCustomerId)throw Error('CUSTOMER_CONTACT_CONFLICT');
+  const selected=selectedId?profiles.find((c:any)=>c.id===selectedId):null;if(selectedId&&!selected)throw Error('CUSTOMER_NOT_FOUND');
+  const customer={...validatedCustomer};if(selected){customer.firstName=selected.firstName??'';customer.lastName=selected.lastName??'';customer.phone=selected.phone??'';customer.email=selected.email??'';if(!customer.firstName||!customer.lastName||!normalizeOrderCommunicationPhone(customer.phone))throw Error('CUSTOMER_PROFILE_REQUIRES_REVIEW');}
+  const selectedContacts=await screenshotContactRows(db,customer);
+  const selectedResolution=screenshotCustomerResolution(selectedContacts,customer);
+  if(selectedResolution.match==='conflict'||(selectedResolution.exactCustomerId&&selectedResolution.exactCustomerId!==selectedId))throw Error('CUSTOMER_CONTACT_CONFLICT');
+  if(!normalizeOrderCommunicationPhone(customer.phone))throw Error('CUSTOMER_PHONE_INVALID');
+  const catalog=screenshotCatalogProjection(arts);
+  const {selected:selections,stockPlan,componentLines}=screenshotSelection(catalog,request.items);
+  const items=selections.map(c=>({name:c.name,dosage:c.dosage,shopProductId:c.sku,price:c.price,quantity:c.quantity,type:c.type,
+    ...(c.preparation==='plug_play_option'?{variant:'Plug&Play · aufbereitet'}:c.preparation==='nasal_diy_option'?{variant:'DIY Nasenspray-Set'}:{}),
+    isPlugPlay:c.isPlugPlay,isNasalSpray:c.isNasalSpray,isNasalDiySet:c.isNasalDiySet}));
+  const subtotal=roundMoney(items.reduce((s,i)=>s+i.price*i.quantity,0));
+  let promo:any=null;if(request.discount.mode==='code'){
+    const code=request.discount.code.toUpperCase();const matches=(await db.select().from(promoCodes)).filter((p:any)=>p.code.toUpperCase()===code);
+    if(matches.length!==1)throw Error('PROMOTION_INVALID');promo=matches[0];
+    if(promo.isActive!==1||(promo.validFrom&&Date.now()<new Date(promo.validFrom).getTime())||isPromoCodeExpired(promo)||((promo.maxUses??0)>0&&promo.currentUses>=promo.maxUses)||subtotal<Number(promo.minOrder||0))throw Error('PROMOTION_INVALID');
+    // Use the existing strict metadata projection: maxPerCustomer is not a
+    // Drizzle column and must not silently disappear in the manual order path.
+    let projected:any;try{projected=projectDiscountRules([{code:promo.code,description:promo.description,discount_type:promo.discountType,percentage:promo.percentage,fixed_amount:promo.fixedAmount,min_order:promo.minOrder,max_uses:promo.maxUses,current_uses:promo.currentUses,valid_from:promo.validFrom,valid_until:promo.validUntil,valid_until_exact:promo.validUntilExact,is_active:promo.isActive}],[]).codes[0];}catch{throw Error('PROMOTION_REQUIRES_NATIVE_ELIGIBILITY');}
+    if(projected.customer_limit!==0)throw Error('PROMOTION_REQUIRES_NATIVE_ELIGIBILITY');
+    // Generic public promos only. Personalized/partner/new-customer eligibility belongs to its native flow.
+    const guards=resultRows(await db.execute(sql`SELECT EXISTS(SELECT 1 FROM customer_promo_assignments WHERE promo_code_id=${promo.id}) AS personal,
+      EXISTS(SELECT 1 FROM partner_codes WHERE upper(code_normalized)=upper(${code})) OR EXISTS(SELECT 1 FROM partners WHERE upper(code)=upper(${code})) AS partner,
+      EXISTS(SELECT 1 FROM sales_followups WHERE promo_code_id=${promo.id} OR upper(discount_code)=upper(${code})) AS followup,
+      EXISTS(SELECT 1 FROM personal_promo_expiry_reminders WHERE promo_code_id=${promo.id}) AS reminder`))[0];
+    if(guards.personal||guards.partner||guards.followup||guards.reminder||/neukund|new.customer|follow.?up|reminder|kwk|partner|creator|persönlich|individuell|bestellung|intern/i.test(promo.description??''))throw Error('PROMOTION_REQUIRES_NATIVE_ELIGIBILITY');
+  }
+  if(global?.exclusiveCampaign&&request.discount.mode!=='none')throw Error('EXCLUSIVE_CAMPAIGN_DISCOUNT_FORBIDDEN');
+  const benefits=resolveGlobalAutomaticDiscountBenefits(global,{merchandiseSubtotal:subtotal,shippingRegion:resolveShippingRegion(customer.country),hasPromotionCode:Boolean(promo)});
+  const automatic=benefits.globalDiscountApplies?calculateAutomaticGlobalDiscount(subtotal,global?.percentage??0):0;
+  const requested=request.discount.mode==='percent'?roundMoney(subtotal*request.discount.value/100):request.discount.mode==='amount'?request.discount.value:0;
+  const manual=roundMoney(Math.min(Math.max(0,subtotal-automatic),requested));
+  const promoAmount=promo?calculatePromoDiscount({subtotal,items,precedingProductDiscount:automatic,promo:{discountType:promo.discountType,percentage:Number(promo.percentage||0),fixedAmount:Number(promo.fixedAmount||0),description:promo.description}}):0;
+  const shipping=calculateAuthoritativeShipping({country:customer.country,items:resolveTrustedColdShippingItems(items,arts),coldChainRequested:request.coldShippingRequested,promoDescription:promo?.description,freeBaseShipping:benefits.globalFreeShippingApplies||request.freeBaseShippingRequested===true,coldShippingSurcharge:global?.coldShippingSurcharge});
+  const manualBreakdown=manual>0?[{source:request.discount.mode==='percent'?'manual_global_percent':'manual_global_amount',label:request.discount.mode==='percent'?`Manueller Rabatt (${request.discount.value}%)`:'Manueller Betragsrabatt',amount:manual,...(request.discount.mode==='percent'?{percentage:request.discount.value}:{})}]:[];
+  const canonicalInput={orderSource:'wawi_manual',storeKey:'369research',communicationLanguage:selected?.communicationLanguage==='en'?'en':'de',sendOrderConfirmation:false,customer,items:reconcileFreeBacWaterForShopOrder(items,arts,global),subtotal,discount:manual+promoAmount,discountBreakdown:manualBreakdown,discountCode:promo?.code??null,shipping,shippingCountry:resolveShippingRegion(customer.country),total:roundMoney(subtotal-manual-promoAmount+shipping),paymentMethod:'wise',date:new Date().toLocaleDateString('sv-SE',{timeZone:'Europe/Berlin'}),...(selectedId?{existingCustomerId:selectedId}:{}),internalNote:request.internalNote??'',coldShippingRequested:request.coldShippingRequested??false,freeBaseShippingRequested:request.freeBaseShippingRequested??false,...(request.addressWarningConfirmed?{addressValidationOverride:{confirmed:true}}:{})};
+  const relevantIds=new Set(selections.flatMap(c=>c.dependencyIds));
+  // Include the entire dependency identity family, including inactive duplicates.
+  for(const a of arts)if(a.shopProductId==='bac-wasser'&&componentLines.length)relevantIds.add(a.id);
+  // Hash data/revisions, not names as identity. No persistent quote/customer store.
+  const sourceHash=screenshotHash({articles:arts.filter((a:any)=>relevantIds.has(a.id)||request.items.some(i=>i.sku.toLowerCase()===a.sku.toLowerCase())),resolution,selected: selected?{...selected,totalOrders:undefined,totalSpent:undefined,firstOrderDate:undefined,lastOrderDate:undefined}:null,settings:settings.filter((s:any)=>/global_automatic_discount|bank_transfer_payment_instructions|address_validation|cold_shipping|nasal_diy_set_config_v1|customer_number_migration_pause/.test(s.key)),global,promo,canonicalInput,stockPlan,componentLines,policy:screenshotInventoryPolicy});
+  const region=resolveShippingRegion(customer.country);
+  const freeBaseShippingApplied=benefits.globalFreeShippingApplies||request.freeBaseShippingRequested===true||parsePromoMetadata(promo?.description).freeShipping.some(r=>r.toLowerCase()===region);
+  const shippingBase=calculateAuthoritativeShipping({country:customer.country,items:[],freeBaseShipping:freeBaseShippingApplied});
+  return {canonicalInput,sourceHash,selectedId,stockPlan,componentLines,selections,shippingBase,freeBaseShippingApplied,relevantArticleIds:[...relevantIds].sort((a,b)=>a-b)};
+}
+export async function quoteScreenshotOrder(request:ScreenshotQuoteInput,ctx:Context){
+  if(!ctx.user||ctx.user.role!=='admin')throw Error('ADMIN_REQUIRED');
+  const calculated=await withReadOnlyDatabase(async()=>{const db=await getDb();if(!db)throw Error('DATABASE_UNAVAILABLE');const s=await source(db,request);const result=await orderRouter.createCaller({...ctx,screenshotOrder:{mode:'preview',stockPlan:s.stockPlan,componentLines:s.componentLines}}).create(s.canonicalInput as any);if(!('screenshotPreview' in result))throw Error('QUOTE_UNAVAILABLE');return {...s,result:result as any};});
+  const key=screenshotIntentKey(ctx.user.id,request.draftId),expiresAt=Date.now()+600000,revision=randomUUID();
+  for(const [k,v] of revisions)if(v.expiresAt<=Date.now())revisions.delete(k);if(revisions.size>=10000&&!revisions.has(key))throw Error('QUOTE_CAPACITY');
+  const envelope:ScreenshotQuoteEnvelope={version:1,actorId:ctx.user.id,draftId:request.draftId,expiresAt,revision,canonicalInput:calculated.canonicalInput,expectedHash:calculated.result.hash,sourceHash:calculated.sourceHash};
+  // Validated original request is inside the signed envelope; used only for locked reconstruction.
+  (envelope as any).request=request;(envelope as any).articleIds=calculated.relevantArticleIds;(envelope as any).stockPlan=calculated.stockPlan;(envelope as any).componentLines=calculated.componentLines;const quoteToken=signScreenshotQuote(envelope);revisions.set(key,{revision,expiresAt});
+  const {input,discountBreakdown}=calculated.result.screenshotPreview;
+  const previewItems=input.items.map((i:any,index:number)=>{
+    const c=i.isFreeGift?undefined:calculated.selections[index];
+    return {sku:i.shopProductId,name:i.name,dosage:i.dosage??'',quantity:i.quantity,price:i.price,type:i.type,
+      isFreeGift:Boolean(i.isFreeGift),isPlugPlay:Boolean(i.isPlugPlay),isNasalSpray:Boolean(i.isNasalSpray),isNasalDiySet:Boolean(i.isNasalDiySet),
+      form:c?.form??'other',preparation:c?.preparation??'inventory'};
+  });
+  const includedComponents=calculated.componentLines.map(line=>({name:line.name,variant:line.variant,quantity:line.quantity,price:0,
+    sku:calculated.stockPlan.find(d=>d.articleId===line.articleId)?.sku,isNasalDiySet:line.isNasalDiySet}));
+  const coldShippingMandatory=calculated.selections.some(c=>c.mandatoryCold);
+  return {quoteToken,expiresAt:new Date(expiresAt).toISOString(),preview:{customer:input.customer,existingCustomerId:calculated.selectedId??null,
+    items:previewItems,includedComponents,subtotal:input.subtotal,discount:input.discount,discountBreakdown,shipping:input.shipping,total:input.total,paymentMethod:'wise' as const,
+    coldShippingRequested:Boolean(input.coldShippingRequested),coldShippingMandatory,coldShippingActive:Boolean(input.coldShippingRequested)||coldShippingMandatory,
+    freeBaseShippingRequested:Boolean(input.freeBaseShippingRequested),freeBaseShippingApplied:calculated.freeBaseShippingApplied,
+    shippingBase:calculated.shippingBase,coldShippingSurcharge:roundMoney(input.shipping-calculated.shippingBase)},
+    warnings:request.addressWarningConfirmed?['ADDRESS_WARNING_EXPLICITLY_CONFIRMED']:[]};
+}
+async function receipt(draftId:string,actorId:number){const db=await getDb();if(!db)throw Error('DATABASE_UNAVAILABLE');const r=resultRows(await db.execute(sql`SELECT response FROM priority_checkout_receipts WHERE intent_key=${screenshotIntentKey(actorId,draftId)}`))[0]?.response;return r?.screenshotActorId===actorId&&r?.screenshotDraftId===draftId?r:null;}
+export async function statusScreenshotOrder(draftId:string,actorId:number):Promise<{state:'not_found'|'succeeded'|'unknown';orderId?:string}>{try{const r=await receipt(draftId,actorId);return r?{state:'succeeded',orderId:r.orderId}:{state:'not_found'};}catch{return {state:'unknown'};}}
+export async function executeScreenshotOrder(token:string,ctx:Context){
+  if(!ctx.user||ctx.user.role!=='admin')throw Error('ADMIN_REQUIRED');const envelope=verifyScreenshotQuote(token,ctx.user.id,Date.now(),true);const key=screenshotIntentKey(ctx.user.id,envelope.draftId);
+  const saved=await receipt(envelope.draftId,ctx.user.id);if(saved)return {state:'succeeded' as const,orderId:saved.orderId,idempotencyKey:key};
+  verifyScreenshotQuote(token,ctx.user.id);const current=revisions.get(key);if(!current||current.revision!==envelope.revision)throw Error('QUOTE_REPLACED');
+  const request=(envelope as any).request as ScreenshotQuoteInput;
+  const response=await orderRouter.createCaller({...ctx,screenshotOrder:{mode:'execute',stockPlan:(envelope as any).stockPlan,componentLines:(envelope as any).componentLines,actorId:ctx.user.id,draftId:envelope.draftId,expectedHash:envelope.expectedHash,validateInTransaction:async(tx)=>{
+    // Policy/config mutations use this same global campaign key. Exact stock and customer
+    // checks happen BEFORE any canonical transaction writes, including receipt/stock.
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('global_automatic_discount'))`);
+    await tx.execute(sql`SELECT key FROM shop_settings WHERE key LIKE 'address_validation%' OR key LIKE 'cold_shipping%' OR key IN ('global_automatic_discount','bank_transfer_payment_instructions','nasal_diy_set_config_v1','customer_number_migration_pause') ORDER BY key FOR SHARE`);
+    // Match canonical block keys before customer rows; never lock unrelated CRM/shop tables.
+    await assertNoActiveCheckoutBlock(tx,envelope.canonicalInput.customer);
+    const identities=[...new Set([email(request.customer.email),phone(request.customer.phone),email(envelope.canonicalInput.customer.email),phone(envelope.canonicalInput.customer.phone)].filter(Boolean))].sort();
+    for(const identity of identities)await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${'wawi-contact:'+identity},0))`);
+    const currentProfiles=[...await screenshotContactRows(tx,request.customer),...await screenshotContactRows(tx,envelope.canonicalInput.customer)];
+    const targetIds=[...new Set<number>([...currentProfiles.map((c:any)=>c.id),envelope.canonicalInput.existingCustomerId].filter((id):id is number=>Number.isInteger(id)))].sort((a,b)=>a-b);
+    if(targetIds.length)await tx.execute(sql`SELECT id FROM customers WHERE id IN (${sql.join(targetIds.map((id:number)=>sql`${id}`),sql`,`)}) ORDER BY id FOR UPDATE NOWAIT`);
+    const articleIds=(envelope as any).articleIds as number[];
+    await tx.execute(sql`SELECT id FROM articles WHERE id IN (${sql.join(articleIds.map(id=>sql`${id}`),sql`,`)}) ORDER BY id FOR UPDATE NOWAIT`);
+    const actor=resultRows(await tx.execute(sql`SELECT id FROM users WHERE id=${ctx.user!.id} AND role='admin' FOR SHARE`));if(!actor.length)throw Error('ACTOR_REVOKED');
+    if(envelope.expiresAt<=Date.now()||revisions.get(key)?.revision!==envelope.revision)throw Error('QUOTE_EXPIRED_OR_REPLACED');
+    if(request.discount.mode==='code')await tx.execute(sql`SELECT id FROM promo_codes WHERE upper(code)=upper(${request.discount.code}) FOR UPDATE NOWAIT`);
+    const fresh=await source(tx,request);if(fresh.sourceHash!==envelope.sourceHash||screenshotHash(fresh.stockPlan)!==screenshotHash((envelope as any).stockPlan)||screenshotHash(fresh.componentLines)!==screenshotHash((envelope as any).componentLines))throw Error('QUOTE_CHANGED');
+  }}}).create({...envelope.canonicalInput,checkoutIdempotencyKey:key} as any);
+  if(!('orderId' in response)||!response.orderId)throw Error('ORDER_RESULT_UNKNOWN');return {state:'succeeded' as const,orderId:response.orderId,idempotencyKey:key};
+}
+function assertScreenshotMessageAdmin(ctx:Context){if(!ctx.user)throw new TRPCError({code:'UNAUTHORIZED',message:'Bitte anmelden'});if(ctx.user.role!=='admin')throw new TRPCError({code:'FORBIDDEN',message:'Keine Berechtigung'});}
+function savedConfirmationBody(saved:any):string|null{return saved.screenshotConfirmation?.version===1&&typeof saved.screenshotConfirmation.body==='string'&&saved.screenshotConfirmation.body.trim()&&typeof saved.screenshotConfirmation.preparedAt==='string'?saved.screenshotConfirmation.body:null;}
+async function readScreenshotOrderResult(draftId:string,ctx:Context,renderMissing=false){
+  assertScreenshotMessageAdmin(ctx);
+  const saved=await receipt(draftId,ctx.user!.id);if(!saved)throw new TRPCError({code:'NOT_FOUND',message:'ORDER_NOT_FOUND'});
+  const base={state:'succeeded' as const,orderId:saved.orderId,idempotencyKey:screenshotIntentKey(ctx.user!.id,draftId),order:saved.orderSnapshot as Record<string,unknown>,paymentInstructions:saved.paymentInstructions as Record<string,unknown>|null};
+  let recipient:string|null=null;try{
+    const effective=await orderRouter.createCaller(ctx).getCommunicationPhone({orderId:saved.orderId});recipient=normalizeOrderCommunicationPhone(effective.effectivePhone);
+    if(!recipient)throw Error('RECIPIENT_UNAVAILABLE');
+    if(!saved.paymentInstructions?.accounts?.length)throw Error('WISE_CONFIGURATION_UNAVAILABLE');
+    const rendered=await withReadOnlyDatabase(async()=>{
+      const db=await getDb();if(!db)throw Error('DATABASE_UNAVAILABLE');
+      const persisted=await readPersistedOrderMessageData(db,saved.orderId);
+      const snapshot={...persisted.orderSnapshot,customer:persisted.emailData.customer,customerId:persisted.order.customerId,paymentMethod:persisted.order.paymentMethod};
+      if(screenshotHash(snapshot)!==screenshotHash(saved.orderSnapshot))throw Error('ORDER_CHANGED');
+      const released=await getReleasedBankTransferInstructions();if(screenshotHash(released)!==screenshotHash(saved.paymentInstructions))throw Error('WISE_CHANGED');
+      const profile=(await db.select().from(customers).where(sql`id=${persisted.order.customerId}`))[0];
+      if(!profile||profile.firstName!==persisted.order.firstName||profile.lastName!==persisted.order.lastName||profile.name!==`${persisted.order.firstName} ${persisted.order.lastName}`.trim())throw Error('CUSTOMER_MESSAGE_NAME_CHANGED');
+      const cached=savedConfirmationBody(saved);if(cached)return {whatsappBody:cached};
+      if(!renderMissing||Object.hasOwn(saved,'screenshotConfirmation'))throw Error('ORDER_MESSAGE_NOT_PREPARED');
+      const templates=await communicationTemplateRouter.createCaller(ctx).list({channel:'whatsapp',language:saved.orderSnapshot?.communicationLanguage==='en'?'en':'de',activeOnly:true});const selected=templates.filter(t=>t.templateKey==='order_confirmation');
+    if(selected.length!==1)throw Error('ORDER_TEMPLATE_UNAVAILABLE');
+    const composed=await communicationTemplateRouter.createCaller(ctx).render({templateId:selected[0].id,orderId:saved.orderId});
+    if(composed.missing.length||!composed.whatsappBody||!selected[0].bodyTemplate.includes('{{paymentDetails}}')||!selected[0].bodyTemplate.includes('{{orderId}}'))throw Error('ORDER_TEMPLATE_INCOMPLETE');return composed;
+    });
+    return {...base,whatsapp:{state:'ready' as const,recipient,message:rendered.whatsappBody}};
+  }catch{return {...base,whatsapp:{state:'pending' as const,recipient,message:null,reason:'COMMUNICATION_REVIEW_REQUIRED'}};}
+}
+/** Read-only result: never renders or persists a missing confirmation body. */
+export async function resultScreenshotOrder(draftId:string,ctx:Context){return readScreenshotOrderResult(draftId,ctx);}
+/** Explicit admin mutation; immutable first-ready body, no send or order execution. */
+export async function prepareScreenshotOrderMessage(draftId:string,ctx:Context){
+  assertScreenshotMessageAdmin(ctx);
+  const candidate=await readScreenshotOrderResult(draftId,ctx,true);if(candidate.whatsapp.state!=='ready')return candidate;
+  try{
+    const db=await getDb();if(!db)throw Error('DATABASE_UNAVAILABLE');
+    const confirmation={version:1,body:candidate.whatsapp.message,preparedAt:new Date().toISOString()};
+    // JSONB field CAS scopes one receipt to actor+draft+order and preserves all other fields.
+    // A concurrent winner is authoritative; the final read never returns our losing render.
+    await db.execute(sql`UPDATE priority_checkout_receipts SET response=jsonb_set(response,'{screenshotConfirmation}',${JSON.stringify(confirmation)}::jsonb)
+      WHERE intent_key=${screenshotIntentKey(ctx.user!.id,draftId)} AND order_id=${candidate.orderId}
+      AND response->>'orderId'=${candidate.orderId} AND response->>'screenshotActorId'=${String(ctx.user!.id)} AND response->>'screenshotDraftId'=${draftId}
+      AND response->'orderSnapshot'=${JSON.stringify(candidate.order)}::jsonb AND response->'paymentInstructions'=${JSON.stringify(candidate.paymentInstructions)}::jsonb
+      AND NOT (response ? 'screenshotConfirmation') RETURNING response`);
+    return await resultScreenshotOrder(draftId,ctx);
+  }catch{return {...candidate,whatsapp:{state:'pending' as const,recipient:candidate.whatsapp.recipient,message:null,reason:'COMMUNICATION_REVIEW_REQUIRED'}};}
+}
+export function screenshotSafeError(error:unknown):never{
+  if(error instanceof TRPCError&&['UNAUTHORIZED','FORBIDDEN','NOT_FOUND'].includes(error.code))throw error;
+  const message=error instanceof Error?error.message:'';
+  const messages:Record<string,string>={
+    QUOTE_INVALID:'Die Vorschau ist ungültig. Bitte erneut prüfen und eine neue Vorschau erstellen.',
+    QUOTE_EXPIRED:'Die Vorschau ist abgelaufen. Bitte erneut prüfen und eine neue Vorschau erstellen.',
+    QUOTE_REPLACED:'Die Vorschau wurde ersetzt. Bitte die aktuelle Vorschau erneut prüfen.',
+    QUOTE_EXPIRED_OR_REPLACED:'Die Vorschau ist abgelaufen oder wurde ersetzt. Bitte eine neue Vorschau erstellen.',
+    QUOTE_CHANGED:'Die Bestelldaten wurden geändert. Bitte erneut prüfen und eine neue Vorschau erstellen.',
+    QUOTE_UNAVAILABLE:'Die sichere Vorschau ist derzeit nicht verfügbar. Bitte den normalen WaWi-Bestellweg verwenden.',
+    QUOTE_CAPACITY:'Derzeit können keine weiteren Vorschauen erstellt werden. Bitte kurz warten und erneut prüfen.',
+    ACTOR_REVOKED:'Die Administratorfreigabe ist nicht mehr gültig. Bitte die Berechtigung prüfen.',
+    CUSTOMER_CONTACT_CONFLICT:'Telefon und E-Mail sind nicht eindeutig. Bitte doppelte oder widersprüchliche Kundenkontakte zuerst in der WaWi prüfen.',
+    CUSTOMER_PROFILE_REQUIRES_REVIEW:'Das ausgewählte Kundenprofil ist unvollständig. Bitte Namen und Kontakt im Kundenprofil prüfen.',
+    CUSTOMER_PHONE_INVALID:'Bitte eine gültige internationale Telefonnummer oder deutsche Mobilnummer eingeben.',
+    CUSTOMER_ORDER_BLOCKED:'Für diesen Kunden sind neue Bestellungen gesperrt. Bitte die Kundensperre in der WaWi prüfen.',
+    CUSTOMER_NOT_FOUND:'Das ausgewählte Kundenprofil ist nicht mehr vorhanden. Bitte neu auswählen.',
+    STOCK_UNAVAILABLE:'Der Bestand reicht nicht für diese Menge. Bitte Menge oder Artikel prüfen.',
+    EXACT_PUBLISHED_SKU_REQUIRED:'Bitte einen eindeutigen, aktiven und veröffentlichten Lagerartikel auswählen.',
+    PRODUCT_FORM_UNAVAILABLE:'Diese Aufbereitung ist für den gewählten Lagerartikel nicht freigegeben. Bitte die aktuelle Katalogauswahl verwenden.',
+    DUPLICATE_SELECTION:'Dieser Artikel mit derselben Produktform ist bereits ausgewählt. Bitte die Menge anpassen.',
+    COMPONENT_INVENTORY_UNAVAILABLE:'Ein erforderlicher Bestandsteil ist nicht eindeutig verfügbar. Bitte die aktuelle Katalogauswahl prüfen.',
+    KUEHLVERSAND_INSEL_AUSGESCHLOSSEN:'Gekühlter Versand und kühlpflichtige Artikel sind an dieser Inseladresse nicht möglich.',
+    KUEHLVERSAND_ZIEL_UNGEKLAERT:'Für diese Lieferadresse konnte gekühlter Versand nicht sicher freigegeben werden.',
+    COMPONENT_FORM_REQUIRES_WAWI:'Diese Produktform benötigt den normalen manuellen WaWi-Bestellweg. Bitte dort bestellen; andere Artikel sind hier weiterhin möglich.',
+    EXCLUSIVE_CAMPAIGN_DISCOUNT_FORBIDDEN:'Die aktive exklusive Aktion erlaubt keine zusätzlichen Codes oder manuellen Rabatte.',
+    PROMOTION_INVALID:'Der Aktionscode ist ungültig, abgelaufen oder für diesen Warenwert nicht verfügbar.',
+    PROMOTION_REQUIRES_NATIVE_ELIGIBILITY:'Dieser personenbezogene, Partner- oder Neukundencode muss im normalen WaWi-Bestellweg geprüft werden.',
+    ADDRESS_WARNING_CONFIRMATION_REQUIRED:'Bitte den Adresshinweis prüfen und ausdrücklich bestätigen.',
+    SCREENSHOT_SECRET_REQUIRED:'Die sichere Bestellfreigabe ist serverseitig noch nicht konfiguriert. Der normale WaWi-Bestellweg bleibt verfügbar.',
+  };
+  // Never classify an unknown QUOTE_/CUSTOMER_/PROMOTION_ prefix as pre-write:
+  // an unfamiliar error may originate from a post-commit task or result rendering.
+  const addressPrefix='ADRESSPRUEFUNG_BESTAETIGUNG_ERFORDERLICH: ';
+  const addressWarning=message.startsWith(addressPrefix)?message.slice(addressPrefix.length).slice(0,1200):null;
+  const knownCold=['KUEHLVERSAND_INSEL_AUSGESCHLOSSEN','KUEHLVERSAND_ZIEL_UNGEKLAERT'].find(code=>message.startsWith(code+': '));
+  const safe=Object.hasOwn(messages,message)?message:knownCold??(addressWarning!==null?'ADDRESS_WARNING_CONFIRMATION_REQUIRED':null);
+  const dbCode=(error as any)?.cause?.cause?.code??(error as any)?.cause?.code??(error as any)?.code;
+  // Only known pre-write validation errors (or database-aborted transactions) are
+  // definitive rejections. Unknown failures may have happened after a commit.
+  if (safe) throw new TRPCError({code:'PRECONDITION_FAILED',message:`${safe}: ${addressWarning?`Adressprüfung: ${addressWarning}`:messages[safe]}`});
+  if (['55P03','40P01','40001'].includes(dbCode)) throw new TRPCError({code:'PRECONDITION_FAILED',message:'TRANSACTION_REJECTED: Kunde oder Artikel wird gerade bearbeitet. Bitte kurz warten und die Vorschau erneut prüfen.'});
+  throw new TRPCError({code:'INTERNAL_SERVER_ERROR',message:'BOOKING_OUTCOME_UNKNOWN: Das Buchungsergebnis ist nicht eindeutig bestätigt. Bitte ausschließlich den Status der ursprünglichen Bestellung prüfen.'});
+}

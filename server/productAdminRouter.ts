@@ -12,7 +12,7 @@
  */
 
 import { z } from "zod";
-import { eq, desc } from "drizzle-orm";
+import { and, eq, desc } from "drizzle-orm";
 import { router, productManagerProcedure } from "./trpc.js";
 import { getDb } from "./db.js";
 import {
@@ -23,6 +23,11 @@ import {
   productAuditLog,
 } from "../drizzle/schema.js";
 import {validateProductData} from "./productValidation.js";
+import { createFamilyInput, getFamilyInput, publishFamilyInput,
+  createProductFamily, readFamily, publishProductFamily, createSingleBlendInput, publishSingleBlendInput,
+  createSingleBlend, publishSingleBlend } from "./productFamily.js";
+import { createProductDraftInput, createProductDraft, readProductDraft, isProductDraftArticle } from "./productDraft.js";
+import { finalizeProductDraftInput, finalizeProductDraft } from "./productDraftFinalization.js";
 
 // ─────────────────────────────────────────────────────────────
 // HELPERS
@@ -63,6 +68,58 @@ async function writeAuditLog(
 // ─────────────────────────────────────────────────────────────
 
 export const productAdminRouter = router({
+
+  // Draft-only additive API: zero stock, open price, hidden rows; no publication.
+  createDraft: productManagerProcedure.input(createProductDraftInput).mutation(async ({ input, ctx }) => {
+    const db = await getDb();
+    if (!db) throw new Error("DB nicht verfügbar");
+    return createProductDraft(db, input, ctx.user.username || ctx.user.email || "product_manager");
+  }),
+
+  getDraft: productManagerProcedure.input(getFamilyInput).query(async ({ input }) => {
+    const db = await getDb();
+    if (!db) throw new Error("DB nicht verfügbar");
+    return readProductDraft(db, input.shopProductId);
+  }),
+
+  // One existing first/master draft variant only; price/stock/publication/audit
+  // commit together. Never route through legacy piecemeal article mutations.
+  finalizeDraft: productManagerProcedure.input(finalizeProductDraftInput).mutation(async ({ input, ctx }) => {
+    const db = await getDb();
+    if (!db) throw new Error("DB nicht verfügbar");
+    return finalizeProductDraft(db, input, ctx.user.username || ctx.user.email || "product_manager");
+  }),
+
+  // Additive exact-family operations. Existing single-article procedures unchanged.
+  createFamily: productManagerProcedure.input(createFamilyInput).mutation(async ({ input, ctx }) => {
+    const db = await getDb();
+    if (!db) throw new Error("DB nicht verfügbar");
+    return createProductFamily(db, input, ctx.user.username || ctx.user.email || "product_manager");
+  }),
+
+  getFamily: productManagerProcedure.input(getFamilyInput).query(async ({ input }) => {
+    const db = await getDb();
+    if (!db) throw new Error("DB nicht verfügbar");
+    return db.transaction(tx => readFamily(tx, input.shopProductId), { isolationLevel: "repeatable read", accessMode: "read only" });
+  }),
+
+  publishFamily: productManagerProcedure.input(publishFamilyInput).mutation(async ({ input, ctx }) => {
+    const db = await getDb();
+    if (!db) throw new Error("DB nicht verfügbar");
+    return publishProductFamily(db, input, ctx.user.username || ctx.user.email || "product_manager");
+  }),
+
+  createSingleBlend: productManagerProcedure.input(createSingleBlendInput).mutation(async ({ input, ctx }) => {
+    const db = await getDb();
+    if (!db) throw new Error("DB nicht verfügbar");
+    return createSingleBlend(db, input, ctx.user.username || ctx.user.email || "product_manager");
+  }),
+
+  publishSingleBlend: productManagerProcedure.input(publishSingleBlendInput).mutation(async ({ input, ctx }) => {
+    const db = await getDb();
+    if (!db) throw new Error("DB nicht verfügbar");
+    return publishSingleBlend(db, input, ctx.user.username || ctx.user.email || "product_manager");
+  }),
 
   // ─── 1. PREVIEW ────────────────────────────────────────────
   /** Vollständige Produktdaten für Preview (kein Schreiben) */
@@ -183,6 +240,8 @@ export const productAdminRouter = router({
       if (!existing[0]) throw new Error(`Produkt '${input.shopProductId}' nicht gefunden`);
       const old = existing[0];
 
+      if (Array.isArray(old.variants) && old.variants.some(v => v?.publicationStatus === "finalized-draft"))
+        throw new Error("Finalisierte Entwurfsvariante benötigt einen separaten atomaren Preisvertrag.");
       // Validierung: salePrice muss kleiner als sellingPrice sein
       const newSellingPrice = input.sellingPrice ?? Number(old.sellingPrice ?? 0);
       const newSalePrice = input.salePrice !== undefined ? input.salePrice : null;
@@ -446,6 +505,10 @@ export const productAdminRouter = router({
       if (!existing[0]) throw new Error(`Produkt '${input.shopProductId}' nicht gefunden`);
       const old = existing[0];
 
+      if (input.visible && isProductDraftArticle(old)) {
+        throw new Error("Unvollständiger Produktentwurf: Preis und Produktfreigabe müssen zuerst bestätigt werden.");
+      }
+
       await db.update(articles)
         .set({ shopVisible: input.visible ? 1 : 0 } as any)
         .where(eq(articles.id, old.id));
@@ -468,6 +531,7 @@ export const productAdminRouter = router({
   getAuditLog: productManagerProcedure
     .input(z.object({
       shopProductId: z.string(),
+      articleId: z.number().int().positive().optional(),
       limit: z.number().int().min(1).max(200).default(50),
     }))
     .query(async ({ input }) => {
@@ -477,7 +541,8 @@ export const productAdminRouter = router({
       const article = await db
         .select()
         .from(articles)
-        .where(eq(articles.shopProductId, input.shopProductId))
+        .where(input.articleId === undefined ? eq(articles.shopProductId, input.shopProductId)
+          : and(eq(articles.shopProductId, input.shopProductId), eq(articles.id, input.articleId)))
         .limit(1);
 
       if (!article[0]) throw new Error(`Produkt '${input.shopProductId}' nicht gefunden`);
@@ -580,6 +645,12 @@ export const productAdminRouter = router({
     .query(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new Error("DB nicht verfügbar");
+      if (input.shopProductId === "somatide") {
+        const family = await db.transaction(tx => readFamily(tx, input.shopProductId),
+          { isolationLevel: "repeatable read", accessMode: "read only" });
+        if (!family.master) throw new Error(`Produkt '${input.shopProductId}' nicht gefunden`);
+        return family.validation;
+      }
 
       const article = await db
         .select()
