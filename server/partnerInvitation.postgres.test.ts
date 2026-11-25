@@ -16,6 +16,7 @@ import { ensureAccountSecuritySchema } from './accountSecuritySchema.js';
 import { ensureAdminChangeLogSchema } from './adminChangeLogService.js';
 import { invitationKeyHash } from './partnerInvitationContract.js';
 import { invitationIdentifiersAvailable } from './partnerInvitationService.js';
+import { dispatchPartnerInvitationMailEvent, enqueuePartnerInvitationMail, setPartnerInvitationMailTransportForTests, waitForPartnerInvitationMailDispatchesForTests, type MailEvent } from './partnerInvitationMailService.js';
 import { orders } from '../drizzle/schema.js';
 
 const socket = process.env.PARTNER_INVITATION_TEST_PG_SOCKET;
@@ -59,9 +60,11 @@ before(async () => {
   await ensurePartnerInvitationSchema(); await ensurePartnerInvitationSchema();
 });
 beforeEach(async () => {
+  await waitForPartnerInvitationMailDispatchesForTests();
+  setPartnerInvitationMailTransportForTests(); ENV.resendApiKey = '';
   // Wait for existing nonblocking admin journal promises before resetting fixture only.
   await new Promise(resolve => setTimeout(resolve, 30));
-  await pool.query(`TRUNCATE partner_invitation_applications, partner_codes, partners, partner_programs, kwk_accounts, kwk_ledger, kwk_referrals,
+  await pool.query(`TRUNCATE partner_invitation_mail_events, partner_invitation_applications, partner_codes, partners, partner_programs, kwk_accounts, kwk_ledger, kwk_referrals,
     orders, order_items, partner_transactions, promo_codes, shop_settings, articles, account_auth_rate_limits, admin_change_events RESTART IDENTITY CASCADE;
     INSERT INTO partner_programs(key,label,customer_discount_policy,commission_policy,settlement_method,allow_self_order_credit,active)
     VALUES('creator','Creator','each_valid_code_use','each_paid_code_order','payout',false,true),
@@ -78,7 +81,12 @@ beforeEach(async () => {
   await db.insert(orders).values({ orderId: 'UNCHANGED-ORDER', firstName: 'Synthetic', lastName: 'Owner', email: 'owner@fixture.invalid', phone: '', street: 'Local', houseNumber: '1', zip: '00000', city: 'Local', country: 'DE', subtotal: '100', discount: '10', shipping: '5', shippingCountry: 'DE', total: '95', paymentMethod: 'SEPA', status: 'offen', orderDate: new Date('2026-11-01T00:00:00Z') });
   cookies = 0;
 });
-after(async () => { await new Promise(resolve => setTimeout(resolve, 30)); assert.equal(externalCalls, 0); await closeDb(); ENV.databaseUrl = ''; mock.restoreAll(); });
+after(async () => {
+  await waitForPartnerInvitationMailDispatchesForTests();
+  setPartnerInvitationMailTransportForTests(); ENV.resendApiKey = '';
+  await new Promise(resolve => setTimeout(resolve, 30)); assert.equal(externalCalls, 0);
+  await closeDb(); ENV.databaseUrl = ''; mock.restoreAll();
+});
 
 test('submission stays pending with hashed immutable credentials and creates no partner/token/mail/order/stock change', async () => {
   const before = await unchangedSnapshot(); const input = valid();
@@ -315,4 +323,338 @@ test('invitation audit link never adds a new restriction to existing partner del
   assert.equal(audit.status, 'approved'); assert.equal(audit.linked_partner_id, approved.partnerId);
   assert.equal(await count('partners'), 1);
   await assert.rejects(caller().partnerInvitation.status({ registrationKey: input.registrationKey }), (e: any) => e.code === 'SERVICE_UNAVAILABLE');
+});
+
+// Mail tests use only synthetic local rows, injected transports, or a temporary
+// fetch stub. The original deny-all fetch/http/socket guards stay in force.
+const mailRows = async () => (await pool.query('SELECT * FROM partner_invitation_mail_events ORDER BY id')).rows;
+const mailRow = async (id: number) => (await pool.query('SELECT * FROM partner_invitation_mail_events WHERE id=$1', [id])).rows[0];
+function captureMails() {
+  const events: MailEvent[] = [];
+  ENV.resendApiKey = 'synthetic-mail-key-never-live';
+  setPartnerInvitationMailTransportForTests(async event => { events.push(event); return { ok: true, providerId: `fixture-${event.id}` }; });
+  return events;
+}
+async function historicalApplication(input = valid('historical@fixture.invalid'), approved = false) {
+  const result = await pool.query(`INSERT INTO partner_invitation_applications
+    (registration_key_hash,email,name,phone,company,password_hash,terms_version,created_at,status,linked_partner_id,reviewed_at,reviewed_by)
+    VALUES($1,$2,$3,$4,$5,'HISTORICAL_SYNTHETIC_HASH','ben-10-10-v1','2020-01-01', $6,$7,$8,$9) RETURNING id`,
+    [invitationKeyHash(input.registrationKey), input.email, input.name, input.phone, input.company,
+      approved ? 'approved' : 'pending', approved ? 9001 : null, approved ? new Date('2020-01-02') : null, approved ? 'historical_admin' : null]);
+  return Number(result.rows[0].id);
+}
+async function dormantEvent(input = valid('dormant@fixture.invalid')) {
+  const id = await historicalApplication(input);
+  const eventId = await enqueuePartnerInvitationMail(pool, { id, name: input.name, email: input.email }, 'registration_acknowledgement');
+  assert.equal(typeof eventId, 'number');
+  return eventId!;
+}
+async function withProviderFetch(fetchStub: typeof fetch, work: () => Promise<void>) {
+  const guardedFetch = globalThis.fetch;
+  ENV.resendApiKey = 'synthetic-mail-key-never-live'; setPartnerInvitationMailTransportForTests();
+  globalThis.fetch = fetchStub;
+  try { await work(); }
+  finally { await waitForPartnerInvitationMailDispatchesForTests(); globalThis.fetch = guardedFetch; ENV.resendApiKey = ''; }
+}
+function assertTerminal(row: any, state: string, code: string | null) {
+  assert.equal(row.state, state); assert.equal(row.attempts, 1); assert(row.claimed_at);
+  assert.equal(row.last_error_code, code);
+  if (state !== 'sent') { assert.equal(row.provider_id, null); assert.equal(row.sent_at, null); }
+}
+
+test('mail: readiness is persistent and PII-free, with absent/present runtime key and no backfill', async () => {
+  const input = valid('readiness-history@fixture.invalid'); await historicalApplication(input);
+  const before = await caller().partnerInvitation.mailReady();
+  assert.deepEqual(Object.keys(before).sort(), ['ready', 'activationAt', 'registrationMail', 'approvalMail'].sort());
+  assert.equal(before.ready, false); assert.equal(before.registrationMail, false); assert.equal(before.approvalMail, false);
+  assert(before.activationAt); assert(Number.isFinite(Date.parse(before.activationAt!)));
+  const events = captureMails();
+  const ready = await caller().partnerInvitation.mailReady();
+  assert.deepEqual(ready, { ready: true, activationAt: before.activationAt, registrationMail: true, approvalMail: true });
+  await ensurePartnerInvitationSchema(); await ensurePartnerInvitationSchema();
+  assert.deepEqual(await caller().partnerInvitation.mailReady(), ready);
+  await waitForPartnerInvitationMailDispatchesForTests();
+  assert.equal(await count('partner_invitation_mail_activation'), 1); assert.equal(await count('partner_invitation_mail_events'), 0); assert.equal(events.length, 0);
+  for (const secret of [input.email, input.name, input.registrationKey, input.password, ENV.resendApiKey]) assert(!JSON.stringify(ready).includes(secret));
+});
+
+test('mail: readiness and duplicate historical submit cannot scan or claim an unrelated dormant event', async () => {
+  const events = captureMails(); const input = valid('old-pending@fixture.invalid'); await historicalApplication(input);
+  const dormant = await dormantEvent();
+  await caller().partnerInvitation.mailReady(); await caller(admin).partnerInvitation.pending();
+  await caller().partnerInvitation.submit(input); await caller().partnerInvitation.status({ registrationKey: input.registrationKey });
+  await waitForPartnerInvitationMailDispatchesForTests();
+  assert.equal(events.length, 0); assert.equal((await mailRow(dormant)).state, 'new'); assert.equal((await mailRow(dormant)).attempts, 0);
+  assert.equal((await mailRows()).length, 1); assert.equal((await appRow(input.email)).status, 'pending');
+});
+
+test('mail: new submission emits exactly one acknowledgement, never password/key/hash or premature code', async () => {
+  const events = captureMails(); const input = valid(); const id = await submitAndId(input);
+  await waitForPartnerInvitationMailDispatchesForTests();
+  await caller().partnerInvitation.submit(input); await caller().partnerInvitation.submit({ ...input, registrationKey: randomUUID() });
+  await waitForPartnerInvitationMailDispatchesForTests();
+  assert.equal(events.length, 1); assert.equal(events[0].applicationId, id); assert.equal(events[0].kind, 'registration_acknowledgement');
+  assert.equal(events[0].recipientEmail, input.email); assert.equal(events[0].partnerCode, null); assert.equal(events[0].partnerNumber, null);
+  const text = events[0].textBody + events[0].htmlBody;
+  assert.match(text, /noch nicht freigeschaltet/); assert.match(text, /10 %/); assert(!/BEN-[A-Z0-9]/.test(text));
+  for (const secret of [input.password, input.registrationKey, (await appRow()).password_hash]) assert(!JSON.stringify(events).includes(secret));
+  const rows = await mailRows(); assert.equal(rows.length, 1); assertTerminal(rows[0], 'sent', null); assert(rows[0].sent_at);
+});
+
+test('mail: genuine approval sends exact committed identity and correct portal/payout instructions once', async () => {
+  const events = captureMails(); const input = valid(); const id = await submitAndId(input);
+  await waitForPartnerInvitationMailDispatchesForTests(); const approved = await caller(admin).partnerInvitation.approve({ id });
+  await waitForPartnerInvitationMailDispatchesForTests();
+  assert.deepEqual(events.map(e => e.kind), ['registration_acknowledgement', 'approval']);
+  const event = events[1]; assert.equal(event.partnerCode, approved.code); assert.equal(event.partnerNumber, approved.partnerNumber);
+  assert.equal(event.applicationId, id); assert.equal(event.recipientEmail, input.email);
+  for (const body of [event.textBody, event.htmlBody]) {
+    assert(body.includes(approved.code!)); assert(body.includes(approved.partnerNumber!)); assert(body.includes('https://www.369research.eu/partner'));
+    assert.match(body, /10 %/); assert.match(body, /9 € Provision/); assert.match(body, /Versandkosten/); assert.match(body, /exklusive/);
+    assert.match(body, /Bankverbindung/); assert.match(body, /Bitte sende keine Bankdaten per E-Mail/);
+    assert(!body.includes(input.password)); assert(!body.includes(input.registrationKey));
+  }
+  assert.equal((await appRow()).status, 'approved'); assert.equal((await mailRows()).filter((r: any) => r.kind === 'approval').length, 1);
+});
+
+test('mail: historical pending application approved today receives approval only, never retroactive registration', async () => {
+  const events = captureMails(); const input = valid('old-pending@fixture.invalid'); const id = await historicalApplication(input);
+  await caller().partnerInvitation.submit(input); await waitForPartnerInvitationMailDispatchesForTests(); assert.equal(events.length, 0);
+  const approved = await caller(admin).partnerInvitation.approve({ id });
+  await caller(admin).partnerInvitation.approve({ id }); await waitForPartnerInvitationMailDispatchesForTests();
+  assert.equal(events.length, 1); assert.equal(events[0].kind, 'approval'); assert.equal(events[0].partnerCode, approved.code);
+  assert.deepEqual((await mailRows()).map((r: any) => r.kind), ['approval']);
+});
+
+test('mail: already-approved historical applications and retry/history reads create no event or dispatch', async () => {
+  const events = captureMails(); const input = valid('already-approved@fixture.invalid'); const id = await historicalApplication(input, true);
+  const dormant = await dormantEvent();
+  await Promise.all(Array.from({ length: 4 }, () => caller(admin).partnerInvitation.approve({ id })));
+  await caller().partnerInvitation.submit(input); await caller().partnerInvitation.status({ registrationKey: input.registrationKey });
+  await caller().partnerInvitation.mailReady(); await waitForPartnerInvitationMailDispatchesForTests();
+  assert.equal(events.length, 0); assert.equal((await mailRows()).length, 1); assert.equal((await mailRow(dormant)).state, 'new');
+});
+
+test('mail: rejected and unauthorized/nonexistent approvals never enqueue approval', async () => {
+  const events = captureMails(); const id = await submitAndId(); await waitForPartnerInvitationMailDispatchesForTests();
+  await assert.rejects(caller().partnerInvitation.approve({ id })); await caller(admin).partnerInvitation.reject({ id });
+  await assert.rejects(caller(admin).partnerInvitation.approve({ id }), (e: any) => e.code === 'CONFLICT');
+  await assert.rejects(caller(admin).partnerInvitation.approve({ id: 999999 }), (e: any) => e.code === 'NOT_FOUND');
+  await waitForPartnerInvitationMailDispatchesForTests();
+  assert.deepEqual(events.map(e => e.kind), ['registration_acknowledgement']); assert.equal((await mailRows()).length, 1);
+});
+
+test('mail: email conflict and failed creator precondition do not enqueue approval or scan dormant events', async () => {
+  const events = captureMails(); const first = await submitAndId(valid('conflicted@fixture.invalid'));
+  const second = await submitAndId(valid('precondition@fixture.invalid')); await waitForPartnerInvitationMailDispatchesForTests();
+  const dormant = await dormantEvent(); await pool.query("UPDATE partners SET email='conflicted@fixture.invalid' WHERE id=9001");
+  await assert.rejects(caller(admin).partnerInvitation.approve({ id: first }), (e: any) => e.code === 'CONFLICT');
+  await pool.query("UPDATE partner_programs SET active=false WHERE key='creator'");
+  await assert.rejects(caller(admin).partnerInvitation.approve({ id: second }), (e: any) => e.code === 'PRECONDITION_FAILED');
+  await waitForPartnerInvitationMailDispatchesForTests();
+  assert.equal(events.length, 2); assert(events.every(e => e.kind === 'registration_acknowledgement'));
+  assert.equal((await mailRow(dormant)).state, 'new'); assert.equal((await mailRows()).filter((r: any) => r.kind === 'approval').length, 0);
+});
+
+test('mail: approval and registration rollback after enqueue leave neither committed event nor transport call', async () => {
+  const events = captureMails(); const id = await historicalApplication();
+  await pool.query(`CREATE FUNCTION invitation_mail_fixture_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic forced rollback'; END $$;
+    CREATE TRIGGER invitation_mail_fixture_fail AFTER INSERT ON partner_invitation_mail_events FOR EACH ROW EXECUTE FUNCTION invitation_mail_fixture_fail()`);
+  try {
+    await assert.rejects(caller(admin).partnerInvitation.approve({ id }), (e: any) => e.code === 'SERVICE_UNAVAILABLE');
+    await assert.rejects(caller().partnerInvitation.submit(valid('rollback-new@fixture.invalid')), (e: any) => e.code === 'SERVICE_UNAVAILABLE');
+    await waitForPartnerInvitationMailDispatchesForTests();
+    assert.equal((await appRow('historical@fixture.invalid')).status, 'pending'); assert.equal(await count('partners'), 1);
+    assert.equal(await count('partner_invitation_applications'), 1); assert.equal(await count('partner_invitation_mail_events'), 0); assert.equal(events.length, 0);
+  } finally { await pool.query('DROP TRIGGER invitation_mail_fixture_fail ON partner_invitation_mail_events; DROP FUNCTION invitation_mail_fixture_fail()'); }
+});
+
+test('mail: duplicate email, recovery-key conflict and existing partner create no additional mail or global retry', async () => {
+  const events = captureMails(); const input = valid(); await submitAndId(input); await waitForPartnerInvitationMailDispatchesForTests();
+  const dormant = await dormantEvent();
+  for (const other of [input, { ...input, registrationKey: randomUUID() }, { ...input, email: 'recovery-conflict@fixture.invalid' }, valid(' EXISTING@fixture.invalid ')]) {
+    await caller().partnerInvitation.submit(other);
+  }
+  await assert.rejects(caller().partnerInvitation.submit({ ...valid(), website: 'bot' } as any));
+  await waitForPartnerInvitationMailDispatchesForTests();
+  assert.equal(events.length, 1); assert.equal((await mailRows()).length, 2); assert.equal((await mailRow(dormant)).state, 'new');
+  assert.equal(await count('partner_invitation_applications'), 2);
+});
+
+test('mail: racing same-applicant registrations deliver exactly one event and one acknowledgement', async () => {
+  const events = captureMails(); const input = valid();
+  await Promise.all(Array.from({ length: 6 }, (_, i) => caller(null, `same-race-${i}`).partnerInvitation.submit(i % 2 ? { ...input, registrationKey: randomUUID() } : input)));
+  await waitForPartnerInvitationMailDispatchesForTests();
+  assert.equal(await count('partner_invitation_applications'), 1); assert.equal((await mailRows()).length, 1); assert.equal(events.length, 1);
+  assertTerminal((await mailRows())[0], 'sent', null);
+});
+
+test('mail: racing DIFFERENT registrations dispatch every exact event, never bulk-claim and skip other applicants', async () => {
+  const events = captureMails(); const dormant = await dormantEvent(); const connect = pool.connect.bind(pool);
+  let arrived = 0, release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+  const timer = setTimeout(release, 1500);
+  // Hold dispatch claims until both business transactions have committed. This
+  // deterministically exposes the former UPDATE-all/rows[0]-only delivery bug.
+  const intercept = mock.method(pool, 'connect', (callback?: any) => {
+    if (typeof callback === 'function') return connect(callback);
+    return connect().then((client: any) => ({ release: () => client.release(), query: async (sql: string, params?: any[]) => {
+      if (/UPDATE partner_invitation_mail_events SET state='claimed'/.test(sql)) { arrived++; if (arrived === 2) release(); await gate; }
+      return client.query(sql, params);
+    } }));
+  });
+  try {
+    const inputs = [valid('race-first@fixture.invalid'), valid('race-second@fixture.invalid')];
+    await Promise.all(inputs.map((input, i) => caller(null, `distinct-race-${i}`).partnerInvitation.submit(input)));
+    await waitForPartnerInvitationMailDispatchesForTests();
+    assert.equal(arrived, 2); assert.equal(events.length, 2); assert.equal(new Set(events.map(e => e.id)).size, 2);
+    assert.deepEqual(events.map(e => e.recipientEmail).sort(), inputs.map(i => i.email).sort());
+    const rows = await mailRows(); assert.equal(rows.filter((r: any) => r.state === 'sent').length, 2);
+    assert.equal((await mailRow(dormant)).state, 'new'); assert.equal((await mailRow(dormant)).attempts, 0);
+  } finally { release(); clearTimeout(timer); await waitForPartnerInvitationMailDispatchesForTests(); intercept.mock.restore(); }
+});
+
+test('mail: concurrent/repeated approvals send one approval per applicant and never resend acknowledgement', async () => {
+  const events = captureMails(); const ids = await Promise.all([submitAndId(valid('approve-one@fixture.invalid')), submitAndId(valid('approve-two@fixture.invalid'))]);
+  await waitForPartnerInvitationMailDispatchesForTests();
+  await Promise.all(ids.flatMap(id => Array.from({ length: 4 }, () => caller(admin).partnerInvitation.approve({ id }))));
+  await Promise.all(ids.map(id => caller(admin).partnerInvitation.approve({ id }))); await waitForPartnerInvitationMailDispatchesForTests();
+  assert.equal(events.length, 4); assert.equal((await mailRows()).length, 4);
+  for (const id of ids) assert.deepEqual(events.filter(e => e.applicationId === id).map(e => e.kind).sort(), ['approval', 'registration_acknowledgement']);
+});
+
+test('mail: recipient names are HTML-escaped in both templates, with no credential/company/bank values', async () => {
+  const events = captureMails(); const input = { ...valid(), name: `<b>&\"' Synthetic`, company: 'DE89370400440532013000 SECRET_BANK_HOLDER' };
+  const id = await submitAndId(input); await waitForPartnerInvitationMailDispatchesForTests();
+  await caller(admin).partnerInvitation.approve({ id }); await waitForPartnerInvitationMailDispatchesForTests();
+  assert.equal(events.length, 2);
+  for (const event of events) {
+    assert(event.htmlBody.includes('&lt;b&gt;&amp;&quot;&#39;')); assert(!event.htmlBody.includes(`<b>&\"'`));
+    const payload = JSON.stringify(event);
+    for (const secret of [input.password, input.registrationKey, input.company, 'DE89370400440532013000', 'SECRET_BANK_HOLDER', (await appRow()).password_hash]) assert(!payload.includes(secret));
+    assert(!Object.keys(event).some(key => /bcc|password|iban|bic|credential/i.test(key)));
+  }
+});
+
+test('mail: enqueue returns only a newly inserted event ID; rollback and duplicate enqueue preserve the ledger', async () => {
+  const events = captureMails(); const id = await historicalApplication(); const input = { id, name: 'Synthetic', email: 'historical@fixture.invalid' };
+  const client = await pool.connect();
+  try { await client.query('BEGIN'); const eventId = await enqueuePartnerInvitationMail(client, input, 'registration_acknowledgement'); assert.equal(typeof eventId, 'number'); await client.query('ROLLBACK'); }
+  finally { client.release(); }
+  assert.equal((await mailRows()).length, 0);
+  const eventId = await enqueuePartnerInvitationMail(pool, input, 'registration_acknowledgement'); assert.equal(typeof eventId, 'number');
+  assert.equal(await enqueuePartnerInvitationMail(pool, { ...input, name: 'Replacement' }, 'registration_acknowledgement'), null);
+  assert.equal((await mailRows()).length, 1); assert.equal((await mailRow(eventId!)).recipient_name, input.name); assert.equal(events.length, 0);
+});
+
+test('mail: invalid IDs never bulk-select, exact dispatch claims only its event, terminal/claimed states never retry', async () => {
+  const events = captureMails(); const first = await dormantEvent(valid('exact-first@fixture.invalid')); const second = await dormantEvent(valid('exact-second@fixture.invalid'));
+  for (const id of [undefined, null, 0, -1, NaN, Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1, '1', 999999]) await dispatchPartnerInvitationMailEvent(id as number);
+  assert.equal(events.length, 0); assert((await mailRows()).every((r: any) => r.state === 'new' && r.attempts === 0));
+  await Promise.all(Array.from({ length: 5 }, () => dispatchPartnerInvitationMailEvent(second)));
+  assert.equal(events.length, 1); assert.equal(Number(events[0].id), second); assert.equal((await mailRow(first)).state, 'new');
+  for (const state of ['claimed', 'sent', 'unknown', 'failed']) {
+    await pool.query('UPDATE partner_invitation_mail_events SET state=$2,attempts=1 WHERE id=$1', [first, state]);
+    await Promise.all([dispatchPartnerInvitationMailEvent(first), dispatchPartnerInvitationMailEvent(first), dispatchPartnerInvitationMailEvent(second)]);
+    assert.equal(events.length, 1); assert.equal((await mailRow(first)).state, state);
+  }
+});
+
+test('mail: postcommit dispatch sees committed application/partner, and held transport never blocks business', { timeout: 5000 }, async () => {
+  ENV.resendApiKey = 'synthetic-mail-key-never-live';
+  const observations: any[] = []; let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
+  setPartnerInvitationMailTransportForTests(async event => {
+    const application = (await pool.query('SELECT status,linked_partner_id FROM partner_invitation_applications WHERE id=$1', [event.applicationId])).rows[0];
+    assert(application); const partner = application.linked_partner_id ? (await pool.query('SELECT code,partner_number FROM partners WHERE id=$1', [application.linked_partner_id])).rows[0] : null;
+    if (event.kind === 'approval') { assert.equal(application.status, 'approved'); assert.equal(partner.code, event.partnerCode); assert.equal(partner.partner_number, event.partnerNumber); }
+    observations.push({ kind: event.kind, status: application.status }); await held; return { ok: true, providerId: `fixture-${event.id}` };
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const business = (async () => { const id = await submitAndId(); const result = await caller(admin).partnerInvitation.approve({ id }); assert.equal(result.status, 'approved'); })();
+    await Promise.race([business, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(Error('MAIL_BLOCKED_BUSINESS')), 1500); })]);
+    assert.equal((await appRow()).status, 'approved');
+  } finally { if (timer) clearTimeout(timer); release(); await waitForPartnerInvitationMailDispatchesForTests(); }
+  assert.equal(observations.length, 2); assert(observations.some(o => o.kind === 'approval' && o.status === 'approved'));
+});
+
+test('mail: test transport injection and drain are unavailable outside NODE_ENV=test', async () => {
+  const nodeEnv = process.env.NODE_ENV;
+  try { process.env.NODE_ENV = 'production'; assert.throws(() => setPartnerInvitationMailTransportForTests(async () => ({ ok: true })), /unavailable/); await assert.rejects(waitForPartnerInvitationMailDispatchesForTests(), /unavailable/); }
+  finally { process.env.NODE_ENV = nodeEnv; setPartnerInvitationMailTransportForTests(); }
+});
+
+test('mail: actual provider payload/headers use event ID plus kind, no BCC/bank/credentials and exact recipients', async () => {
+  const requests: { url: string; headers: Headers; body: any }[] = []; await dormantEvent();
+  await pool.query("SELECT setval(pg_get_serial_sequence('partner_invitation_mail_events','id'), 1000, false)");
+  await withProviderFetch((async (url, init) => {
+    requests.push({ url: String(url), headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) });
+    return new Response(JSON.stringify({ id: `provider-${requests.length}` }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }) as typeof fetch, async () => {
+    const input = { ...valid('payload@fixture.invalid'), company: 'DE89370400440532013000 SECRET_BANK_HOLDER' }; const id = await submitAndId(input);
+    await waitForPartnerInvitationMailDispatchesForTests(); await caller(admin).partnerInvitation.approve({ id }); await waitForPartnerInvitationMailDispatchesForTests();
+    const rows = (await mailRows()).filter((r: any) => r.application_id === id); assert.equal(requests.length, 2);
+    assert.notEqual(Number(rows[0].id), id); // Prevent application-ID-only keys from passing by coincidence.
+    for (let i = 0; i < requests.length; i++) {
+      const request = requests[i]; const row = rows[i];
+      assert.equal(request.url, 'https://api.resend.com/emails'); assert.equal(request.headers.get('Authorization'), 'Bearer synthetic-mail-key-never-live');
+      assert.equal(request.headers.get('Content-Type'), 'application/json'); assert.equal(request.headers.get('Idempotency-Key'), `partner-invitation/${row.kind}/${row.id}`);
+      assert.deepEqual(Object.keys(request.body).sort(), ['from', 'reply_to', 'to', 'subject', 'text', 'html'].sort());
+      assert.deepEqual(request.body.to, [input.email]); assert.equal(request.body.from, '369 Research · Partner-Support <partnersupport@369research.eu>'); assert.equal(request.body.reply_to, 'partnersupport@369research.eu');
+      for (const secret of [input.password, input.registrationKey, input.company, 'DE89370400440532013000', (await appRow(input.email)).password_hash]) assert(!JSON.stringify(request.body).includes(secret));
+      assertTerminal(row, 'sent', null); assert.equal(row.provider_id, `provider-${i + 1}`);
+      await dispatchPartnerInvitationMailEvent(Number(row.id));
+    }
+    assert.equal(requests.length, 2); assert.equal((await mailRows())[0].state, 'new');
+  });
+});
+
+test('mail: missing runtime key is a terminal safe failure and adding a key/duplicate submit never retries it', async () => {
+  const input = valid(); const id = await submitAndId(input); await waitForPartnerInvitationMailDispatchesForTests();
+  const row = (await mailRows())[0]; assertTerminal(row, 'failed', 'missing_runtime_key');
+  const events = captureMails(); await caller().partnerInvitation.mailReady(); await caller().partnerInvitation.submit(input); await dispatchPartnerInvitationMailEvent(Number(row.id));
+  await waitForPartnerInvitationMailDispatchesForTests(); assert.equal(events.length, 0); assert.equal((await appRow()).status, 'pending');
+  await caller(admin).partnerInvitation.approve({ id }); await waitForPartnerInvitationMailDispatchesForTests();
+  assert.deepEqual(events.map(e => e.kind), ['approval']); assert.equal((await mailRow(Number(row.id))).state, 'failed');
+});
+
+test('mail: HTTP 4xx fails safely, HTTP 5xx stays unknown, neither blocks approval nor retries', async () => {
+  for (const status of [422, 503]) {
+    let calls = 0;
+    await withProviderFetch((async () => { calls++; return new Response(JSON.stringify({ message: 'SENSITIVE_PROVIDER_DETAIL' }), { status }); }) as typeof fetch, async () => {
+      const input = valid(`http-${status}@fixture.invalid`); const id = await submitAndId(input); await waitForPartnerInvitationMailDispatchesForTests();
+      const approved = await caller(admin).partnerInvitation.approve({ id }); assert.equal(approved.status, 'approved'); await waitForPartnerInvitationMailDispatchesForTests();
+      const rows = (await mailRows()).filter((r: any) => r.application_id === id); assert.equal(rows.length, 2);
+      for (const row of rows) { assertTerminal(row, status >= 500 ? 'unknown' : 'failed', `http_${status}`); assert(!JSON.stringify(row).includes('SENSITIVE_PROVIDER_DETAIL')); await dispatchPartnerInvitationMailEvent(Number(row.id)); }
+      await caller().partnerInvitation.submit(input); await caller(admin).partnerInvitation.approve({ id }); await waitForPartnerInvitationMailDispatchesForTests(); assert.equal(calls, 2);
+    });
+  }
+});
+
+test('mail: malformed 2xx or missing/invalid provider ID becomes unknown, never sent or retried', async () => {
+  const bodies = ['not-json', '{}', '{"id":""}', '{"id":123}'];
+  for (let i = 0; i < bodies.length; i++) {
+    let calls = 0;
+    await withProviderFetch((async () => { calls++; return new Response(bodies[i], { status: 200 }); }) as typeof fetch, async () => {
+      const input = valid(`malformed-${i}@fixture.invalid`); await caller().partnerInvitation.submit(input); await waitForPartnerInvitationMailDispatchesForTests();
+      const row = (await mailRows()).find((r: any) => r.recipient_email === input.email); assertTerminal(row, 'unknown', 'invalid_provider_response');
+      await dispatchPartnerInvitationMailEvent(Number(row.id)); await caller().partnerInvitation.submit(input); await waitForPartnerInvitationMailDispatchesForTests(); assert.equal(calls, 1);
+    });
+  }
+});
+
+test('mail: fast mocked timeout/network throw and injected throw are unknown, nonblocking and never resubmitted', async () => {
+  for (const name of ['AbortError', 'Error']) {
+    let calls = 0;
+    await withProviderFetch((async () => { calls++; const error = Error('SENSITIVE_NETWORK_DETAIL'); error.name = name; throw error; }) as typeof fetch, async () => {
+      const input = valid(`throw-${name.toLowerCase()}@fixture.invalid`); const id = await submitAndId(input); await waitForPartnerInvitationMailDispatchesForTests();
+      assert.equal((await caller(admin).partnerInvitation.approve({ id })).status, 'approved'); await waitForPartnerInvitationMailDispatchesForTests();
+      for (const row of (await mailRows()).filter((r: any) => r.application_id === id)) { assertTerminal(row, 'unknown', name === 'AbortError' ? 'timeout' : 'network_error'); assert(!JSON.stringify(row).includes('SENSITIVE_NETWORK_DETAIL')); await dispatchPartnerInvitationMailEvent(Number(row.id)); }
+      assert.equal(calls, 2);
+    });
+  }
+  let calls = 0; setPartnerInvitationMailTransportForTests(async () => { calls++; throw Error('SENSITIVE_INJECTED_DETAIL'); });
+  const id = await submitAndId(valid('injected-throw@fixture.invalid')); await waitForPartnerInvitationMailDispatchesForTests();
+  assert.equal((await caller(admin).partnerInvitation.approve({ id })).status, 'approved'); await waitForPartnerInvitationMailDispatchesForTests();
+  for (const row of (await mailRows()).filter((r: any) => r.application_id === id)) { assertTerminal(row, 'unknown', 'transport_error'); await dispatchPartnerInvitationMailEvent(Number(row.id)); }
+  assert.equal(calls, 2); assert.equal(externalCalls, 0);
 });

@@ -5,7 +5,10 @@ let readiness: Promise<void> | undefined;
 export async function ensurePartnerInvitationSchema(): Promise<void> {
   if (!readiness) {
     readiness = (async () => {
-      const sql = readFileSync(new URL('../drizzle/migrations/0035_partner_invitation_applications.sql', import.meta.url), 'utf8');
+        const sql = [
+          readFileSync(new URL('../drizzle/migrations/0035_partner_invitation_applications.sql', import.meta.url), 'utf8'),
+          readFileSync(new URL('../drizzle/migrations/0037_partner_invitation_mail_outbox.sql', import.meta.url), 'utf8'),
+        ].join('\n');
       const pool = await getPool();
       if (!pool) throw Error('Invitation database unavailable');
       const client = await pool.connect();

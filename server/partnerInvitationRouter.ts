@@ -4,6 +4,7 @@ import { router, publicProcedure, adminProcedure } from './trpc.js';
 import { enforceAuthRateLimit } from './accountSecurityService.js';
 import { BEN_INVITATION_INFO, partnerInvitationSubmitInput, partnerInvitationStatusInput, partnerInvitationReviewInput } from './partnerInvitationContract.js';
 import { submitPartnerInvitation, partnerInvitationStatus, pendingPartnerInvitations, approvePartnerInvitation, rejectPartnerInvitation } from './partnerInvitationService.js';
+import { partnerInvitationMailReady } from './partnerInvitationMailService.js';
 
 // Keep strict Zod parsing and inferred input/output types, but never expose Zod's
 // received values (e.g. forged literal values or unknown field names) to logs.
@@ -28,6 +29,7 @@ async function invitationOperation<T>(work: () => Promise<T>): Promise<T> {
 }
 export const partnerInvitationRouter = router({
   info: publicProcedure.query(() => BEN_INVITATION_INFO),
+  mailReady: publicProcedure.query(() => invitationOperation(partnerInvitationMailReady)),
   submit: publicProcedure.input(safeInvitationInput(partnerInvitationSubmitInput)).mutation(({ input, ctx }) => invitationOperation(async () => {
     await enforceAuthRateLimit(ctx.req, 'partner.invitation.submit', input.email);
     return submitPartnerInvitation(input);

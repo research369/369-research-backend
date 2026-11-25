@@ -4,6 +4,7 @@ import { TRPCError } from '@trpc/server';
 import { getPool } from './db.js';
 import { ensurePartnerInvitationSchema } from './partnerInvitationSchema.js';
 import { invitationKeyHash, newInvitationIdentifiers, type InvitationStatus, type PartnerInvitationSubmit } from './partnerInvitationContract.js';
+import { enqueuePartnerInvitationMail, startPartnerInvitationMailDispatch } from './partnerInvitationMailService.js';
 
 async function database(): Promise<Pool> {
   await ensurePartnerInvitationSchema();
@@ -35,7 +36,8 @@ export async function submitPartnerInvitation(input: PartnerInvitationSubmit): P
   const keyHash = invitationKeyHash(input.registrationKey);
   // Equal work for new submissions and duplicates; never persist or return plaintext.
   const passwordHash = await bcrypt.hash(input.password, 12);
-  return transaction(pool, async client => {
+  let mailEventId: number | null = null;
+  const transactionResult: InvitationStatus = await transaction(pool, async client => {
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`369:partner-invitation:email:${input.email}`]);
     const owned = await client.query('SELECT email, status, linked_partner_id FROM partner_invitation_applications WHERE registration_key_hash=$1', [keyHash]);
     if (owned.rows[0]) {
@@ -44,12 +46,17 @@ export async function submitPartnerInvitation(input: PartnerInvitationSubmit): P
     const existing = await client.query('SELECT 1 FROM partners WHERE LOWER(BTRIM(email))=$1 LIMIT 1', [input.email]);
     if (existing.rows.length) return { status: 'pending' };
     // Unique email + hashed key prevent racing duplicates. Conflicts do not replace data.
-    await client.query(`INSERT INTO partner_invitation_applications
+    const inserted = await client.query(`INSERT INTO partner_invitation_applications
       (registration_key_hash, email, name, phone, company, password_hash, terms_version)
-      VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`,
+      VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING RETURNING id, name, email`,
       [keyHash, input.email, input.name, input.phone, input.company || null, passwordHash, input.termsVersion]);
+    if (inserted.rows[0]) {
+      mailEventId = await enqueuePartnerInvitationMail(client, { id: Number(inserted.rows[0].id), name: inserted.rows[0].name, email: inserted.rows[0].email }, 'registration_acknowledgement');
+    }
     return { status: 'pending' };
   });
+  if (mailEventId !== null) startPartnerInvitationMailDispatch(mailEventId);
+  return transactionResult;
 }
 /** POST only: high-entropy capability lookup, never an email lookup or query-string secret. */
 export async function partnerInvitationStatus(registrationKey: string): Promise<InvitationStatus> {
@@ -74,7 +81,8 @@ export async function invitationIdentifiersAvailable(client: Pick<PoolClient, 'q
 export type InvitationApproval = { status: 'approved'; id: number; partnerId: number; partnerNumber: string; code: string };
 export async function approvePartnerInvitation(id: number, actor: string): Promise<InvitationApproval> {
   const pool = await database();
-  return transaction(pool, async client => {
+  let mailEventId: number | null = null;
+  const transactionResult: InvitationApproval = await transaction(pool, async client => {
     const result = await client.query('SELECT * FROM partner_invitation_applications WHERE id=$1 FOR UPDATE', [id]);
     const app = result.rows[0];
     if (!app) throw new TRPCError({ code: 'NOT_FOUND', message: 'Antrag nicht gefunden.' });
@@ -116,8 +124,11 @@ export async function approvePartnerInvitation(id: number, actor: string): Promi
       VALUES($1,$2,$2,TRUE,10,10)`, [partnerId, identifiers.code]);
     await client.query(`UPDATE partner_invitation_applications SET status='approved', linked_partner_id=$2,
       reviewed_by=$3, reviewed_at=NOW(), updated_at=NOW() WHERE id=$1`, [id, partnerId, actor.slice(0, 100)]);
+    mailEventId = await enqueuePartnerInvitationMail(client, { id, name: app.name, email: app.email }, 'approval', identifiers);
     return { status: 'approved', id, partnerId, partnerNumber: identifiers.partnerNumber, code: identifiers.code };
   });
+  if (mailEventId !== null) startPartnerInvitationMailDispatch(mailEventId);
+  return transactionResult;
 }
 export async function rejectPartnerInvitation(id: number, actor: string): Promise<{ id: number; status: 'rejected' }> {
   const pool = await database();
