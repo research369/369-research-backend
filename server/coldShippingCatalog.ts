@@ -67,7 +67,7 @@ function resolveForms(item: CatalogCheckoutItem, article: ColdShippingCatalogArt
     && !categories.some((category) => nonVialCategories.has(category)
       && !(category === "nasensprays" && primaryCategory !== "nasensprays")
       && !(includedVial && category === "forscher-bundles"));
-  const plugPlayEligible = ordinaryVial && !ids.some((id) => plugPlayExcludedIds.has(id));
+  const plugPlayEligible = ordinaryVial && !ids.some((id) => plugPlayExcludedIds.has(id) || isNasalDiySetEligible(id));
   const legacyVariant = String(item.variant ?? "");
   const legacyPlugPlay = !accessoryPattern.test(legacyVariant) && (
     plugPlayPattern.test(legacyVariant)

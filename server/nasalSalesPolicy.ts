@@ -16,6 +16,8 @@ export function assertNewNasalSale(items: readonly SalesItem[], catalog: readonl
     const family = ref ? catalog.filter(a => key(a.sku) === ref || key(a.shopProductId) === ref) : [];
     // A catalogue-confirmed ready SKU cannot be relabelled or turned into a kit.
     if (family.some(isReadyNasalArticle)) throw Error("READY_NASAL_SALE_DISABLED");
+    if (family.some(a => isNasalDiySetEligible(key(a.shopProductId)))
+      && (item.isPlugPlay === true || /plug\s*(?:&|and|und)?\s*play|patrone|cartridge/i.test(`${item.name ?? ""} ${item.variant ?? ""}`))) throw Error("PRODUCT_FORM_UNAVAILABLE");
     const [option] = normalizePublicCheckoutPricingOptions([item], catalog);
     const [physical] = resolveTrustedColdShippingItems([item], catalog);
     const fixedKit = family.length > 0 && physical.isNasalDiySet === true && !option.isNasalDiySet;

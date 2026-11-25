@@ -27,6 +27,18 @@ test('valid canonical and exact-SKU DIY accepts legacy dual flag; +7 once, unpre
     assert.equal(reconcileFreeBacWaterForShopOrder([{...physical,price:62}],catalog).length,1);
   }
 });
+test('all six former nasal families expose only vial and DIY, no cartridge option or silent conversion', () => {
+  for (const id of ['semax','selank','adamax','oxytocin','pt-141','kisspeptin-10']) {
+    const selected=row(99,id.toUpperCase()+'-10MG',id+' (10 mg)',id);
+    const rows=[selected,catalog[2]];
+    const request={...item(selected.sku),isPlugPlay:true};
+    assert.throws(()=>assertNewNasalSale([request],rows),/PRODUCT_FORM_UNAVAILABLE/);
+    assert.throws(()=>assertNewNasalSale([item(selected.sku,{variant:'Plug&Play Patrone'})],rows),/PRODUCT_FORM_UNAVAILABLE/);
+    assert.equal(normalizePublicCheckoutPricingOptions([request],rows)[0].isPlugPlay,false);
+    assert(!screenshotCatalogProjection(rows).some(offer=>offer.form==='plug_play'));
+    assert.doesNotThrow(()=>assertNewNasalSale([item(selected.sku,{isNasalDiySet:true,isNasalSpray:true})],rows));
+  }
+});
 test('ordinary vials retain established 3ml entitlement and no included 10ml/bottle', () => {
   const raw=item('semax',{price:55});assert.doesNotThrow(()=>assertNewNasalSale([raw],catalog));
   const gifts=reconcileFreeBacWaterForShopOrder([raw],catalog);assert.equal(gifts.length,2);assert.equal(gifts[1].shopProductId,'bac-wasser-3ml');
