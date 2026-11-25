@@ -65,7 +65,7 @@ test('alias catalog is exact by mg/form; drafts and ambiguous duplicate inventor
  assert.equal((await caller().catalog({query:'Tirze',form:'nasal'})).candidates.length,0); // No BAC inventory fixture yet.
  assert.equal((await caller().catalog({query:'Reta',strength:'20 mg'})).candidates.length,0);
  await assert.rejects(caller().quote(request({items:[{sku:'DRAFT-10MG',quantity:1}]})),conflict);
- await assert.rejects(caller().quote(request({items:[{sku:'NASAL-10MG',quantity:1}]})),rejected('EXACT_PUBLISHED_SKU_REQUIRED')); // Missing tracked BAC component, not a form ban.
+ await assert.rejects(caller().quote(request({items:[{sku:'NASAL-10MG',quantity:1}]})),rejected('EXACT_PUBLISHED_SKU_REQUIRED')); // Ready nasal sales are disabled, not converted.
  const rows=[{id:1,sku:'DUP',name:'Dup (10 mg)',isActive:1,shopVisible:1,publishedAt:new Date(),sellingPrice:'10',salePrice:null,stock:10,category:'Vials',variants:[],shopProductId:'dup'},{id:2,sku:'dup',name:'Dup (10 mg)',isActive:1,shopVisible:1,publishedAt:new Date(),sellingPrice:'10',salePrice:null,stock:10,category:'Vials',variants:[],shopProductId:'dup'}];assert.equal(service.screenshotCatalogProjection(rows).length,0);
 });
 test('quote does not allocate sequences, customers, orders, stock, receipt, tasks or audit; supports canonical cents/manual caps',async()=>{
@@ -299,21 +299,21 @@ test('P&P option is +15 once; ready actual cartridge no double addon, mandatory 
 });
 test('all forms have actual stock and one summed deduction, transparent components, no cosmetic/P&P BAC, receipt replay/restock',async()=>{
  await fullCatalogFixture();
- const r=request({items:[{sku:'TRIPLE-10MG',quantity:1,form:'vial'},{sku:'TRIPLE-10MG',quantity:2,form:'plug_play'},{sku:'NASAL-10MG',quantity:1},{sku:'SEMAX-10MG',quantity:2,form:'nasal'},{sku:'SERUM',quantity:1},{sku:'NEEDLES',quantity:2},{sku:'BAC-10ML',quantity:1},{sku:'KIT-EXACT',quantity:1},{sku:'DIY-FIXED',quantity:1}]});
- const before=await stocks(),q=await caller().quote(r);assert.equal(q.preview.items.length,9);assert(!q.preview.items.some((i:any)=>i.isFreeGift));assert.equal(q.preview.items.find((i:any)=>i.sku==='SEMAX-10MG').price,29);assert.equal(q.preview.items.find((i:any)=>i.sku==='SEMAX-10MG').isNasalDiySet,true);assert.equal(q.preview.items.find((i:any)=>i.sku==='SERUM').type,'cosmetic');
+ const r=request({items:[{sku:'TRIPLE-10MG',quantity:1,form:'vial'},{sku:'TRIPLE-10MG',quantity:2,form:'plug_play'},{sku:'SEMAX-10MG',quantity:2,form:'nasal'},{sku:'SERUM',quantity:1},{sku:'NEEDLES',quantity:2},{sku:'BAC-10ML',quantity:1},{sku:'KIT-EXACT',quantity:1},{sku:'DIY-FIXED',quantity:1}]});
+ const before=await stocks(),q=await caller().quote(r);assert.equal(q.preview.items.length,8);assert(!q.preview.items.some((i:any)=>i.isFreeGift));assert.equal(q.preview.items.find((i:any)=>i.sku==='SEMAX-10MG').price,29);assert.equal(q.preview.items.find((i:any)=>i.sku==='SEMAX-10MG').isNasalDiySet,true);assert.equal(q.preview.items.find((i:any)=>i.sku==='SERUM').type,'cosmetic');
  const out=await caller().execute({quoteToken:q.quoteToken,confirmed:true});
- assert.deepEqual(await stockMoves(),{'TRIPLE-10MG':{change:-3,movements:1},'NASAL-10MG':{change:-1,movements:1},'SEMAX-10MG':{change:-2,movements:1},'SERUM':{change:-1,movements:1},'NEEDLES':{change:-2,movements:1},'BAC-10ML':{change:-4,movements:1},'KIT-EXACT':{change:-1,movements:1},'DIY-FIXED':{change:-1,movements:1}});
- const lines=(await pool.query('SELECT name,article_id,type,is_plug_play,is_nasal_diy_set FROM order_items WHERE order_id=$1',[out.orderId])).rows;assert.equal(lines.length,13);assert.equal(lines.filter(i=>i.name.includes('BAC Wasser')).length,3);assert(lines.filter(i=>i.name.includes('komplett')).every(i=>i.article_id));
+ assert.deepEqual(await stockMoves(),{'TRIPLE-10MG':{change:-3,movements:1},'SEMAX-10MG':{change:-2,movements:1},'SERUM':{change:-1,movements:1},'NEEDLES':{change:-2,movements:1},'BAC-10ML':{change:-3,movements:1},'KIT-EXACT':{change:-1,movements:1},'DIY-FIXED':{change:-1,movements:1}});
+ const lines=(await pool.query('SELECT name,article_id,type,is_plug_play,is_nasal_diy_set FROM order_items WHERE order_id=$1',[out.orderId])).rows;assert.equal(lines.length,11);assert.equal(lines.filter(i=>i.name.includes('BAC Wasser')).length,2);assert(lines.filter(i=>i.name.includes('komplett')).every(i=>i.article_id));
  assert(q.preview.includedComponents.length>0);assert.deepEqual(q.preview.includedComponents.map((i:any)=>i.name).sort(),lines.filter(i=>!q.preview.items.some((main:any)=>main.name===i.name)).map(i=>i.name).sort());assert(q.preview.includedComponents.every((i:any)=>i.price===0&&i.quantity>0));
- const after=await stocks();assert.equal((await caller().execute({quoteToken:q.quoteToken,confirmed:true})).orderId,out.orderId);assert.deepEqual(await stocks(),after);assert.equal(await count('stock_history'),8);
+ const after=await stocks();assert.equal((await caller().execute({quoteToken:q.quoteToken,confirmed:true})).orderId,out.orderId);assert.deepEqual(await stocks(),after);assert.equal(await count('stock_history'),7);
  const {getDb}=await import('./db.js');const db=await getDb();const {returnOrderStock}=await import('./orderStockReturnService.js');
- await db!.transaction(async(tx:any)=>{const o=(await tx.execute((await import('drizzle-orm')).sql`SELECT * FROM orders WHERE order_id=${out.orderId} FOR UPDATE`)).rows[0];await returnOrderStock(tx,{...o,orderId:o.order_id,shippedAt:o.shipped_at,deliveredAt:o.delivered_at},'Synthetic regression','fixture');});assert.deepEqual(await stocks(),before);assert.equal(await count('stock_history'),16);
+ await db!.transaction(async(tx:any)=>{const o=(await tx.execute((await import('drizzle-orm')).sql`SELECT * FROM orders WHERE order_id=${out.orderId} FOR UPDATE`)).rows[0];await returnOrderStock(tx,{...o,orderId:o.order_id,shippedAt:o.shipped_at,deliveredAt:o.delivered_at},'Synthetic regression','fixture');});assert.deepEqual(await stocks(),before);assert.equal(await count('stock_history'),14);
 });
 test('catalog availability omits stockouts and invalid component references; mixed same-SKU and shared-component demand rejects before writes',async()=>{
  await fullCatalogFixture();await pool.query("UPDATE articles SET stock=0 WHERE sku='NEEDLES'");assert.equal((await caller().catalog({query:'NEEDLES'})).candidates.length,0);
  await assert.rejects(caller().quote(request({items:[{sku:'NEEDLES',quantity:1}]})),rejected('STOCK_UNAVAILABLE'));
  await assert.rejects(caller().quote(request({items:[{sku:'TRIPLE-10MG',quantity:12,form:'vial'},{sku:'TRIPLE-10MG',quantity:9,form:'plug_play'}]})),rejected('STOCK_UNAVAILABLE'));
- await assert.rejects(caller().quote(request({items:[{sku:'NASAL-10MG',quantity:4},{sku:'SEMAX-10MG',quantity:5,form:'nasal'}]})),rejected('STOCK_UNAVAILABLE'));
+ await assert.rejects(caller().quote(request({items:[{sku:'BAC-10ML',quantity:4},{sku:'SEMAX-10MG',quantity:5,form:'nasal'}]})),rejected('STOCK_UNAVAILABLE'));
  await assert.rejects(caller().quote(request({items:[{sku:'TRIPLE-10MG',quantity:1},{sku:'TRIPLE-10MG',quantity:1,form:'vial'}]})),rejected('DUPLICATE_SELECTION'));
  await pool.query("UPDATE articles SET stock=0 WHERE sku='BAC-10ML'");assert.equal((await caller().catalog({query:'Semax',form:'nasal'})).candidates.length,0);assert.equal((await caller().catalog({query:'NASAL-10MG'})).candidates.length,0);assert.equal((await caller().catalog({query:'Semax',form:'vial'})).candidates.length,1);
  await pool.query("INSERT INTO articles(sku,name,shop_product_id,stock,is_active) VALUES('BAC-DUP','Ambiguous BAC','bac-wasser',99,0)");assert.equal((await caller().catalog({query:'Semax',form:'nasal'})).candidates.length,0);assert.equal(await count('orders'),0);assert.equal(await count('stock_history'),0);assert.equal(await count('priority_checkout_receipts'),0);
@@ -381,4 +381,50 @@ test('unknown inventory is other, accessories cannot trigger false nasal/Plug&Pl
  assert.deepEqual(service.screenshotCatalogProjection([base]).map((c:any)=>[c.form,c.type]),[['other','other']]);
  const accessory={...base,sku:'EMPTY',name:'Leere Plug&Play Patrone Nasensprayflasche',shopProductId:'empty',category:'Zubehör'};const c=service.screenshotCatalogProjection([accessory]);assert.equal(c.length,1);assert.equal(c[0].form,'other');assert.equal(c[0].mandatoryCold,false);assert.equal(c[0].isPlugPlay,false);assert.equal(c[0].isNasalSpray,false);
  const conflicting={...base,sku:'BEAUTY',name:'Retinal cosmetic',category:'Vials',categories:['369 BeautyLine']};assert.deepEqual(service.screenshotCatalogProjection([conflicting]).map((c:any)=>[c.form,c.type]),[['other','cosmetic']]);
+});
+
+// New-sale policy regressions share ONLY this dedicated Unix PostgreSQL fixture.
+test('new public products/detail/availability hide ready nasal but retain other forms and exact DIY stockDemands',async()=>{
+ await fullCatalogFixture();const {articleRouter}=await import('./articleRouter.js');const publicArticles=articleRouter.createCaller(ctx(null) as any);
+ const before=await stocks(),products=await publicArticles.shopProducts();assert(!products.some((p:any)=>p.id==='nasal'));for(const id of ['semax','ready-cartridge','serum','pen-nadeln-10er','fixed-diy'])assert(products.some((p:any)=>p.id===id));
+ assert.equal(await publicArticles.shopArticle({shopProductId:'nasal'}),null);assert(await publicArticles.shopArticle({shopProductId:'semax'}));
+ const availability=await publicArticles.shopAvailability();assert(!availability.some((a:any)=>a.shopProductId==='nasal'));
+ const semax=availability.find((a:any)=>a.inventorySku==='SEMAX-10MG')!;assert.equal(semax.stock,7);assert.deepEqual(semax.nasalDiySet,{eligible:true,inStock:true,stock:7,surcharge:7,stockDemands:[{sku:'SEMAX-10MG',quantity:1,stock:7},{sku:'BAC-10ML',quantity:1,stock:8}]});assert.deepEqual(await stocks(),before);
+ await pool.query("UPDATE articles SET stock=0 WHERE sku='BAC-10ML'");const unavailable=(await publicArticles.shopAvailability()).find((a:any)=>a.inventorySku==='SEMAX-10MG')!;assert.equal(unavailable.inStock,true);assert.equal(unavailable.nasalDiySet?.inStock,false);assert.equal(unavailable.nasalDiySet?.stock,0);
+ assert.equal((await caller().catalog({form:'nasal'})).candidates.some((c:any)=>c.sku==='NASAL-10MG'),false);
+});
+const manualInput=(items:any[])=>({...request(),draftId:undefined,customerConfirmed:undefined,orderSource:'wawi_manual',sendOrderConfirmation:false,items,subtotal:items.reduce((sum,i)=>sum+i.price*i.quantity,0),discount:0,discountCode:null,shipping:15,shippingCountry:'eu',total:items.reduce((sum,i)=>sum+i.price*i.quantity,0)+15,paymentMethod:'wise',date:'2026-11-25'});
+const manualLine=(sku:string,quantity:number,extra:any={})=>({name:sku==='SEMAX-10MG'?'Semax':'BAC Wasser',dosage:sku==='SEMAX-10MG'?'10 mg':'10 ml',shopProductId:sku,quantity,price:sku==='SEMAX-10MG'?42.5:9,type:sku==='SEMAX-10MG'?'peptide':'accessory',...extra});
+test('direct shop and manual create reject ready raw requests before writes, no silent vial/DIY conversion',async()=>{
+ await fullCatalogFixture();const {orderRouter}=await import('./orderRouter.js');const before=await counts();
+ for(const user of [actor,null])for(const line of [manualLine('SEMAX-10MG',1,{isNasalSpray:true}),manualLine('NASAL-10MG',1,{name:'Vial',isNasalSpray:false,isNasalDiySet:true}),manualLine('SEMAX-10MG',1,{variant:'Bundle: ready Nasenspray'})]){
+  await assert.rejects(orderRouter.createCaller(ctx(user) as any).create({...manualInput([line]),orderSource:user?'wawi_manual':'shop'} as any),/READY_NASAL_SALE_DISABLED/);assert.deepEqual(await counts(),before);
+ }
+});
+test('manual exact-SKU dual flag DIY preserves confirmed price and sums shared BAC plus paid BAC once',async()=>{
+ await fullCatalogFixture();const {orderRouter}=await import('./orderRouter.js');const before=await stocks();const items=[manualLine('SEMAX-10MG',2,{isNasalSpray:true,isNasalDiySet:true}),manualLine('SEMAX-10MG',1,{isNasalSpray:true,isNasalDiySet:true}),manualLine('BAC-10ML',1)];
+ const out=await orderRouter.createCaller(ctx() as any).create(manualInput(items) as any);assert('orderId' in out);const lines=(await pool.query('SELECT * FROM order_items WHERE order_id=$1',[out.orderId])).rows;
+ assert.deepEqual(lines.filter(l=>l.type==='peptide').map(l=>[l.price,l.is_nasal_spray,l.is_nasal_diy_set]),[['42.50',true,true],['42.50',true,true]]);assert.equal(lines.filter(l=>l.name.includes('DIY Nasenspray-Set')).length,6);assert(!lines.some(l=>l.name==='BAC Wasser 10ml (GRATIS)'));
+ assert.equal((await stocks())['SEMAX-10MG'],before['SEMAX-10MG']-3);assert.equal((await stocks())['BAC-10ML'],before['BAC-10ML']-4);assert.deepEqual((await stockMoves())['BAC-10ML'],{change:-4,movements:1});
+});
+test('manual shared DIY plus paid BAC stockout and malformed component reject without booking',async()=>{
+ await fullCatalogFixture();const {orderRouter}=await import('./orderRouter.js');
+ const input=manualInput([manualLine('SEMAX-10MG',5,{isNasalSpray:true,isNasalDiySet:true}),manualLine('BAC-10ML',4)]);let before=await counts();await assert.rejects(orderRouter.createCaller(ctx() as any).create(input as any),/ORDER_STOCK_DEMAND_NOT_COVERED/);assert.deepEqual(await counts(),before);
+ await pool.query("UPDATE articles SET name='BAC Wasser 3 ml',sku='BAC-3ML' WHERE sku='BAC-10ML'");before=await counts();await assert.rejects(orderRouter.createCaller(ctx() as any).create(manualInput([manualLine('SEMAX-10MG',1,{isNasalDiySet:true,isNasalSpray:true})]) as any),/COMPONENT_INVENTORY_UNAVAILABLE/);assert.deepEqual(await counts(),before);
+});
+test('historical ready order contents/prices/flags remain unchanged and actual movement return still works',async()=>{
+ await fullCatalogFixture();await pool.query("INSERT INTO orders(order_id,first_name,last_name,email,phone,street,house_number,zip,city,country,subtotal,discount,shipping,shipping_country,total,payment_method,order_date,status) VALUES('HISTORIC-READY','Test','Person','old@example.test','+4915112345678','Test','1','1010','Wien','AT',115,0,22,'eu',137,'wise','2026-01-01','offen')");
+ await pool.query("INSERT INTO order_items(order_id,name,dosage,variant,type,price,quantity,is_nasal_spray,is_nasal_diy_set,article_id) SELECT 'HISTORIC-READY','Ready Nasenspray','10 mg','original','peptide',115,1,true,false,id FROM articles WHERE sku='NASAL-10MG'");
+ const before=(await pool.query("SELECT * FROM order_items WHERE order_id='HISTORIC-READY'")).rows;const {getDb}=await import('./db.js');const db=await getDb();const {applyStockMovement}=await import('./stockMovementService.js');const {returnOrderStock}=await import('./orderStockReturnService.js');const {sql}=await import('drizzle-orm');
+ const a=(await pool.query("SELECT * FROM articles WHERE sku='NASAL-10MG'")).rows[0];await db!.transaction(async(tx:any)=>applyStockMovement(tx,{articleId:a.id,sku:a.sku,expectedStock:a.stock,change:-1,type:'verkauf',reason:'Synthetic historical fixture',orderId:'HISTORIC-READY',actor:'fixture'}));
+ await caller().catalog({form:'nasal'});await (await import('./articleRouter.js')).articleRouter.createCaller(ctx(null) as any).shopProducts();assert.deepEqual((await pool.query("SELECT * FROM order_items WHERE order_id='HISTORIC-READY'")).rows,before);
+ await db!.transaction(async(tx:any)=>{const o=(await tx.execute(sql`SELECT * FROM orders WHERE order_id='HISTORIC-READY' FOR UPDATE`)).rows[0];await returnOrderStock(tx,{...o,orderId:o.order_id,shippedAt:o.shipped_at,deliveredAt:o.delivered_at},'Synthetic historical return','fixture');});assert.equal((await stocks())['NASAL-10MG'],a.stock);assert.deepEqual((await pool.query("SELECT * FROM order_items WHERE order_id='HISTORIC-READY'")).rows,before);
+});
+
+test('public read-only checkout preview uses authoritative sale+existing DIY surcharge, mixed vial keeps only 3ml gift',async()=>{
+ await fullCatalogFixture();await pool.query("UPDATE articles SET selling_price=55,sale_price=50 WHERE sku='SEMAX-10MG'");const {orderRouter}=await import('./orderRouter.js');const {withReadOnlyDatabase}=await import('./db.js');const before=await counts();
+ const lines=[manualLine('SEMAX-10MG',2,{price:1,isNasalSpray:true,isNasalDiySet:true}),{name:'Vial',shopProductId:'TRIPLE-10MG',dosage:'10 mg',quantity:1,price:1,type:'peptide'}];
+ const input={...manualInput(lines),orderSource:'shop'};const out=await withReadOnlyDatabase(()=>orderRouter.createCaller({...ctx(null),operationsPreview:{}} as any).create(input as any));assert('operationsPreview' in out);assert.equal(out.operationsPreview.items.find((i:any)=>i.shopProductId==='SEMAX-10MG')!.price,57);assert.equal(out.operationsPreview.subtotal,139.55);assert(!out.operationsPreview.items.some((i:any)=>i.shopProductId==='bac-wasser-3ml'));assert.deepEqual(await counts(),before);
+ await pool.query("UPDATE articles SET selling_price=55,variants='[{\"label\":\"10 mg\",\"sku\":\"TRIPLE-10MG\",\"inventoryArticleId\":1,\"price\":55}]' WHERE sku='TRIPLE-10MG'");
+ const mixed=await withReadOnlyDatabase(()=>orderRouter.createCaller({...ctx(null),operationsPreview:{}} as any).create(input as any));assert('operationsPreview' in mixed);assert.equal(mixed.operationsPreview.items.filter((i:any)=>i.shopProductId==='bac-wasser-3ml').length,1);assert.equal(mixed.operationsPreview.items.find((i:any)=>i.shopProductId==='bac-wasser-3ml')!.quantity,1);assert.deepEqual(await counts(),before);
 });

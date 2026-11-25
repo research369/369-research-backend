@@ -11,6 +11,7 @@ import { articles, stockHistory, orderItems, orders, articleTranslations, articl
 import { isBillableOrderItem, isCompletedCommercialOrder } from "./commercialOrderMetrics.js";
 import { getPublicSingleBlendComposition } from "./singleBlendComposition.js";
 import { isProductDraftArticle } from "./productDraft.js";
+import { isReadyNasalArticle, nasalDiySetAvailability } from "./nasalSalesPolicy.js";
 
 type PublicShopVariant = {
   dosage: string;
@@ -173,9 +174,12 @@ export function getPublicShopVariants(
     shopProductId?: string | null;
     description?: unknown;
     variants: unknown;
+    category?: string | null;
+    categories?: unknown;
   },
-  inventoryArticles: Array<{ id: number; sku: string; stock: number; shopProductId: string | null }> = [],
+  inventoryArticles: Array<{ id: number; sku: string; stock: number; shopProductId: string | null; name?: string; category?: string | null; categories?: unknown }> = [],
 ): PublicShopVariant[] {
+  if (isReadyNasalArticle({ ...article, shopProductId: article.shopProductId ?? null })) return [];
   // The new blend never falls back to inferred name/SKU amounts or missing
   // inventory links. Legacy products retain their existing mapping below.
   if (article.shopProductId === "somatide" && !getPublicSingleBlendComposition(article, inventoryArticles)) return [];
@@ -200,6 +204,7 @@ export function getPublicShopVariants(
       ? inventoryArticles.find(candidate => candidate.id === configuredInventoryArticleId
         && candidate.shopProductId === article.shopProductId)
       : undefined;
+    if (inventoryArticle?.name && isReadyNasalArticle({ ...inventoryArticle, name: inventoryArticle.name })) return [];
     if (finalized && ((raw as Record<string, unknown>).publicationStatus !== "finalized-draft"
       || !Number.isFinite(rawPrice) || rawPrice <= 0 || !inventoryArticle
       || inventoryArticle.sku !== variant.sku)) return [];
@@ -306,6 +311,8 @@ export const articleRouter = router({
       variants: articles.variants,
       isActive: articles.isActive,
       shopVisible: articles.shopVisible,
+      category: articles.category,
+      categories: articles.categories,
     }).from(articles);
 
     // Jede Variantenfamilie hat genau eine kanonische öffentliche Quelle.
@@ -321,7 +328,7 @@ export const articleRouter = router({
       a.shopProductId &&
       a.shopProductId.trim() !== "" &&
       a.isActive !== 0 &&
-      a.shopVisible !== 0
+      a.shopVisible !== 0 && !isReadyNasalArticle(a)
     );
     const groups = new Map<string, typeof visibleLinked>();
     for (const article of visibleLinked) {
@@ -343,6 +350,7 @@ export const articleRouter = router({
           stock: variant.stock,
           name: `${canonical.name} (${variant.dosage})`,
           inventorySku: variant.sku,
+          ...nasalDiySetAvailability(variant.sku, allArticles),
         }));
       }
 
@@ -357,6 +365,7 @@ export const articleRouter = router({
             stock: article.stock ?? 0,
             name: article.name,
             inventorySku: article.sku,
+            ...nasalDiySetAvailability(article.sku, allArticles),
           }];
         }
         return variants.map(variant => ({
@@ -365,6 +374,7 @@ export const articleRouter = router({
           stock: variant.stock,
             name: `${article.name} (${variant.dosage})`,
             inventorySku: variant.sku,
+            ...nasalDiySetAvailability(variant.sku, allArticles),
           }));
       });
     });
@@ -917,11 +927,15 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
       sku: articles.sku,
       stock: articles.stock,
       shopProductId: articles.shopProductId,
+      name: articles.name,
+      category: articles.category,
+      categories: articles.categories,
     }).from(articles);
 
     // Group by shopProductId to aggregate variants
     const productMap = new Map<string, any>();
     for (const a of allArticles) {
+      if (isReadyNasalArticle(a)) continue;
       const pid = a.shopProductId;
       if (!pid) continue;
       const price = a.sellingPrice ? parseFloat(a.sellingPrice) : 0;
@@ -984,7 +998,7 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
       if (!db) return null;
       const allArticles = await db.select().from(articles)
         .where(eq(articles.shopProductId, input.shopProductId));
-      const visible = allArticles.filter(a => a.shopVisible === 1 && a.isActive === 1);
+      const visible = allArticles.filter(a => a.shopVisible === 1 && a.isActive === 1 && !isReadyNasalArticle(a));
       if (visible.length === 0) return null;
       const first = visible[0];
       const byDosage = new Map<string, PublicShopVariant>();

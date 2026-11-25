@@ -3,12 +3,14 @@ import {resolveSubstitution,extractDosageMg,isSubstitutionEligible} from './subs
 import {calculateAutomaticGlobalDiscount,calculatePromoDiscount,calculateAuthoritativeShipping,resolveAuthoritativeItemPrice,resolveShippingRegion,roundMoney} from './kwkCheckoutPricing.js';
 import {parseGlobalAutomaticDiscountConfig,getActiveGlobalAutomaticDiscount,resolveGlobalAutomaticDiscountBenefits} from './globalAutomaticDiscountConfig.js';
 import {projectDiscountRules} from './guardianDiscounts.js';
+import {isReadyNasalArticle} from './nasalSalesPolicy.js';
 export type OfferArticle={id:number;name:string;sku:string;shop_product_id:string|null;selling_price:string|null;sale_price:string|null;stock:number;category?:string|null;is_active:number;shop_visible:number;variants:unknown};
 const norm=(s:unknown)=>String(s??'').toLowerCase().replace(/retatrutid[e]?|r3ta|\breta\b/g,'3g').replace(/[^a-z0-9äöüß]+/g,' ').trim();
 const number=(v:unknown)=>v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v))?Number(v):null;
 export function projectOffers(articles:OfferArticle[],promos:any[],globalValue:string|null,input:{search:string;dosage?:string;quantity:number;country:string;promotion?:{mode:'none'}|{mode:'explicit_code';code:string}|{mode:'bot_approved'}},now:Date,substitutionEnabled=false){
   const words=norm(input.search).split(' ').filter(w=>w.length>1&&!/^\d+$|^(mg|mcg|iu|ml)$/.test(w)&&!['was','kostet','das','denn','ich','möchte','bestellen','preis','für','und','mit','haben','sie','ihr','bitte','wie','ist','der','die','ein','eine','von','auf','hallo','hi','mir'].includes(w));
-  const parents=articles.filter(a=>a.is_active===1&&a.shop_visible===1).map(a=>({a,score:words.reduce((n,w)=>n+(norm(a.name+' '+a.sku+' '+a.shop_product_id).split(' ').includes(w)?1:0),0)})).filter(x=>x.score>0).sort((a,b)=>b.score-a.score);
+  const ready=(a:OfferArticle)=>isReadyNasalArticle({sku:a.sku,name:a.name,shopProductId:a.shop_product_id,category:a.category});
+  const parents=articles.filter(a=>a.is_active===1&&a.shop_visible===1&&!ready(a)).map(a=>({a,score:words.reduce((n,w)=>n+(norm(a.name+' '+a.sku+' '+a.shop_product_id).split(' ').includes(w)?1:0),0)})).filter(x=>x.score>0).sort((a,b)=>b.score-a.score);
   const top=parents[0]?.score??0;const selected=parents.filter(x=>x.score===top).slice(0,2);
   const catalog=articles.map(a=>({sku:a.sku,name:a.name,shopProductId:a.shop_product_id,sellingPrice:a.selling_price,salePrice:a.sale_price,variants:a.variants,isActive:a.is_active,shopVisible:a.shop_visible}));
   const selectedCode=input.promotion?.mode==='explicit_code'?input.promotion.code.trim().toUpperCase():null;
@@ -32,6 +34,7 @@ export function projectOffers(articles:OfferArticle[],promos:any[],globalValue:s
         if(candidates.length===1)inventory=candidates[0];
       }
       if(!inventory&&configured.length===1&&!Array.isArray(a.variants))inventory=a;
+      if(inventory&&ready(inventory))continue;
       // Ohne eindeutige operative Lagerzeile keine Verfügbarkeitsbehauptung.
       const stock=inventory&&Number.isFinite(Number(inventory.stock))?Math.max(0,Number(inventory.stock)):null;
       const configuredPrice=number(v.price),inventoryPrice=number(inventory?.selling_price),sale=number(a.sale_price);

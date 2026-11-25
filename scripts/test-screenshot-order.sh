@@ -19,4 +19,5 @@ trap cleanup EXIT
 ./node_modules/.bin/tsx scripts/export-ledger-test-schema.ts "$TEST_ROOT/schema.sql"
 "$PG_BIN/psql" -h "$TEST_ROOT/socket" -p 55464 -U screenshot_local -d screenshot_local -v ON_ERROR_STOP=1 -f "$TEST_ROOT/schema.sql" >/dev/null
 export SCREENSHOT_TEST_PG_SOCKET="$TEST_ROOT/socket"
+./node_modules/.bin/tsx --test server/nasalSalesPolicy.test.ts
 ./node_modules/.bin/tsx --test server/screenshotOrderContract.test.ts server/screenshotOrderService.test.ts

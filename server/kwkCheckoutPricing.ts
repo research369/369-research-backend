@@ -1,4 +1,5 @@
 import { KWK_DISCOUNT_PERCENT } from "./kwkService.js";
+import { NASAL_DIY_SET_SURCHARGE } from "./nasalDiySetConfig.js";
 
 export type KwkCheckoutItem = {
   shopProductId?: string;
@@ -104,7 +105,7 @@ export function resolveAuthoritativeItemPrice(
       || typeof selected.sku !== "string" || !selected.sku || selected.hidden === true
       || !Number.isFinite(selected.price) || Number(selected.price) <= 0)
       throw new Error(`KWK_ENTWURFSVARIANTE_NICHT_FREIGEGEBEN: ${item.shopProductId}`);
-    return roundMoney(Number(selected.price) + (item.isPlugPlay ? 15 : 0) + (item.isNasalDiySet ? 7 : 0));
+    return roundMoney(Number(selected.price) + (item.isPlugPlay ? 15 : 0) + (item.isNasalDiySet ? NASAL_DIY_SET_SURCHARGE : 0));
   }
   // Explicit open-price draft rows (direct SKU lookup too) never become free
   // through Number(null). Actual free gifts returned above remain unchanged.
@@ -132,7 +133,7 @@ export function resolveAuthoritativeItemPrice(
     throw new Error(`KWK_ARTIKELPREIS_NICHT_ERMITTELBAR: ${item.shopProductId}`);
   }
 
-  const optionSurcharge = (item.isPlugPlay ? 15 : 0) + (item.isNasalDiySet ? 7 : 0);
+  const optionSurcharge = (item.isPlugPlay ? 15 : 0) + (item.isNasalDiySet ? NASAL_DIY_SET_SURCHARGE : 0);
   return roundMoney(basePrice + optionSurcharge);
 }
 

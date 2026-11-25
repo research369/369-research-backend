@@ -256,6 +256,8 @@ export function screenshotSafeError(error:unknown):never{
     PRODUCT_FORM_UNAVAILABLE:'Diese Aufbereitung ist für den gewählten Lagerartikel nicht freigegeben. Bitte die aktuelle Katalogauswahl verwenden.',
     DUPLICATE_SELECTION:'Dieser Artikel mit derselben Produktform ist bereits ausgewählt. Bitte die Menge anpassen.',
     COMPONENT_INVENTORY_UNAVAILABLE:'Ein erforderlicher Bestandsteil ist nicht eindeutig verfügbar. Bitte die aktuelle Katalogauswahl prüfen.',
+    READY_NASAL_SALE_DISABLED:'Fertig gemischte Nasensprays sind nicht mehr verfügbar. Bitte Vial oder ungemischtes DIY-Set neu auswählen.',
+    NASAL_DIY_OPTION_UNAVAILABLE:'Das ungemischte DIY-Set ist für diesen Artikel nicht freigegeben. Bitte die aktuelle Auswahl prüfen.',
     KUEHLVERSAND_INSEL_AUSGESCHLOSSEN:'Gekühlter Versand und kühlpflichtige Artikel sind an dieser Inseladresse nicht möglich.',
     KUEHLVERSAND_ZIEL_UNGEKLAERT:'Für diese Lieferadresse konnte gekühlter Versand nicht sicher freigegeben werden.',
     COMPONENT_FORM_REQUIRES_WAWI:'Diese Produktform benötigt den normalen manuellen WaWi-Bestellweg. Bitte dort bestellen; andere Artikel sind hier weiterhin möglich.',

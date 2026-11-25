@@ -35,7 +35,8 @@ import { isKwkEnabled, hashAddress, calculateKwkCommission, calculateKwkCommissi
 import { partners } from "../drizzle/schema.js";
 import { sql } from "drizzle-orm";
 import { queueCustomerDuplicateReview } from "./customerIntegrityService.js";
-import { NASAL_DIY_SET_COMPONENTS, isNasalDiySetEligible } from "./nasalDiySetConfig.js";
+import { NASAL_DIY_SET_COMPONENTS } from "./nasalDiySetConfig.js";
+import { assertNewNasalSale, resolveNasalBacComponent } from "./nasalSalesPolicy.js";
 import { persistAddressValidation, validateGermanAddress } from "./addressValidationService.js";
 import {
   bookPaidPartnerCommission,
@@ -188,7 +189,7 @@ const createOrderSchema = z.object({
     quantity: z.number().int().positive(),
     type: z.string(),
     shopProductId: z.string().optional(), // product id from shop (e.g. '3g-triple-g')
-    isNasalSpray: z.boolean().optional(), // Legacy: fertig gemischtes Nasenspray
+    isNasalSpray: z.boolean().optional(), // Legacy flag; new sales require validated unprepared DIY
     // DIY-Set: Vial plus BAC Wasser, Flasche, Aufziehspritze und Kanüle (+7 €).
     isNasalDiySet: z.boolean().optional(),
     isPlugPlay: z.boolean().optional(),   // Plug&Play Patrone (+15€ Aufpreis)
@@ -469,7 +470,18 @@ export const orderRouter = router({
       const coldShippingCatalog = await db.select({
         sku: articles.sku, shopProductId: articles.shopProductId, name: articles.name,
         category: articles.category, categories: articles.categories, shopVisible: articles.shopVisible, isActive: articles.isActive,
+        id: articles.id, stock: articles.stock,
       }).from(articles);
+      // Raw ready selections must never be silently normalized into ordinary vials.
+      // This new-sale guard also applies to authenticated/manual callers.
+      assertNewNasalSale(input.items, coldShippingCatalog);
+      const requestedNasalOptions = normalizePublicCheckoutPricingOptions(input.items, coldShippingCatalog).filter(i => i.isNasalDiySet);
+      if (requestedNasalOptions.length && !ctx.screenshotOrder) {
+        const bac = resolveNasalBacComponent(coldShippingCatalog);
+        const paidBac = input.items.filter(i => !i.isFreeGift && [bac.sku, bac.shopProductId].some(ref => ref?.toLowerCase() === i.shopProductId?.toLowerCase()));
+        const demand = [...requestedNasalOptions, ...paidBac].reduce((sum, item) => sum + item.quantity, 0);
+        if (bac.stock < demand && !input.stockOverride) throw Error('ORDER_STOCK_DEMAND_NOT_COVERED');
+      }
       if (!isAuthenticatedWawiManualSale) {
         input.items = normalizePublicCheckoutPricingOptions(input.items, coldShippingCatalog);
       }
@@ -1342,6 +1354,7 @@ export const orderRouter = router({
             // ── Stock check: verify all peptide items are in stock before creating order ──
       if(ctx.jarvyOrder)await db.select({id:articles.id}).from(articles).where(inArray(articles.sku,input.items.map(i=>i.shopProductId!))).orderBy(articles.id).for('update');
       const allArticlesForCheck = await db.select().from(articles).where(eq(articles.isActive, 1));
+      assertNewNasalSale(input.items, allArticlesForCheck);
       if (ctx.screenshotOrder) {
         // validateInTransaction locked every price/eligibility/component dependency
         // before this point. Validate the COMPLETE sum before any stock write.
@@ -1485,12 +1498,12 @@ export const orderRouter = router({
 
       // DIY-Nasenspray-Set darf nur für die zentral freigegebenen Produkte bestellt werden.
       // Der Checkout kann die Bestands- oder Produktfreigabe nicht über Namen manipulieren.
-      const diyNasalItems = ctx.screenshotOrder ? [] : input.items.filter((item) => item.isNasalDiySet === true);
-      for (const item of diyNasalItems) {
-        if (!isNasalDiySetEligible(item.shopProductId)) {
-          throw new Error(`DIY-Nasenspray-Set ist für ${item.name} nicht verfügbar`);
-        }
-      }
+      // Exact variant SKUs resolve through the eligible family; fixed complete
+      // DIY inventory must not acquire a second component kit.
+      const diyNasalItems = ctx.screenshotOrder ? [] : normalizePublicCheckoutPricingOptions(input.items, allArticlesForCheck).filter(item => item.isNasalDiySet === true);
+      const diyBacArticle = diyNasalItems.length ? resolveNasalBacComponent(await db.select().from(articles)) : undefined;
+      const paidDiyBacItems = diyBacArticle ? input.items.filter(i => !i.isFreeGift && [diyBacArticle.sku, diyBacArticle.shopProductId].some(ref => ref?.toLowerCase() === i.shopProductId?.toLowerCase())) : [];
+      const diyBacDemand = [...diyNasalItems, ...paidDiyBacItems].reduce((sum, item) => sum + item.quantity, 0);
 
       // P4P receives an additional customer-facing reference only once the stock
       // check succeeded. It never replaces the canonical WaWi order ID.
@@ -1514,12 +1527,18 @@ export const orderRouter = router({
           if(sub?.possible)sub.components.forEach(c => plannedIds.add(c.articleId));
           else findMatchingArticles(item,allArticlesForCheck).forEach(a => plannedIds.add(a.id));
         }
-        if(item.isNasalSpray || item.isNasalDiySet) {
-          allArticlesForCheck.filter(a => a.shopProductId === 'bac-wasser' || NASAL_DIY_SET_COMPONENTS.some(c => c.inventoryTracked && a.shopProductId === c.articleShopProductId)).forEach(a => plannedIds.add(a.id));
-        }
+        if(diyBacArticle) plannedIds.add(diyBacArticle.id);
       });
       const lockedInventory=plannedIds.size ? await db.select().from(articles).where(inArray(articles.id,[...plannedIds].sort((a,b)=>a-b))).orderBy(articles.id).for('update') : [];
       lockedInventory.forEach(fresh => {const a=allArticlesForCheck.find(a=>a.id===fresh.id);if(a)a.stock=fresh.stock;});
+      // A concurrent catalogue edit cannot relabel the now-locked selected vial
+      // as ready/prepared between the initial guard and the stock write.
+      if (!ctx.screenshotOrder) assertNewNasalSale(input.items, await db.select().from(articles));
+      if (diyBacArticle) {
+        const fresh = resolveNasalBacComponent(await db.select().from(articles));
+        if (fresh.id !== diyBacArticle.id) throw Error('COMPONENT_INVENTORY_UNAVAILABLE');
+        if (fresh.stock < diyBacDemand && !stockOverrideAuthorized) throw Error('ORDER_STOCK_DEMAND_NOT_COVERED');
+      }
       // Dedicated screenshot aggregate: every physical row exactly once, all
       // billable forms/types and tracked native components, same stock journal.
       if (ctx.screenshotOrder) {
@@ -1532,7 +1551,7 @@ export const orderRouter = router({
       // Bei Substitution: Bestand der Ersatz-Varianten abziehen, nicht der bestellten Variante
       for (let itemIdx = 0; itemIdx < input.items.length; itemIdx++) {
         const item = input.items[itemIdx];
-        if (ctx.screenshotOrder || item.type !== 'peptide') continue;
+        if (ctx.screenshotOrder || item.type !== 'peptide' || paidDiyBacItems.includes(item)) continue;
 
         const sub = substitutionMap.get(itemIdx);
         if (sub && sub.possible) {
@@ -1562,6 +1581,14 @@ export const orderRouter = router({
           }
           if (remainingToDeduct > 0 && !stockOverrideAuthorized) throw Error('ORDER_STOCK_DEMAND_NOT_COVERED');
         }
+      }
+      // One summed BAC movement, including separately purchased BAC on DIY orders.
+      // All other legacy accessory/free-gift stock policies remain untouched.
+      if (diyBacArticle) {
+        const fresh = resolveNasalBacComponent(await db.select().from(articles));
+        const deduct = Math.min(diyBacDemand, fresh.stock);
+        if (deduct > 0) await applyStockMovement(db, { articleId: fresh.id, sku: fresh.sku, expectedStock: fresh.stock,
+          change: -deduct, type: 'verkauf', reason: `DIY-Nasenspray-Set/BAC für Bestellung ${orderId}`, orderId, actor: 'system' });
       }
 
       // ── Substitutions-Notiz in Bestellnotiz speichern (intern, für WaWi) ──
@@ -1702,10 +1729,8 @@ export const orderRouter = router({
           price: item.price.toFixed(2),
           quantity: item.quantity,
           ...(ctx.screenshotOrder ? {articleId: item.isFreeGift ? null : allArticlesForCheck.find(a=>a.sku===item.shopProductId)?.id ?? null} : {}),
-          // Nasenspray- und Plug&Play-Flag speichern (für WaWi-Anzeige)
-          isNasalSpray: ctx.screenshotOrder ? item.isNasalSpray === true : item.isNasalSpray === true ||
-            item.name.toLowerCase().includes('[nasenspray]') ||
-            item.name.toLowerCase().includes('nasenspray'),
+          // New-sale form flags never infer a ready spray from an accessory name.
+          isNasalSpray: item.isNasalSpray === true,
           isNasalDiySet: item.isNasalDiySet === true,
           isPlugPlay: ctx.screenshotOrder ? item.isPlugPlay === true : item.isPlugPlay === true ||
             item.name.toLowerCase().includes('[plug&play') ||
@@ -1723,44 +1748,8 @@ export const orderRouter = router({
         }
       }
 
-      // ── Nasenspray: automatisch BAC Wasser 10ml (0€) hinzufügen und Bestand abziehen ──
-      // Erkennung über isNasalSpray-Flag (primär) oder Name-Fallback (Legacy)
-      const nasalSprayCount = ctx.screenshotOrder ? 0 : input.items.filter(i =>
-        i.isNasalDiySet !== true && (
-          i.isNasalSpray === true ||
-          i.name.toLowerCase().includes('[nasenspray]') ||
-          i.name.toLowerCase().includes('nasenspray')
-        )
-      ).reduce((sum,i) => sum+i.quantity,0);
-      if (nasalSprayCount > 0) {
-        const [bacWasser10ml] = await db.select().from(articles)
-          .where(eq(articles.shopProductId, 'bac-wasser'))
-          .limit(1);
-        const bacArticleId = bacWasser10ml?.id ?? null;
-        // Als 0€-Position in die Bestellung einfügen
-        await db.insert(orderItems).values({
-          orderId: orderId,
-          name: 'BAC Wasser 10ml (GRATIS)',
-          dosage: null,
-          variant: '10ml',
-          type: 'accessory',
-          price: '0.00',
-          quantity: nasalSprayCount,
-          articleId: bacArticleId,
-        });
-        // Full stock demand or rollback; never silently commit partial component demand.
-        if ((!bacWasser10ml || (bacWasser10ml.stock ?? 0) < nasalSprayCount) && !stockOverrideAuthorized) throw Error('ORDER_STOCK_DEMAND_NOT_COVERED');
-        if (bacWasser10ml && (bacWasser10ml.stock ?? 0) > 0) {
-          const deduct = Math.min(nasalSprayCount, bacWasser10ml.stock ?? 0);
-          const newStock = (bacWasser10ml.stock ?? 0) - deduct;
-            await applyStockMovement(db,{articleId:bacWasser10ml.id,sku:bacWasser10ml.sku,expectedStock:bacWasser10ml.stock??0,change:-deduct,type:'verkauf',reason:`Automatischer Abzug: Nasenspray-Bestellung ${orderId}`,orderId,actor:'system'});
-
-          console.log(`[Orders] BAC Wasser 10ml Bestand abgezogen: ${bacWasser10ml.stock} → ${newStock} (${nasalSprayCount}x Nasenspray, order ${orderId})`);
-        } else {
-          console.warn(`[Orders] BAC Wasser 10ml nicht gefunden oder kein Bestand für Nasenspray-Bestellung ${orderId}`);
-        }
-      }
-
+      // New nasal sales are unprepared DIY only. No legacy name/flag can insert
+      // a ready spray's automatic 10 ml BAC line. Historical rows stay untouched.
       // ── DIY-Nasenspray-Set: enthaltene Komponenten als transparente Bestellpositionen ──
       // BAC Wasser 10 ml ist bestandsgeführt; die weiteren Komponenten sind sichtbar,
       // bis sie als eigene WaWi-Artikel mit SKU und Bestand angelegt werden.
@@ -1768,9 +1757,7 @@ export const orderRouter = router({
         for (const component of NASAL_DIY_SET_COMPONENTS) {
           let componentArticle: typeof articles.$inferSelect | undefined;
           if (component.inventoryTracked) {
-            [componentArticle] = await db.select().from(articles)
-              .where(eq(articles.shopProductId, component.articleShopProductId))
-              .limit(1);
+            componentArticle = resolveNasalBacComponent(await db.select().from(articles), component.articleShopProductId);
           }
           await db.insert(orderItems).values({
             orderId,
@@ -1784,13 +1771,7 @@ export const orderRouter = router({
             isNasalDiySet: true,
           });
 
-          if (component.inventoryTracked && (!componentArticle || (componentArticle.stock ?? 0) < item.quantity) && !stockOverrideAuthorized) throw Error('ORDER_STOCK_DEMAND_NOT_COVERED');
-          if (componentArticle && (componentArticle.stock ?? 0) > 0) {
-            const deduct = Math.min(item.quantity, componentArticle.stock ?? 0);
-            const newStock = (componentArticle.stock ?? 0) - deduct;
-            await applyStockMovement(db,{articleId:componentArticle.id,sku:componentArticle.sku,expectedStock:componentArticle.stock??0,change:-deduct,type:'verkauf',reason:`DIY-Nasenspray-Set für Bestellung ${orderId}`,orderId,actor:'system'});
-
-          }
+          // Tracked BAC demand was already summed, validated and booked once above.
         }
       }
 

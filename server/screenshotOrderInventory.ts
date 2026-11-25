@@ -3,12 +3,13 @@ import { resolveAuthoritativeItemPrice, requiresColdChainShipping, roundMoney } 
 import { NASAL_DIY_SET_COMPONENTS, NASAL_DIY_SET_ELIGIBLE_PRODUCT_IDS } from './nasalDiySetConfig.js';
 import { getPublicSingleBlendComposition } from './singleBlendComposition.js';
 import { screenshotHash, type ScreenshotForm } from './screenshotOrderContract.js';
+import { isReadyNasalArticle, resolveNasalBacComponent } from './nasalSalesPolicy.js';
 
 // This route never expands blends or kits by parsing their names. A published
 // inventory set is one physical SKU. Only the native tracked nasal kit/BAC
 // contract creates implicit components; fixed DIY inventory is already a kit.
 export const screenshotInventoryPolicy = {
-  version: 2,
+  version: 3,
   vialOnly: ['somatide', 'somatide-15mg'],
   includedVial: ['klow-stack', 'klow-stack-80mg'],
   nasalEligible: [...NASAL_DIY_SET_ELIGIBLE_PRODUCT_IDS].sort(),
@@ -49,25 +50,14 @@ function articleType(a: any, form: ScreenshotForm): ScreenshotCandidate['type'] 
   if (/zubehör|accessor|bac[\s-]*(wasser|water)|pen|patrone|cartridge|nadel|spritze|kanüle|flasche|etui|case/i.test(text)) return 'accessory';
   return 'other';
 }
-function trackedComponent(rows: any[], productId: string) {
-  // Exact native product reference, unique even when an inactive duplicate exists.
-  const choices = rows.filter(a => key(a.shopProductId) === key(productId));
-  if (choices.length !== 1 || choices[0].isActive !== 1 || !Number.isSafeInteger(choices[0].stock)) throw Error('COMPONENT_INVENTORY_UNAVAILABLE');
-  return choices[0];
-}
-function componentProjection(rows: any[], preparation: ScreenshotPreparation, fixedNasal: boolean) {
+function componentProjection(rows: any[], preparation: ScreenshotPreparation) {
   const demands: ScreenshotStockDemand[] = [], lines: ScreenshotComponentLine[] = [], ids: number[] = [];
   if (preparation === 'nasal_diy_option') {
     for (const component of NASAL_DIY_SET_COMPONENTS) {
-      const a = component.inventoryTracked ? trackedComponent(rows, component.articleShopProductId) : null;
+      const a = component.inventoryTracked ? resolveNasalBacComponent(rows, component.articleShopProductId) : null;
       if (a) { demands.push({ articleId: a.id, sku: a.sku, stock: a.stock, quantity: 1 }); ids.push(a.id); }
       lines.push({ name: component.name, variant: component.variant, quantity: 1, articleId: a?.id ?? null, isNasalDiySet: true });
     }
-  } else if (fixedNasal) {
-    // Preserve native ready-spray BAC requirement, without duplicating its movement.
-    const a = trackedComponent(rows, 'bac-wasser');
-    demands.push({ articleId: a.id, sku: a.sku, stock: a.stock, quantity: 1 }); ids.push(a.id);
-    lines.push({ name: 'BAC Wasser 10ml (GRATIS)', variant: '10ml', quantity: 1, articleId: a.id, isNasalDiySet: false });
   }
   return { demands, lines, ids };
 }
@@ -77,6 +67,7 @@ export function screenshotCatalogProjection(rows: any[]): ScreenshotCandidate[] 
   for (const a of rows) { const k = key(a.sku); if (seen.has(k)) duplicateSkus.add(k); seen.add(k); }
   const result = new Map<string, ScreenshotCandidate>(), ambiguous = new Set<string>();
   const published = rows.filter(a => a.isActive === 1 && a.shopVisible === 1 && a.publishedAt && Number(a.sellingPrice) > 0
+    && !isReadyNasalArticle(a)
     && !/\[draft\]|price[_ -]?open|open[_ -]?price/i.test([a.name, a.notes, JSON.stringify(a.description ?? {})].join(' '))
     && !(a.description as any)?.draftMeta
     && (a.shopProductId !== 'somatide' || getPublicSingleBlendComposition(a, rows)));
@@ -93,6 +84,7 @@ export function screenshotCatalogProjection(rows: any[]): ScreenshotCandidate[] 
       const a = choices[0];
       if (a.isActive !== 1 || duplicateSkus.has(key(a.sku)) || Number(a.sellingPrice) <= 0 || !Number.isSafeInteger(a.stock)) continue;
       if (v.sku && key(v.sku) !== key(a.sku)) continue;
+      if (isReadyNasalArticle(a)) continue;
       const defaultForm = physicalForm(a), type = articleType(a, defaultForm);
       const forms: { form: ScreenshotForm; preparation: ScreenshotPreparation }[] = [{ form: defaultForm, preparation: 'inventory' }];
       const vialOnly = [a.sku, a.shopProductId, parent.sku, parent.shopProductId].some(id => screenshotInventoryPolicy.vialOnly.includes(key(id)));
@@ -111,7 +103,7 @@ export function screenshotCatalogProjection(rows: any[]): ScreenshotCandidate[] 
           // Use the same resolver as the existing exact-SKU quote; ready cartridge
           // flags are shipping-only and never passed into pricing again.
           price = resolveAuthoritativeItemPrice(pricingItem, rows);
-          components = componentProjection(rows, selected.preparation, selected.preparation === 'inventory' && physical.isNasalSpray === true && physical.isNasalDiySet !== true);
+          components = componentProjection(rows, selected.preparation);
         } catch { continue; }
         if (!Number.isFinite(price) || price <= 0) continue;
         const stockDemands = [{ articleId: a.id, sku: a.sku, quantity: 1, stock: a.stock }, ...components.demands];
