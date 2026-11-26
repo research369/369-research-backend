@@ -41,6 +41,7 @@ import { ensurePartnerAddressRequestSchema } from "./partnerAddressRequestSchema
 import { ensurePartnerProgramSchema } from "./partnerProgramSchema.js";
 import { applyDanielShortPartnerCodeMigration } from "./partnerCodeReplacementMigration.js";
 import { ensureOrderRecipientCorrectionSchema, repairFinnPickupOrder } from "./orderRecipientCorrectionSchema.js";
+import { repairFinnCurrentShippingAddress } from "./finnCurrentShippingAddressRepair.js";
 import { ensurePartnerFinancialSchema, isPartnerFinancialSchemaReady } from "./partnerFinancialSchema.js";
 import { ensureFollowUpTermsSchema } from "./followUpTermsSchema.js";
 import { qrRedirectRouter } from "./qrRedirectRouter.js";
@@ -450,6 +451,14 @@ async function start() {
     await repairFinnPickupOrder();
   } catch {
     console.warn("[Server] Order recipient correction initialization or authorized repair not applied");
+  }
+
+  // Latest owner request: the CURRENT CRM recipient replaces stale pending shipping data.
+  // Separate from the earlier fixed pickup-only repair, with its own durable receipt.
+  try {
+    await repairFinnCurrentShippingAddress();
+  } catch {
+    console.warn("[Server] Current CRM shipping reconciliation not applied");
   }
 
   // Follow-up-Angebote erhalten vor dem Versand eigene, revisionssichere Konditionen.

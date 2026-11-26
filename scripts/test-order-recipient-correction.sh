@@ -21,4 +21,8 @@ trap cleanup EXIT
 ./node_modules/.bin/tsx scripts/export-ledger-test-schema.ts "$TEST_ROOT/schema.sql"
 "$PG_BIN/psql" -h "$TEST_ROOT/socket" -p 55467 -U recipient_local -d postgres -v ON_ERROR_STOP=1 -f "$TEST_ROOT/schema.sql" >/dev/null
 export RECIPIENT_CORRECTION_TEST_PG_SOCKET="$TEST_ROOT/socket"
-./node_modules/.bin/tsx --test server/orderRecipientCorrectionService.test.ts server/orderRecipientCorrectionService.postgres.test.ts
+TEST_FILES=(server/orderRecipientCorrectionService.test.ts server/orderRecipientCorrectionService.postgres.test.ts)
+if [[ -f server/customerShippingAutoSyncService.test.ts ]]; then
+  TEST_FILES+=(server/customerShippingAutoSyncService.test.ts)
+fi
+./node_modules/.bin/tsx --test "${TEST_FILES[@]}"

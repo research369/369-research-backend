@@ -62,7 +62,9 @@ export function canonicalRecipientFromCustomer(row: Row): RecipientAddress {
   const parts = clean(row.name).split(' ').filter(Boolean);
   const firstName = clean(field(row, 'first_name', 'firstName')) || parts[0] || '';
   const lastName = clean(field(row, 'last_name', 'lastName')) || parts.slice(1).join(' ');
-  const sourceStreet = clean(row.street);
+  const preferredType = clean(field(row, 'preferred_delivery_type', 'preferredDeliveryType'));
+  const implicitPickup = !clean(row.street) && clean(field(row, 'dhl_post_number', 'dhlPostNumber'));
+  const sourceStreet = clean(row.street) || (implicitPickup ? (preferredType === 'postfiliale' ? 'Postfiliale' : 'Packstation') : '');
   const stationPrefix = /^(packstation|postfiliale)\b/iu.exec(sourceStreet);
   const station = /^(packstation|postfiliale)(?:\s+(\d{1,5}))?$/iu.exec(sourceStreet);
   if (stationPrefix && !station) throw invalidAddress();
@@ -133,12 +135,6 @@ export async function assertRecipientOrderEditable(client: QueryClient, orderRow
   }
 }
 
-function assertSamePostalRoute(before: RecipientAddress, after: RecipientAddress): void {
-  const oldCountry = countryRoute(before.country);
-  if (!oldCountry || oldCountry !== countryRoute(after.country) || !postalRoute(before.zip) || postalRoute(before.zip) !== postalRoute(after.zip)) {
-    throw conflict('Land oder Postleitzahl der Kundenadresse weichen von der Bestellung ab. Die Versandroute und mögliche Versandkosten oder Kühl-/Inselzuschläge müssen manuell geprüft werden.');
-  }
-}
 function canonicalJson(value: any): string {
   if (Array.isArray(value)) return '[' + value.map(canonicalJson).join(',') + ']';
   if (value && typeof value === 'object') return '{' + Object.keys(value).sort().map(key => JSON.stringify(key) + ':' + canonicalJson(value[key])).join(',') + '}';
@@ -223,7 +219,6 @@ export async function previewCustomerOrderRecipient(orderId: string, actor: Reci
     const customer = await readCustomer(client, field(order, 'customer_id', 'customerId'), false);
     const before = orderRecipient(order);
     const after = canonicalRecipientFromCustomer(customer);
-    assertSamePostalRoute(before, after);
     const issuedAt = Date.now();
     const expiresAt = issuedAt + TTL_MS;
     const previewToken = sign({ domain: DOMAIN, version: 1, orderId, actorId: actor.id, actorName: actor.username,
@@ -264,7 +259,6 @@ export async function applyCustomerOrderRecipientCorrection(orderId: string, pre
     let after: RecipientAddress;
     try { after = canonicalRecipientFromCustomer(customer); } catch { throw conflict(); }
     if (customer.id !== envelope.customerId || binding(order, customer, before, after) !== envelope.bindingHash) throw conflict();
-    assertSamePostalRoute(before, after);
     verify(previewToken, orderId, actor, secret());
     const changed = canonicalJson(before) !== canonicalJson(after);
     if (changed) {

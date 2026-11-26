@@ -2,14 +2,21 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
 
-test('customer profile updates never backfill historical address/name/packstation fields', () => {
+test('customer profile updates delegate complete active shipping copies; historical snapshots are not directly backfilled', () => {
   const source = fs.readFileSync(new URL('./customerRouter.ts', import.meta.url), 'utf8');
-  const update = source.slice(source.indexOf('  update: adminProcedure'), source.indexOf('      if (addressWarningNeedsConfirmation && addressValidation)', source.indexOf('  update: adminProcedure')));
+  const start = source.indexOf('  update: adminProcedure');
+  const update = source.slice(start, source.indexOf('  // Delete customer', start));
+  assert.ok(update.includes('db.transaction(async (tx)'));
+  assert.ok(update.includes('.limit(1).for("update")'));
+  assert.ok(update.includes('.where(eq(customers.id, id)).returning()'));
+  assert.ok(update.includes('syncCustomerShippingAddressesInTransaction(tx, updatedCustomer,'));
+  assert.ok(update.indexOf('.returning()') < update.indexOf('syncCustomerShippingAddressesInTransaction('));
+  assert.ok(update.includes('unversandte Aufträge ohne Label. Historische Adressen bleiben unverändert.'));
   assert.ok(update.includes('NULLIF(TRIM(${orders.phone})'));
   assert.ok(update.includes('NULLIF(TRIM(${orders.email})'));
   assert.ok(!update.includes('onlyIfMissing'));
   assert.ok(!update.includes('orderSyncFields'));
-  const writes = [...update.matchAll(/db\.update\(orders\)\.set\(\{\s*(\w+):/g)].map(x => x[1]);
+  const writes = [...update.matchAll(/(?:db|tx)\.update\(orders\)\.set\(\{\s*(\w+):/g)].map(x => x[1]);
   assert.deepEqual(writes.sort(), ['email', 'phone']);
 });
 

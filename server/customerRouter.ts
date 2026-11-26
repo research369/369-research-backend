@@ -26,6 +26,7 @@ import {
 import { getPersonalPromoAssignmentsForCustomerIds } from "./customerPromoAssignmentService.js";
 
 import { resolveCheckoutCustomerDataChange, normalizeCustomerMatchEmail, normalizeCustomerMatchPhone } from "./customerDataChangeService.js";
+import { syncCustomerShippingAddressesInTransaction } from "./customerShippingAutoSyncService.js";
 const RESEND_API_URL = "https://api.resend.com/emails";
 
 const customerSchema = z.object({
@@ -357,82 +358,108 @@ export const customerRouter = router({
 
     // Update customer
   update: adminProcedure
-    .input(z.object({ id: z.number() }).merge(customerSchema.partial()))
+    .input(z.object({
+      id: z.number(),
+      preferredDeliveryType: z.enum(["home", "packstation", "postfiliale"]).optional(),
+      deliveryType: z.enum(["home", "packstation", "postfiliale"]).optional(),
+    }).merge(customerSchema.partial()))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
       const { id, ...data } = input;
-      const [existingCustomer] = await db.select().from(customers).where(eq(customers.id, id)).limit(1);
-      if (!existingCustomer) throw new Error("Kunde nicht gefunden");
-      const addressFieldsChanged = ["street", "houseNumber", "zip", "city", "country"].some((field) => (data as any)[field] !== undefined);
-      const effectiveAddress = {
-        street: data.street ?? existingCustomer.street ?? "",
-        houseNumber: data.houseNumber ?? existingCustomer.houseNumber ?? "",
-        zip: data.zip ?? existingCustomer.zip ?? "",
-        city: data.city ?? existingCustomer.city ?? "",
-        country: data.country ?? existingCustomer.country ?? "",
-      };
-      const addressHasInput = Object.values(effectiveAddress).some((value) => !!String(value).trim());
-      const addressValidation = addressFieldsChanged && addressHasInput ? await validateGermanAddress(effectiveAddress) : null;
-      const addressWarningNeedsConfirmation = !!addressValidation?.applicable && (addressValidation.status === "warning" || addressValidation.status === "unavailable");
-      if (addressWarningNeedsConfirmation && data.addressValidationOverride?.confirmed !== true) {
-        throw new Error(`ADRESSPRUEFUNG_BESTAETIGUNG_ERFORDERLICH: ${addressValidation!.warnings.map((warning) => warning.message).join(" ")}`);
-      }
-      const updateData: Record<string, any> = { updatedAt: new Date() };
+      const shippingFieldsSubmitted = [
+        data.name, data.firstName, data.lastName, data.company, data.street,
+        data.houseNumber, data.zip, data.city, data.country, data.dhlPostNumber,
+        data.preferredDeliveryType, data.deliveryType,
+      ].some((value) => value !== undefined);
+      const { shippingSync, effectiveAddress, addressValidation, addressWarningNeedsConfirmation } = await db.transaction(async (tx) => {
+        // Serialize profile saves before the service takes locks on this customer's
+        // eligible orders. The RETURNING row is the complete new shipping source.
+        const [existingCustomer] = await tx.select().from(customers).where(eq(customers.id, id)).limit(1).for("update");
+        if (!existingCustomer) throw new Error("Kunde nicht gefunden");
+        const addressFieldsChanged = ["street", "houseNumber", "zip", "city", "country"].some((field) => (data as any)[field] !== undefined);
+        const effectiveAddress = {
+          street: data.street ?? existingCustomer.street ?? "",
+          houseNumber: data.houseNumber ?? existingCustomer.houseNumber ?? "",
+          zip: data.zip ?? existingCustomer.zip ?? "",
+          city: data.city ?? existingCustomer.city ?? "",
+          country: data.country ?? existingCustomer.country ?? "",
+        };
+        const addressHasInput = Object.values(effectiveAddress).some((value) => !!String(value).trim());
+        const addressValidation = addressFieldsChanged && addressHasInput ? await validateGermanAddress(effectiveAddress) : null;
+        const addressWarningNeedsConfirmation = !!addressValidation?.applicable && (addressValidation.status === "warning" || addressValidation.status === "unavailable");
+        if (addressWarningNeedsConfirmation && data.addressValidationOverride?.confirmed !== true) {
+          throw new Error(`ADRESSPRUEFUNG_BESTAETIGUNG_ERFORDERLICH: ${addressValidation!.warnings.map((warning) => warning.message).join(" ")}`);
+        }
+        const updateData: Record<string, any> = { updatedAt: new Date() };
 
-      if (data.name !== undefined) updateData.name = data.name;
-      if (data.firstName !== undefined) updateData.firstName = data.firstName || null;
-      if (data.lastName !== undefined) updateData.lastName = data.lastName || null;
-      if (data.phone !== undefined) updateData.phone = data.phone || null;
-      if (data.email !== undefined) updateData.email = data.email || null;
-      if (data.company !== undefined) updateData.company = data.company || null;
-      if (data.street !== undefined) updateData.street = data.street || null;
-      if (data.houseNumber !== undefined) updateData.houseNumber = data.houseNumber || null;
-      if (data.zip !== undefined) updateData.zip = data.zip || null;
-      if (data.city !== undefined) updateData.city = data.city || null;
-      if (data.country !== undefined) updateData.country = data.country || null;
-      if (data.tags !== undefined) updateData.tags = data.tags || null;
-      if (data.source !== undefined) updateData.source = data.source || null;
-      if (data.notes !== undefined) updateData.notes = data.notes || null;
-      if (data.dhlPostNumber !== undefined) updateData.dhlPostNumber = data.dhlPostNumber || null;
-      if (data.communicationLanguage !== undefined) updateData.communicationLanguage = data.communicationLanguage;
+        if (data.name !== undefined) {
+          updateData.name = data.name;
+          // A name-only edit must not copy stale explicit recipient names.
+          const nameParts = data.name.trim().split(/\s+/);
+          if (data.firstName === undefined) updateData.firstName = nameParts[0] || null;
+          if (data.lastName === undefined) updateData.lastName = nameParts.slice(1).join(" ") || null;
+        }
+        if (data.firstName !== undefined) updateData.firstName = data.firstName || null;
+        if (data.lastName !== undefined) updateData.lastName = data.lastName || null;
+        if (data.phone !== undefined) updateData.phone = data.phone || null;
+        if (data.email !== undefined) updateData.email = data.email || null;
+        if (data.company !== undefined) updateData.company = data.company || null;
+        if (data.street !== undefined) updateData.street = data.street || null;
+        if (data.houseNumber !== undefined) updateData.houseNumber = data.houseNumber || null;
+        if (data.zip !== undefined) updateData.zip = data.zip || null;
+        if (data.city !== undefined) updateData.city = data.city || null;
+        if (data.country !== undefined) updateData.country = data.country || null;
+        if (data.tags !== undefined) updateData.tags = data.tags || null;
+        if (data.source !== undefined) updateData.source = data.source || null;
+        if (data.notes !== undefined) updateData.notes = data.notes || null;
+        if (data.dhlPostNumber !== undefined) updateData.dhlPostNumber = data.dhlPostNumber || null;
+        if (data.communicationLanguage !== undefined) updateData.communicationLanguage = data.communicationLanguage;
+        if (data.preferredDeliveryType !== undefined || data.deliveryType !== undefined) {
+          updateData.preferredDeliveryType = data.preferredDeliveryType ?? data.deliveryType;
+        }
 
-      await db.update(customers).set(updateData).where(eq(customers.id, id));
+        const [updatedCustomer] = await tx.update(customers).set(updateData).where(eq(customers.id, id)).returning();
+        if (!updatedCustomer) throw new Error("Kunde nicht gefunden");
+        const shippingSync = shippingFieldsSubmitted
+          ? await syncCustomerShippingAddressesInTransaction(tx, updatedCustomer, { id: ctx.user.id, username: ctx.user.username })
+          : { updatedOrderIds: [], skippedOrderIds: [] };
 
-      // A corrected recipient address resolves prior delivery incidents for the
-      // obsolete address. Provider retries remain journalled but must not create
-      // duplicate operator alerts after the correction is already completed.
-      const previousEmail = existingCustomer.email?.trim().toLowerCase() || "";
-      const correctedEmail = data.email?.trim().toLowerCase() || "";
-      if (data.email !== undefined && previousEmail && correctedEmail && previousEmail !== correctedEmail) {
-        await db.update(customerCommunications).set({
-          deliveryIssueResolvedAt: new Date(),
-          deliveryIssueResolution: `E-Mail-Adresse korrigiert: ${previousEmail} → ${correctedEmail}`,
-          deliveryIssueResolvedBy: ctx.user.name || ctx.user.username,
-        }).where(and(
-          eq(customerCommunications.customerId, id),
-          eq(customerCommunications.recipientEmail, previousEmail),
-          inArray(customerCommunications.deliveryStatus, ["delayed", "bounced", "failed", "suppressed"]),
-          sql`${customerCommunications.deliveryIssueResolvedAt} IS NULL`,
-        ));
-      }
+        // A corrected recipient address resolves prior delivery incidents for the
+        // obsolete address. Provider retries remain journalled but must not create
+        // duplicate operator alerts after the correction is already completed.
+        const previousEmail = existingCustomer.email?.trim().toLowerCase() || "";
+        const correctedEmail = data.email?.trim().toLowerCase() || "";
+        if (data.email !== undefined && previousEmail && correctedEmail && previousEmail !== correctedEmail) {
+          await tx.update(customerCommunications).set({
+            deliveryIssueResolvedAt: new Date(),
+            deliveryIssueResolution: `E-Mail-Adresse korrigiert: ${previousEmail} → ${correctedEmail}`,
+            deliveryIssueResolvedBy: ctx.user.name || ctx.user.username,
+          }).where(and(
+            eq(customerCommunications.customerId, id),
+            eq(customerCommunications.recipientEmail, previousEmail),
+            inArray(customerCommunications.deliveryStatus, ["delayed", "bounced", "failed", "suppressed"]),
+            sql`${customerCommunications.deliveryIssueResolvedAt} IS NULL`,
+          ));
+        }
 
-      // Auftragsadressen sind vollständige historische Snapshots. Auch ein leeres
-      // Firmen-/Adressfeld ist Teil dieser Adresse und darf NICHT nachträglich aus
-      // einem anderen Kundenprofil nachgefüllt werden. Nur fehlende Kontaktkanäle
-      // werden weiterhin ergänzt; die WHERE-Bedingung schützt Paralleländerungen.
-      if (data.phone?.trim()) {
-        await db.update(orders).set({ phone: data.phone }).where(and(
-          eq(orders.customerId, id),
-          sql`NULLIF(TRIM(${orders.phone}), '') IS NULL`,
-        ));
-      }
-      if (data.email?.trim()) {
-        await db.update(orders).set({ email: data.email }).where(and(
-          eq(orders.customerId, id),
-          sql`NULLIF(TRIM(${orders.email}), '') IS NULL`,
-        ));
-      }
+        // Der Service kopiert die vollständige Lieferadresse nur in aktive,
+        // unversandte Aufträge ohne Label. Historische Adressen bleiben unverändert.
+        // Fehlende Kontaktkanäle werden wie bisher ergänzt; vorhandene bleiben erhalten.
+        if (data.phone?.trim()) {
+          await tx.update(orders).set({ phone: data.phone }).where(and(
+            eq(orders.customerId, id),
+            sql`NULLIF(TRIM(${orders.phone}), '') IS NULL`,
+          ));
+        }
+        if (data.email?.trim()) {
+          await tx.update(orders).set({ email: data.email }).where(and(
+            eq(orders.customerId, id),
+            sql`NULLIF(TRIM(${orders.email}), '') IS NULL`,
+          ));
+        }
+        return { shippingSync, effectiveAddress, addressValidation, addressWarningNeedsConfirmation };
+      });
 
       if (addressWarningNeedsConfirmation && addressValidation) {
         await persistAddressValidation({
@@ -454,7 +481,7 @@ export const customerRouter = router({
         }
       }
 
-      return { success: true };
+      return { success: true, shippingOrdersUpdated: shippingSync.updatedOrderIds.length, shippingOrdersSkipped: shippingSync.skippedOrderIds.length };
     }),
 
   // Delete customer
