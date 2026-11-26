@@ -5,6 +5,8 @@ import { editMoneyCents, editBreakdownShape, validateEditAmounts, matchEditItems
 import { orderEditDerivedTerms } from './orderEditPartnerTerms.js';
 import { orderCleanupPreview, orderCleanupError } from './orderCleanupPreview.js';
 import { reverseOrderFinancesInTransaction } from './priorityOrderFinancialAdapter.js';
+import { canonicalizeOrderPickupCustomer } from './orderPickupAddressContract.js';
+import { previewCustomerOrderRecipient, applyCustomerOrderRecipientCorrection } from './orderRecipientCorrectionService.js';
 import {nextCustomerNumber} from './customerNumberService.js';
 import {checkCustomerCreationMaintenance} from './customerCreationMaintenance.js';
 import { publicCodeCommissionPreview } from "./partnerCommissionPreview.js";
@@ -273,6 +275,7 @@ export const orderRouter = router({
       // Reject foreign public-code terms before lookup, pricing or any writes.
       assertNoMixedPartnerOrderInput(input);
       assertManualSaleRole(input.orderSource, ctx.user);
+      input.customer = canonicalizeOrderPickupCustomer(input.customer);
       if (ctx.screenshotOrder && (ctx.user?.role !== 'admin' || input.orderSource !== 'wawi_manual' || input.storeKey !== '369research' || input.stockOverride || input.partnerCode || input.partnerNumber || input.kwkCode || input.creditUsed || input.kwkCreditUsed || input.qrAttributionToken || input.sendOrderConfirmation)) throw Error('SCREENSHOT_ORDER_SCOPE');
       const db = await getDb();
       if (!db) throw new Error("Database not available");
@@ -2153,6 +2156,16 @@ export const orderRouter = router({
         items: items.map(i => ({ ...i, price: parseFloat(i.price) })),
       };
     }),
+
+  // Recipient-only, explicit admin correction. Preview never changes customer or order.
+  customerAddressCorrectionPreview: adminProcedure
+    .use(({ ctx, next }) => { ctx.res.setHeader('Cache-Control', 'private, no-store'); ctx.res.setHeader('Pragma', 'no-cache'); return next(); })
+    .input(z.object({ orderId: z.string().trim().min(1).max(50) }).strict())
+    .query(({ input, ctx }) => previewCustomerOrderRecipient(input.orderId, ctx.user)),
+  applyCustomerAddressCorrection: adminProcedure
+    .use(({ ctx, next }) => { ctx.res.setHeader('Cache-Control', 'private, no-store'); ctx.res.setHeader('Pragma', 'no-cache'); return next(); })
+    .input(z.object({ orderId: z.string().trim().min(1).max(50), previewToken: z.string().min(80).max(16384) }).strict())
+    .mutation(({ input, ctx }) => applyCustomerOrderRecipientCorrection(input.orderId, input.previewToken, ctx.user)),
 
   checkoutStatus: publicProcedure.input(z.object({
     checkoutIdempotencyKey:z.string().regex(/^[a-f0-9]{64}$/),

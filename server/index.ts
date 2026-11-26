@@ -40,6 +40,7 @@ import { ensureShipmentLabelOverrideConfig } from "./shipmentLabelOverrideConfig
 import { ensurePartnerAddressRequestSchema } from "./partnerAddressRequestSchema.js";
 import { ensurePartnerProgramSchema } from "./partnerProgramSchema.js";
 import { applyDanielShortPartnerCodeMigration } from "./partnerCodeReplacementMigration.js";
+import { ensureOrderRecipientCorrectionSchema, repairFinnPickupOrder } from "./orderRecipientCorrectionSchema.js";
 import { ensurePartnerFinancialSchema, isPartnerFinancialSchemaReady } from "./partnerFinancialSchema.js";
 import { ensureFollowUpTermsSchema } from "./followUpTermsSchema.js";
 import { qrRedirectRouter } from "./qrRedirectRouter.js";
@@ -440,6 +441,15 @@ async function start() {
     await applyDanielShortPartnerCodeMigration();
   } catch {
     console.warn("[Server] Authorized short partner-code replacement not applied");
+  }
+
+  // Separate recipient audit and owner-authorized one-off repair. No historical backfill.
+  // On conflict, only this repair rolls back; ordinary shop processing remains available.
+  try {
+    await ensureOrderRecipientCorrectionSchema();
+    await repairFinnPickupOrder();
+  } catch {
+    console.warn("[Server] Order recipient correction initialization or authorized repair not applied");
   }
 
   // Follow-up-Angebote erhalten vor dem Versand eigene, revisionssichere Konditionen.

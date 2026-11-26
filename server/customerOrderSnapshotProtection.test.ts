@@ -15,7 +15,10 @@ test('customer profile updates never backfill historical address/name/packstatio
 
 test('manual order profile updates use address-bound optional field resolution, not truthy old address fallback', () => {
   const source = fs.readFileSync(new URL('./orderRouter.ts', import.meta.url), 'utf8');
-  const manual = source.slice(source.indexOf('        } else if (isAuthenticatedWawiManualSale && !ctx.jarvyOrder)'), source.indexOf('          customerIntegrityTrigger = manuallyChanged'));
+  const start = source.indexOf('        } else if (isAuthenticatedWawiManualSale && !ctx.jarvyOrder');
+  const end = source.indexOf('          customerIntegrityTrigger = manuallyChanged', start);
+  assert.ok(start >= 0 && end > start, 'Manual profile branch must exist');
+  const manual = source.slice(start, end);
   assert.ok(manual.includes('resolveAddressBoundOptionalFields(existingCustomer, input.customer)'));
   assert.ok(!manual.includes('input.customer.company || existingCustomer.company'));
   assert.ok(!manual.includes('input.customer.dhlPostNumber || existingCustomer.dhlPostNumber'));
