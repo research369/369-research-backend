@@ -39,6 +39,7 @@ import { ensureDiscountProvenanceSchema } from "./discountProvenanceSchema.js";
 import { ensureShipmentLabelOverrideConfig } from "./shipmentLabelOverrideConfig.js";
 import { ensurePartnerAddressRequestSchema } from "./partnerAddressRequestSchema.js";
 import { ensurePartnerProgramSchema } from "./partnerProgramSchema.js";
+import { applyDanielShortPartnerCodeMigration } from "./partnerCodeReplacementMigration.js";
 import { ensurePartnerFinancialSchema, isPartnerFinancialSchemaReady } from "./partnerFinancialSchema.js";
 import { ensureFollowUpTermsSchema } from "./followUpTermsSchema.js";
 import { qrRedirectRouter } from "./qrRedirectRouter.js";
@@ -431,6 +432,14 @@ async function start() {
     console.log("[Server] Partner program schema ready");
   } catch (err) {
     console.warn("[Server] Partner program schema migration failed:", err);
+  }
+
+  // Explicit owner-authorized one-off code replacement; no read API gains write effects.
+  // A conflict rolls back only this migration and must not interrupt shop startup.
+  try {
+    await applyDanielShortPartnerCodeMigration();
+  } catch {
+    console.warn("[Server] Authorized short partner-code replacement not applied");
   }
 
   // Follow-up-Angebote erhalten vor dem Versand eigene, revisionssichere Konditionen.

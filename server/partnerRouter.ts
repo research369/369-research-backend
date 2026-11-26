@@ -357,7 +357,7 @@ export const partnerRouter = router({
       company: z.string().optional(),
       code: z.string().min(2).max(500).optional(),
       codes: z.array(partnerCodeTermsInput).min(1).optional(),
-      partnerNumber: z.string().min(2).max(50),
+      partnerNumber: z.string().trim().min(2).max(50).refine((value) => !/^BEN-/i.test(value), "Neue Partnernummern dürfen keinen BEN-Präfix enthalten"),
       commissionPercent: z.number().min(0).max(100),
       customerDiscountPercent: z.number().min(0).max(100),
       commissionType: z.enum(["einmalig", "dauerhaft"]).optional(),
@@ -461,7 +461,7 @@ export const partnerRouter = router({
       const nextCommissionDefault = input.commissionPercent;
       const nextDiscountDefault = input.customerDiscountPercent;
       const requestedCodeTerms = input.codes
-        ? normalizePartnerCodeTerms(input.codes)
+        ? normalizePartnerCodeTerms(input.codes, existingCodeTerms.map((entry) => entry.code))
         : input.code === undefined
           ? null
           : buildLegacyPartnerCodeTerms(

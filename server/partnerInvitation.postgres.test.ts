@@ -102,7 +102,7 @@ test('approval uses fixed 10/10 creator payout, canonical active code, zero bala
   const input = valid(); const id = await submitAndId(input);
   const result = await caller(admin).partnerInvitation.approve({ id });
   assert.equal(result.status, 'approved'); assert.equal(result.id, id);
-  assert.match(result.code!, /^BEN-SYNTHETICINVITEE10-[A-F0-9]{12}$/); assert.match(result.partnerNumber!, /^BEN-[A-F0-9]{16}$/);
+  assert.equal(result.code!, 'SYNTHETIC10'); assert.match(result.partnerNumber!, /^P-[A-F0-9]{16}$/);
   const row = (await pool.query('SELECT * FROM partners WHERE id=$1', [result.partnerId])).rows[0];
   assert.equal(row.program_key, 'creator'); assert.equal(row.commission_type, 'einmalig');
   assert.equal(Number(row.commission_percent), 10); assert.equal(Number(row.customer_discount_percent), 10);
@@ -116,6 +116,18 @@ test('approval uses fixed 10/10 creator payout, canonical active code, zero bala
   assert.equal((await pool.query("SELECT actor FROM admin_change_events WHERE action='partnerInvitation.approve'")).rows[0].actor, admin.username);
   assert.equal(await count('partner_transactions'), 0); assert.equal(cookies, 0);
   assert.deepEqual(await caller().partnerInvitation.status({ registrationKey: input.registrationKey }), { status: 'approved', partnerNumber: result.partnerNumber, code: result.code });
+});
+test('approval retries an occupied primary name10 code with a short neutral random suffix', async () => {
+  await pool.query("INSERT INTO promo_codes(code,percentage,description) VALUES('SYNTHETIC10',10,'occupied primary fixture')");
+  const promoBefore = (await pool.query("SELECT * FROM promo_codes WHERE code='SYNTHETIC10'")).rows;
+  const id = await submitAndId();
+  const result = await caller(admin).partnerInvitation.approve({ id });
+  assert.equal(result.status, 'approved'); assert.match(result.code!, /^SYNTHETIC10[A-Z0-9]{4}$/);
+  assert(result.code!.length <= 16); assert(!result.code!.startsWith('BEN-'));
+  assert.match(result.partnerNumber!, /^P-[A-F0-9]{16}$/);
+  assert.deepEqual((await pool.query("SELECT * FROM promo_codes WHERE code='SYNTHETIC10'")).rows, promoBefore);
+  const codes = (await pool.query('SELECT display_code,code_normalized FROM partner_codes WHERE partner_id=$1', [result.partnerId])).rows;
+  assert.deepEqual(codes, [{ display_code: result.code, code_normalized: result.code }]);
 });
 test('concurrent and retry approval creates exactly one partner and one code with stable identity', async () => {
   const id = await submitAndId();
@@ -396,7 +408,7 @@ test('mail: new submission emits exactly one acknowledgement, never password/key
   assert.equal(events.length, 1); assert.equal(events[0].applicationId, id); assert.equal(events[0].kind, 'registration_acknowledgement');
   assert.equal(events[0].recipientEmail, input.email); assert.equal(events[0].partnerCode, null); assert.equal(events[0].partnerNumber, null);
   const text = events[0].textBody + events[0].htmlBody;
-  assert.match(text, /noch nicht freigeschaltet/); assert.match(text, /10 %/); assert(!/BEN-[A-Z0-9]/.test(text));
+  assert.match(text, /noch nicht freigeschaltet/); assert.match(text, /10 %/); assert(!/P-[A-F0-9]{16}\b/.test(text)); assert(!text.includes('SYNTHETIC10'));
   for (const secret of [input.password, input.registrationKey, (await appRow()).password_hash]) assert(!JSON.stringify(events).includes(secret));
   const rows = await mailRows(); assert.equal(rows.length, 1); assertTerminal(rows[0], 'sent', null); assert(rows[0].sent_at);
 });

@@ -122,7 +122,7 @@ export async function approvePartnerInvitation(id: number, actor: string): Promi
     }
     let identifiers: { code: string; partnerNumber: string } | undefined;
     for (let attempt = 0; attempt < 12; attempt++) {
-      const candidate = newInvitationIdentifiers(app.name);
+      const candidate = newInvitationIdentifiers(app.name, attempt);
       if (await invitationIdentifiersAvailable(client, candidate)) { identifiers = candidate; break; }
     }
     if (!identifiers) throw Error('Invitation identifiers unavailable');

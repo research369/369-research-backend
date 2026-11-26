@@ -70,14 +70,18 @@ export function normalizePartnerCodeTerms(input: Array<{
   commissionPercent: number;
   customerDiscountPercent: number;
   isActive?: boolean;
-}>): PartnerCodeTerms[] {
+}>, existingCodes: string[] = []): PartnerCodeTerms[] {
   if (input.length === 0) throw new Error("Mindestens ein Partnercode ist erforderlich");
 
+  const grandfathered = new Set(existingCodes.map(normalizePartnerCode));
   const seen = new Set<string>();
   const terms = input.map((entry) => {
     const code = normalizePartnerCode(entry.code);
     if (!code) throw new Error("Partnercode darf nicht leer sein");
     if (code.length > 50) throw new Error("Partnercode darf maximal 50 Zeichen haben");
+    if (!grandfathered.has(code) && (code.length > 16 || code.startsWith('BEN-'))) {
+      throw new Error("Neue Partnercodes dürfen maximal 16 Zeichen haben und keinen BEN-Präfix enthalten");
+    }
     if (seen.has(code)) throw new Error(`Code "${code}" wurde mehrfach angegeben`);
     seen.add(code);
 
@@ -168,7 +172,6 @@ export async function replacePartnerCodes(
     isActive?: boolean;
   }>,
 ): Promise<StoredPartnerCodeTerms[]> {
-  const terms = normalizePartnerCodeTerms(rawTerms);
   const pool = await getPool();
   if (!pool) throw new Error("Datenbank nicht verfügbar");
   const client = await pool.connect();
@@ -186,6 +189,7 @@ export async function replacePartnerCodes(
        FOR UPDATE`, [partnerId]);
     const existingById = new Map(existingResult.rows.map((row) => [row.id, row]));
     const existingByCode = new Map(existingResult.rows.map((row) => [row.code_normalized, row]));
+    const terms = normalizePartnerCodeTerms(rawTerms, existingResult.rows.map((row) => row.display_code));
 
     const collisions = await client.query<{ code_normalized: string }>(`
       SELECT code_normalized

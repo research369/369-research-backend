@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomInt } from 'node:crypto';
 import { z } from 'zod';
 export const BEN_INVITATION_INFO = Object.freeze({
   enabled: true, inviter: 'Ben', title: 'CEO', customerDiscountPercent: 10,
@@ -29,8 +29,12 @@ export type InvitationStatus = { status: 'pending' | 'rejected' } | { status: 'a
 export function invitationKeyHash(key: string): string {
   return createHash('sha256').update(`369:partner-invitation:ben:v1:${key}`).digest('hex');
 }
-export function newInvitationIdentifiers(name: string): { code: string; partnerNumber: string } {
-  const safeName = name.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 18) || 'PARTNER';
-  return { code: `BEN-${safeName}10-${randomBytes(6).toString('hex').toUpperCase()}`,
-    partnerNumber: `BEN-${randomBytes(8).toString('hex').toUpperCase()}` };
+export function newInvitationIdentifiers(name: string, attempt = 0): { code: string; partnerNumber: string } {
+  const firstName = name.trim().split(/\s+/u)[0];
+  const safeName = firstName.normalize('NFKD').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10) || 'PARTNER';
+  // The primary name10 candidate is readable; collision retries get four unbiased random characters.
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  const suffix = attempt > 0 ? Array.from({ length: 4 }, () => alphabet[randomInt(alphabet.length)]).join('') : '';
+  return { code: `${safeName}10${suffix}`,
+    partnerNumber: `P-${randomBytes(8).toString('hex').toUpperCase()}` };
 }

@@ -20,3 +20,4 @@ trap cleanup EXIT
 export PARTNER_INVITATION_TEST_PG_SOCKET="$TEST_ROOT/socket"
 ./node_modules/.bin/tsx --test server/partnerInvitationContract.test.ts server/partnerCreditService.test.ts server/partnerProgramService.test.ts server/partnerSettlementReport.test.ts server/partnerCommissionPreview.test.ts
 ./node_modules/.bin/tsx --test server/partnerInvitation.postgres.test.ts
+./node_modules/.bin/tsx --test server/partnerCodeReplacement.postgres.test.ts

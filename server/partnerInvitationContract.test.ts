@@ -31,12 +31,61 @@ test('registration lookup hashes are deterministic, domain separated, never plai
   assert.match(hash, /^[a-f0-9]{64}$/); assert.equal(hash, invitationKeyHash(key));
   assert.notEqual(hash, invitationKeyHash(randomUUID())); assert(!hash.includes(key));
 });
-test('server identifiers use random BEN namespace, name10 and safe bounded characters', () => {
-  const seen = new Set<string>();
-  for (let i = 0; i < 50; i++) {
-    const { code, partnerNumber } = newInvitationIdentifiers(' Äda / long! name 漢字 ');
-    assert.match(code, /^BEN-ADALONGNAME10-[A-F0-9]{12}$/); assert(code.length <= 50);
-    assert.match(partnerNumber, /^BEN-[A-F0-9]{16}$/); assert(!seen.has(code)); seen.add(code);
+test('primary codes use only the first name segment, NFKD uppercase ASCII and trailing 10', () => {
+  const cases = [
+    ['Daniel Müller', 'DANIEL10'],
+    ['  Daniel  Alexander Müller  ', 'DANIEL10'],
+    ['Anna Maria Schmidt', 'ANNA10'],
+    ['Anna-Maria Schmidt', 'ANNAMARIA10'],
+    ['\tÄda\nLovelace', 'ADA10'],
+    ['Élodie Dupont', 'ELODIE10'],
+    ['Jose\u0301 Alvarez', 'JOSE10'],
+    ['A\u1ab0da Lovelace', 'ADA10'],
+    ['Özil Yılmaz', 'OZIL10'],
+    ['Straße Example', 'STRASSE10'],
+    ['Jean-Luc Picard', 'JEANLUC10'],
+    ['D’Angelo Example', 'DANGELO10'],
+    ['Ｄａｎｉｅｌ\u3000Müller', 'DANIEL10'],
+    ['１２３abc Last', '123ABC10'],
+    ['ﬃona Last', 'FFIONA10'],
+    ['Abcdefghijklmnopqrstuvwxyz Last', 'ABCDEFGHIJ10'],
+    ['Ben Example', 'BEN10'],
+    ['漢字 Daniel', 'PARTNER10'],
+    ['Иван Иванов', 'PARTNER10'],
+    ['--- Daniel', 'PARTNER10'],
+    ['', 'PARTNER10'],
+    [' \t\n ', 'PARTNER10'],
+  ];
+  for (const [name, expected] of cases) {
+    const { code, partnerNumber } = newInvitationIdentifiers(name);
+    assert.equal(code, expected, name);
+    assert.match(code, /^[A-Z0-9]{1,10}10$/); assert(code.length <= 16);
+    assert(!code.startsWith('BEN-')); assert.match(partnerNumber, /^P-[A-F0-9]{16}$/);
   }
-  assert.match(newInvitationIdentifiers('漢字').code, /^BEN-PARTNER10-/);
+});
+test('default and explicit attempt zero keep the same readable primary code across duplicate first names', () => {
+  assert.equal(newInvitationIdentifiers('Daniel Müller').code, 'DANIEL10');
+  assert.equal(newInvitationIdentifiers('Daniel Schmidt', 0).code, 'DANIEL10');
+  assert.equal(newInvitationIdentifiers('Daniel Alexander Müller').code, 'DANIEL10');
+});
+test('collision attempts add four cryptographically random uppercase alphanumeric characters within 16', () => {
+  for (const name of ['Daniel Müller', 'Abcdefghijklmnopqrstuvwxyz Last', '漢字']) {
+    const primary = newInvitationIdentifiers(name).code;
+    const seen = new Set([primary]);
+    for (let attempt = 1; attempt < 10; attempt++) {
+      const { code, partnerNumber } = newInvitationIdentifiers(name, attempt);
+      assert(code.startsWith(primary)); assert.match(code.slice(primary.length), /^[A-Z0-9]{4}$/);
+      assert.match(code, /^[A-Z0-9]{1,16}$/); assert(!code.startsWith('BEN-'));
+      assert(!seen.has(code)); seen.add(code); assert.match(partnerNumber, /^P-[A-F0-9]{16}$/);
+    }
+  }
+  assert.notEqual(newInvitationIdentifiers('Daniel', 1).code, newInvitationIdentifiers('Daniel', 1).code);
+});
+test('partner numbers always use a neutral prefix and a fresh 64-bit uppercase hexadecimal value', () => {
+  const seen = new Set<string>();
+  for (let i = 0; i < 100; i++) {
+    const { partnerNumber } = newInvitationIdentifiers('Daniel Müller', i % 10);
+    assert.match(partnerNumber, /^P-[A-F0-9]{16}$/); assert(!partnerNumber.startsWith('BEN-'));
+    assert(!seen.has(partnerNumber)); seen.add(partnerNumber);
+  }
 });
