@@ -1,9 +1,9 @@
 import { TRPCError } from '@trpc/server';
-import type { z } from 'zod';
-import { router, publicProcedure, adminProcedure } from './trpc.js';
+import { z } from 'zod';
+import { router, publicProcedure, adminProcedure, scopedOperationsReadProcedure } from './trpc.js';
 import { enforceAuthRateLimit } from './accountSecurityService.js';
 import { BEN_INVITATION_INFO, partnerInvitationSubmitInput, partnerInvitationStatusInput, partnerInvitationReviewInput } from './partnerInvitationContract.js';
-import { submitPartnerInvitation, partnerInvitationStatus, pendingPartnerInvitations, approvePartnerInvitation, rejectPartnerInvitation } from './partnerInvitationService.js';
+import { submitPartnerInvitation, partnerInvitationStatus, pendingPartnerInvitations, partnerInvitationsByDay, approvePartnerInvitation, rejectPartnerInvitation } from './partnerInvitationService.js';
 import { partnerInvitationMailReady } from './partnerInvitationMailService.js';
 
 // Keep strict Zod parsing and inferred input/output types, but never expose Zod's
@@ -39,7 +39,15 @@ export const partnerInvitationRouter = router({
     await enforceAuthRateLimit(ctx.req, 'partner.invitation.status', input.registrationKey);
     return partnerInvitationStatus(input.registrationKey);
   })),
-  pending: adminProcedure.query(() => invitationOperation(pendingPartnerInvitations)),
+  // Pakko's 26.11.2026 authorization extends only the existing account-specific
+  // read grant. Approval, rejection, credentials and mail operations remain admin-only.
+  pending: scopedOperationsReadProcedure.query(() => invitationOperation(pendingPartnerInvitations)),
+  byDay: scopedOperationsReadProcedure.input(safeInvitationInput(z.object({
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(value => {
+      const date = new Date(value + 'T00:00:00Z');
+      return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+    }),
+  }).strict())).query(({ input }) => invitationOperation(() => partnerInvitationsByDay(input.date))),
   approve: adminProcedure.input(safeInvitationInput(partnerInvitationReviewInput)).mutation(({ input, ctx }) => invitationOperation(() => approvePartnerInvitation(input.id, ctx.user.username))),
   reject: adminProcedure.input(safeInvitationInput(partnerInvitationReviewInput)).mutation(({ input, ctx }) => invitationOperation(() => rejectPartnerInvitation(input.id, ctx.user.username))),
 });

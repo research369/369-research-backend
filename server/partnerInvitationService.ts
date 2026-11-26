@@ -70,6 +70,22 @@ export async function pendingPartnerInvitations() {
     FROM partner_invitation_applications WHERE status='pending' ORDER BY created_at, id LIMIT 100`);
   return result.rows as { id: number; name: string; email: string; phone: string; company: string | null; createdAt: Date }[];
 }
+/** Bounded calendar-day read includes reviewed applications, not only pending ones.
+ * Indexed timestamp bounds use Europe/Berlin, including 23/25-hour DST days.
+ * Explicit projection never exposes credentials, recovery hashes or setup links.
+ */
+export async function partnerInvitationsByDay(date: string) {
+  const pool = await database();
+  const result = await pool.query(`SELECT id, name, email, phone, company, status,
+    created_at AS "createdAt", reviewed_at AS "reviewedAt", linked_partner_id AS "partnerId"
+    FROM partner_invitation_applications
+    WHERE created_at >= ($1::date::timestamp AT TIME ZONE 'Europe/Berlin')
+      AND created_at < (($1::date + 1)::timestamp AT TIME ZONE 'Europe/Berlin')
+    ORDER BY created_at, id`, [date]);
+  return result.rows as { id: number; name: string; email: string; phone: string;
+    company: string | null; status: 'pending' | 'approved' | 'rejected';
+    createdAt: Date; reviewedAt: Date | null; partnerId: number | null }[];
+}
 export async function invitationIdentifiersAvailable(client: Pick<PoolClient, 'query'>, candidate: { code: string; partnerNumber: string }): Promise<boolean> {
   const collision = await client.query(`SELECT
     EXISTS(SELECT 1 FROM partner_codes WHERE UPPER(code_normalized)=$1 OR UPPER(display_code)=$1)
