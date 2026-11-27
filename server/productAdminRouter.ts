@@ -28,6 +28,7 @@ import { createFamilyInput, getFamilyInput, publishFamilyInput,
   createSingleBlend, publishSingleBlend } from "./productFamily.js";
 import { createProductDraftInput, createProductDraft, readProductDraft, isProductDraftArticle } from "./productDraft.js";
 import { finalizeProductDraftInput, finalizeProductDraft } from "./productDraftFinalization.js";
+import { getVariantReleaseInput, releaseProductVariantInput, readVariantReleaseSnapshot, releaseProductVariant } from "./productVariantRelease.js";
 
 // ─────────────────────────────────────────────────────────────
 // HELPERS
@@ -68,6 +69,18 @@ async function writeAuditLog(
 // ─────────────────────────────────────────────────────────────
 
 export const productAdminRouter = router({
+
+  getVariantReleaseSnapshot: productManagerProcedure.input(getVariantReleaseInput).query(async ({ input }) => {
+    const db = await getDb();
+    if (!db) throw new Error("DB nicht verfügbar");
+    return readVariantReleaseSnapshot(db, input.shopProductId, input.masterArticleId);
+  }),
+
+  releaseVariant: productManagerProcedure.input(releaseProductVariantInput).mutation(async ({ input, ctx }) => {
+    const db = await getDb();
+    if (!db) throw new Error("DB nicht verfügbar");
+    return releaseProductVariant(db, input, ctx.user.username || ctx.user.email || "product_manager");
+  }),
 
   // Draft-only additive API: zero stock, open price, hidden rows; no publication.
   createDraft: productManagerProcedure.input(createProductDraftInput).mutation(async ({ input, ctx }) => {
@@ -240,7 +253,11 @@ export const productAdminRouter = router({
       if (!existing[0]) throw new Error(`Produkt '${input.shopProductId}' nicht gefunden`);
       const old = existing[0];
 
-      if (Array.isArray(old.variants) && old.variants.some(v => v?.publicationStatus === "finalized-draft"))
+      // LIMIT 1 may return a preserved hidden sibling after master promotion.
+      // Preserve the existing restriction for the entire finalized family.
+      const familyVariants = await db.select({ variants: articles.variants }).from(articles)
+        .where(eq(articles.shopProductId, input.shopProductId));
+      if (familyVariants.some(a => Array.isArray(a.variants) && a.variants.some(v => v?.publicationStatus === "finalized-draft")))
         throw new Error("Finalisierte Entwurfsvariante benötigt einen separaten atomaren Preisvertrag.");
       // Validierung: salePrice muss kleiner als sellingPrice sein
       const newSellingPrice = input.sellingPrice ?? Number(old.sellingPrice ?? 0);

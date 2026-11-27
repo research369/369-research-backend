@@ -12,6 +12,7 @@ import { isBillableOrderItem, isCompletedCommercialOrder } from "./commercialOrd
 import { getPublicSingleBlendComposition } from "./singleBlendComposition.js";
 import { isProductDraftArticle } from "./productDraft.js";
 import { isReadyNasalArticle, nasalDiySetAvailability } from "./nasalSalesPolicy.js";
+import { inspectProductSchema, readFamilyFaqs } from "./productFamily.js";
 
 type PublicShopVariant = {
   dosage: string;
@@ -26,6 +27,23 @@ type PublicShopVariant = {
   hidden?: boolean;
   image?: string;
 };
+
+export function hasReleasedVariants(variants: unknown): boolean {
+  return Array.isArray(variants) && variants.some(v => v?.publicationStatus === "finalized-draft");
+}
+
+export function publicMetadataSelection(arts: Array<{ id: number; shopVisible: number; isActive: number; variants: unknown }>) {
+  const masters = arts.filter(a => a.shopVisible === 1 && a.isActive === 1 && hasReleasedVariants(a.variants));
+  if (masters.length > 1) throw new TRPCError({ code: "CONFLICT", message: "Mehrdeutiger öffentlicher Variantenmaster" });
+  return { finalized: masters.length === 1, articleIds: masters.length === 1 ? [masters[0].id] : arts.map(a => a.id) };
+}
+
+/** Read-only summary: approved hidden inventory children are not a master stock. */
+export function summarizeReleasedStock(variants: PublicShopVariant[]) {
+  const rows = new Map<number, PublicShopVariant>();
+  for (const v of variants) if (!v.hidden && Number.isInteger(v.stock) && v.stock >= 0 && !rows.has(v.articleId)) rows.set(v.articleId, v);
+  return { stock: [...rows.values()].reduce((sum, v) => sum + v.stock, 0), inStock: [...rows.values()].some(v => v.inStock && v.stock > 0) };
+}
 
 type VariantSource = {
   dosage?: unknown;
@@ -934,10 +952,12 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
 
     // Group by shopProductId to aggregate variants
     const productMap = new Map<string, any>();
+    const releasedFamilies = new Set<string>();
     for (const a of allArticles) {
       if (isReadyNasalArticle(a)) continue;
       const pid = a.shopProductId;
       if (!pid) continue;
+      if (hasReleasedVariants(a.variants)) releasedFamilies.add(pid);
       const price = a.sellingPrice ? parseFloat(a.sellingPrice) : 0;
       const salePrice = a.salePrice ? parseFloat(a.salePrice) : null;
       if (!productMap.has(pid)) {
@@ -986,6 +1006,7 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
       }
       p.variants = Array.from(byDosage.values()).sort((a, b) => a.price - b.price);
       if (p.variants.length > 0) p.price = p.variants[0].price;
+      if (releasedFamilies.has(p.id)) Object.assign(p, summarizeReleasedStock(p.variants));
       return p;
     });
   }),
@@ -1036,8 +1057,10 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
         photoComingSoon: first.photoComingSoon === 1,
         category: first.category || '',
         categories: (first.categories as string[]) || (first.category ? [first.category] : []),
-        stock: visible.reduce((sum, a) => sum + a.stock, 0),
-        inStock: visible.some(a => a.stock > 0),
+        ...(hasReleasedVariants(first.variants) ? summarizeReleasedStock(variants) : {
+          stock: visible.reduce((sum, a) => sum + a.stock, 0),
+          inStock: visible.some(a => a.stock > 0),
+        }),
         variants,
       };
     }),
@@ -1050,12 +1073,14 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
       if (!db) return { translations: [], faqs: [] };
 
       // Alle article_ids für dieses shopProductId holen
-      const arts = await db.select({ id: articles.id })
+      const arts = await db.select({ id: articles.id, shopVisible: articles.shopVisible, isActive: articles.isActive, variants: articles.variants })
         .from(articles)
         .where(eq(articles.shopProductId, input.shopProductId));
       if (arts.length === 0) return { translations: [], faqs: [] };
 
-      const articleIds = arts.map(a => a.id);
+      // Do not merge archived/draft content into a newly finalized family.
+      const metadataSelection = publicMetadataSelection(arts);
+      const articleIds = metadataSelection.articleIds;
 
       // Translations für alle Varianten laden
       // Verwende getPool() für Raw-SQL um Drizzle inArray()-Probleme mit mehreren IDs zu umgehen
@@ -1102,7 +1127,12 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
       }
 
       // FAQs für alle Varianten laden
-      const faqsResult = pool
+      const faqsResult = metadataSelection.finalized
+        ? { rows: (await readFamilyFaqs(db, await inspectProductSchema(db), articleIds)).filter(f => f.isVisible === 1).map(f => ({
+          id: f.id, article_id: f.articleId, lang: f.lang, question: f.question, answer: f.answer,
+          sort_order: f.sortOrder, is_visible: f.isVisible, created_at: f.createdAt, updated_at: f.updatedAt,
+        })) }
+        : pool
         ? await pool.query(
             `SELECT * FROM article_faq WHERE article_id = ANY($1) AND active = 1`,
             [articleIds]
