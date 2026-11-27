@@ -1,0 +1,15 @@
+{
+  "status": "implementation-and-offline-tests-complete",
+  "receiptTransport": "FINAL POST mutation order.checkoutReceipt; backend-contract.json finalized, no further transport flips",
+  "customerConfirmation": "POST order.checkoutCustomerConfirmation implemented; quote remains READ ONLY and signals outer customerDataChangeConfirmation with null token",
+  "testFile": "backend/server/precisionCommerce.postgres.test.ts",
+  "enableEnv": "PRECISION_SYNTHETIC_POSTGRES_TESTS=true",
+  "databaseEnv": "PRECISION_TEST_DATABASE_URL=postgresql://<synthetic trust-auth user>@127.0.0.1:<parent port>/precision_synthetic_test",
+  "databaseNameRequired": "precision_synthetic_test",
+  "databasePrerequisite": "Parent creates dedicated DB and loads scripts/export-ledger-test-schema.ts base schema. Suite installs existing integrity/permissions/account/customer-change migrations only in dedicated synthetic DB. Parent owns DB lifecycle.",
+  "envSafety": "DATABASE_URL and RAILWAY_DB_URL empty; provider keys empty; no credentials. Suite rejects non-loopback, password URLs and other database names.",
+  "postgresTestCount": 8,
+  "coverage": ["read-only quote", "+7 kit one BAC10", "paid+kit aggregate single journal", "same-key race/replay/conflict", "last BAC10 competition", "quote change", "rollback retry", "regular vial-only isolation", "precision cartridge whitelist", "separate customer confirmation record and locked consume"],
+  "offlineChecks": {"expandedPassing":258,"failing":0,"gatedPostgresSkipped":8,"typecheck":"pass","diffCheck":"pass"},
+  "report": "/home/ubuntu/369-commerce-integration-20261127/backend-implementation.md"
+}

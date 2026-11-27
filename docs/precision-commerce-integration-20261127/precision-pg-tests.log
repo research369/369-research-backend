@@ -1,0 +1,89 @@
+Actual Drizzle schema exported (142 statements)
+psql:/tmp/369-precision-integrity.eZu3LA/schema.sql:1124: NOTICE:  identifier "personal_promo_expiry_reminders_origin_order_id_orders_order_id_fk" will be truncated to "personal_promo_expiry_reminders_origin_order_id_orders_order_id"
+[Isolated] Fresh PostgreSQL, synthetic schema, loopback-only network.
+TAP version 13
+# [Database] Connected to PostgreSQL
+# [CustomerOrderBlocks] Schema ready
+# [Goodies] Katalog, Ausgabenjournal und deaktivierte Checkout-Vorbereitung bereit
+# [AdminChangeLog] Schema ready
+# [CustomerDataChange] Confirmation and immutable history schema ready
+# [Orders] Stock deducted: Synthetic Semax (10 mg) 10 → 9 (order PRECISION-TEST-1)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 10 → 9 (order PRECISION-TEST-1)
+# [Customers] Linked order PRECISION-TEST-1 to existing customer \#999001 (Synthetic Precision)
+# Subtest: PG precision quote is read-only; real create/receipt has +7 kit and one BAC10
+ok 1 - PG precision quote is read-only; real create/receipt has +7 kit and one BAC10
+  ---
+  duration_ms: 613.278619
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic Semax (10 mg) 10 → 9 (order PRECISION-TEST-2)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 10 → 7 (order PRECISION-TEST-2)
+# [Customers] Linked order PRECISION-TEST-2 to existing customer \#999001 (Synthetic Precision)
+# Subtest: PG precision aggregate paid BAC10 + kit makes one journal entry
+ok 2 - PG precision aggregate paid BAC10 + kit makes one journal entry
+  ---
+  duration_ms: 211.814199
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic Semax (10 mg) 10 → 9 (order PRECISION-TEST-3)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 10 → 9 (order PRECISION-TEST-3)
+# [Customers] Linked order PRECISION-TEST-3 to existing customer \#999001 (Synthetic Precision)
+# Subtest: PG precision same-key race/replay creates exactly one order and journal
+ok 3 - PG precision same-key race/replay creates exactly one order and journal
+  ---
+  duration_ms: 158.50324
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic Semax (10 mg) 10 → 9 (order PRECISION-TEST-4)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 1 → 0 (order PRECISION-TEST-4)
+# [Customers] Linked order PRECISION-TEST-4 to existing customer \#999001 (Synthetic Precision)
+# Subtest: PG precision last BAC10 competing customers cannot oversell
+ok 4 - PG precision last BAC10 competing customers cannot oversell
+  ---
+  duration_ms: 171.818019
+  type: 'test'
+  ...
+# Subtest: PG precision changed BAC10 price/identity/stock forces requote without partial writes
+ok 5 - PG precision changed BAC10 price/identity/stock forces requote without partial writes
+  ---
+  duration_ms: 156.336203
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic Semax (10 mg) 10 → 9 (order PRECISION-TEST-5)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 10 → 9 (order PRECISION-TEST-5)
+# [Orders] Stock deducted: Synthetic Semax (10 mg) 10 → 9 (order PRECISION-TEST-6)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 10 → 9 (order PRECISION-TEST-6)
+# [Customers] Linked order PRECISION-TEST-6 to existing customer \#999001 (Synthetic Precision)
+# Subtest: PG precision item failure rolls back all stock/order/receipt and retry works once
+ok 6 - PG precision item failure rolls back all stock/order/receipt and retry works once
+  ---
+  duration_ms: 167.407537
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic Triple (10 mg) 10 → 9 (order PRECISION-TEST-7)
+# [Customers] Linked order PRECISION-TEST-7 to existing customer \#999001 (Synthetic Precision)
+# Subtest: PG ordinary flow remains vial-only; precision cartridge +15 is whitelist-bound
+ok 7 - PG ordinary flow remains vial-only; precision cartridge +15 is whitelist-bound
+  ---
+  duration_ms: 158.820727
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic Semax (10 mg) 10 → 9 (order PRECISION-TEST-8)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 10 → 9 (order PRECISION-TEST-8)
+# [CustomerDataChange] Confirmed order snapshot recorded in order PRECISION-TEST-8; profile unchanged
+# [Customers] Linked order PRECISION-TEST-8 to existing customer \#999001 (Synthetic Precision)
+# Subtest: PG precision changed-customer quote never writes, separate confirmation is consumed on create
+ok 8 - PG precision changed-customer quote never writes, separate confirmation is consumed on create
+  ---
+  duration_ms: 144.188668
+  type: 'test'
+  ...
+1..8
+# tests 8
+# suites 0
+# pass 8
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 3423.677457

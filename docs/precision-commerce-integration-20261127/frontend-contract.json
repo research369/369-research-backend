@@ -1,0 +1,19 @@
+{
+  "featureGate":"VITE_PRECISION_COMMERCE_ENABLED=true; default false",
+  "gatewayBase":"/api/precision-commerce/",
+  "procedures":{
+    "quote":{"name":"order.quote","method":"POST"},
+    "create":{"name":"order.create","method":"POST"},
+    "receipt":{"name":"order.checkoutReceipt","method":"POST","cache":"no-store"},
+    "customerConfirmation":{"name":"order.checkoutCustomerConfirmation","method":"POST"}
+  },
+  "transport":"JSON {json:input}; quote AbortSignal; never client principal header or WaWi fallback; credentials same-origin",
+  "sourceRecoveryName":"order.checkoutStatus (source railwayApi.ts lines783-784), NOT used by target",
+  "receiptInput":{"checkoutIdempotencyKey":"64 lowercase hex","payloadFingerprint":"unchanged client SHA256 canonical schema-defaulted business payload"},
+  "receiptResponse":"{state:'committed',receipt:persistedCreateResponse} or {state:'not_found'}; no create replay even for not_found",
+  "customerConfirmationFlow":"order.quote supplies customerDataChangeConfirmation.requiresConfirmation; if true call fourth scoped mutation with same customer/storeKey/orderSource; display existing confirmation modal and send token in confirmed create",
+  "fingerprintDefaults":"orderSource=shop,storeKey=369research,communicationLanguage=de/en,customer.deliveryType=home; excludes dates/generated refs/proof tokens/expectedQuoteHash/checkout key and backend-stripped confirmations. Server binds existing fingerprint to precision scope internally.",
+  "quoteExpiry":"60s max age, input/auth/focus invalidation, no stale submit; droppedPromotionCode=true removes stale local code and automatically requotes",
+  "payment":"No provider selected; existing wise key retained. Only released create/receipt paymentInstructions, null is honest recovery, no invented fallback.",
+  "remainingConcern":"Backend new fourth route must be gateway allowlisted. Existing protected UI supports home/Packstation/company; no baseline Postfiliale UI exists, so no new design was added. Unrelated partner/KWK login and catalogue reads stay on configured Railway API and must target isolated backend during staging."
+}

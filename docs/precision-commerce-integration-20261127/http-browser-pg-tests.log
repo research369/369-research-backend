@@ -1,0 +1,341 @@
+Actual Drizzle schema exported (142 statements)
+psql:/tmp/369-precision-integrity.fA214q/schema.sql:1124: NOTICE:  identifier "personal_promo_expiry_reminders_origin_order_id_orders_order_id_fk" will be truncated to "personal_promo_expiry_reminders_origin_order_id_orders_order_id"
+[Isolated] Fresh PostgreSQL, synthetic schema, loopback-only network.
+TAP version 13
+# [Database] Connected to PostgreSQL
+# [CustomerOrderBlocks] Schema ready
+# [Goodies] Katalog, Ausgabenjournal und deaktivierte Checkout-Vorbereitung bereit
+# [AdminChangeLog] Schema ready
+# [CustomerDataChange] Confirmation and immutable history schema ready
+# Subtest: HTTP contract: actual gateway accepts POST for all three actual tRPC mutations
+ok 1 - HTTP contract: actual gateway accepts POST for all three actual tRPC mutations
+  ---
+  duration_ms: 325.771833
+  type: 'test'
+  ...
+# Subtest: HTTP auth: forged client gateway header rejected before forwarding; invalid backend claims rejected without disabling ordinary public vials
+ok 2 - HTTP auth: forged client gateway header rejected before forwarding; invalid backend claims rejected without disabling ordinary public vials
+  ---
+  duration_ms: 274.533999
+  type: 'test'
+  ...
+# Subtest: HTTP frontend fingerprint equals actual schema-defaulted backend fingerprint and excludes only transport/proof metadata
+ok 3 - HTTP frontend fingerprint equals actual schema-defaulted backend fingerprint and excludes only transport/proof metadata
+  ---
+  duration_ms: 108.74949
+  type: 'test'
+  ...
+# Subtest: HTTP quote is database READ ONLY; canonical DIY price is vial+7 per unit and BAC10 is planned without writes
+ok 4 - HTTP quote is database READ ONLY; canonical DIY price is vial+7 per unit and BAC10 is planned without writes
+  ---
+  duration_ms: 137.916565
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic Adamax (10 mg) 10 → 8 (order HTTP-TEST-1)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 20 → 18 (order HTTP-TEST-1)
+# [Customers] Linked order HTTP-TEST-1 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: HTTP committed DIY BOM has exactly three accessory components and only one tracked BAC10 deduction per kit unit
+ok 5 - HTTP committed DIY BOM has exactly three accessory components and only one tracked BAC10 deduction per kit unit
+  ---
+  duration_ms: 236.866419
+  type: 'test'
+  ...
+# Subtest: HTTP format allowlists: exactly 13 cartridges +15 and seven DIY families +7; BPC, forged names/types and contradictory flags fail closed
+ok 6 - HTTP format allowlists: exactly 13 cartridges +15 and seven DIY families +7; BPC, forged names/types and contradictory flags fail closed
+  ---
+  duration_ms: 686.171147
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic Selank (10 mg) 10 → 8 (order HTTP-TEST-2)
+# [Orders] Stock deducted: Synthetic Adamax (10 mg) 10 → 9 (order HTTP-TEST-2)
+# [Orders] Stock deducted: Synthetic Retatrutide (10 mg) 10 → 9 (order HTTP-TEST-2)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 20 → 19 (order HTTP-TEST-2)
+# [Orders] Stock deducted: BAC Wasser 3ml 100 → 98 (order HTTP-TEST-2)
+# [Customers] Linked order HTTP-TEST-2 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: HTTP mixed vial/DIY/cartridge cart: +7/+15 canonical prices; only ordinary vial units get free BAC3
+ok 7 - HTTP mixed vial/DIY/cartridge cart: +7/+15 canonical prices; only ordinary vial units get free BAC3
+  ---
+  duration_ms: 204.70934
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic Adamax (10 mg) 10 → 8 (order HTTP-TEST-3)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 5 → 0 (order HTTP-TEST-3)
+# [Customers] Linked order HTTP-TEST-3 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: HTTP aggregate demand: explicit paid BAC10 plus two kits consume the same stock pool exactly once
+ok 8 - HTTP aggregate demand: explicit paid BAC10 plus two kits consume the same stock pool exactly once
+  ---
+  duration_ms: 208.643635
+  type: 'test'
+  ...
+# Subtest: HTTP overselling: combined BAC10 paid+kit demand, duplicate vial/kit lines and invalid quantities reject before any write
+ok 9 - HTTP overselling: combined BAC10 paid+kit demand, duplicate vial/kit lines and invalid quantities reject before any write
+  ---
+  duration_ms: 194.62219
+  type: 'test'
+  ...
+# Subtest: HTTP BAC10 identity fails closed when missing/inactive/ambiguous/wrong category; never substitutes abundant BAC3
+ok 10 - HTTP BAC10 identity fails closed when missing/inactive/ambiguous/wrong category; never substitutes abundant BAC3
+  ---
+  duration_ms: 298.926185
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic Adamax (10 mg) 10 → 9 (order HTTP-TEST-4)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 20 → 19 (order HTTP-TEST-4)
+# [Customers] Linked order HTTP-TEST-4 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: HTTP concurrency: identical-key requests commit one order/receipt and one kit stock deduction
+ok 11 - HTTP concurrency: identical-key requests commit one order/receipt and one kit stock deduction
+  ---
+  duration_ms: 219.668626
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic Adamax (10 mg) 1 → 0 (order HTTP-TEST-5)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 1 → 0 (order HTTP-TEST-5)
+# [Customers] Linked order HTTP-TEST-5 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: HTTP concurrency: different intents racing for the last vial/BAC10 cannot oversell or underflow
+ok 12 - HTTP concurrency: different intents racing for the last vial/BAC10 cannot oversell or underflow
+  ---
+  duration_ms: 231.4393
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic Adamax (10 mg) 10 → 9 (order HTTP-TEST-6)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 20 → 19 (order HTTP-TEST-6)
+# [Customers] Linked order HTTP-TEST-6 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: HTTP lost create response: real committed receipt recovers original quote/customer/date/payment, then replay never buys/deducts twice
+ok 13 - HTTP lost create response: real committed receipt recovers original quote/customer/date/payment, then replay never buys/deducts twice
+  ---
+  duration_ms: 231.486455
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic Adamax (10 mg) 10 → 9 (order HTTP-TEST-7)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 20 → 19 (order HTTP-TEST-7)
+# [Customers] Linked order HTTP-TEST-7 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: HTTP receipt ownership: wrong key/fingerprint/contact intent and unscoped requests never disclose persisted PII or unlock a different purchase
+ok 14 - HTTP receipt ownership: wrong key/fingerprint/contact intent and unscoped requests never disclose persisted PII or unlock a different purchase
+  ---
+  duration_ms: 251.036666
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic Adamax (10 mg) 10 → 9 (order HTTP-TEST-8)
+# [Orders] Stock deducted: BAC Wasser 3ml 100 → 99 (order HTTP-TEST-8)
+# [Customers] Linked order HTTP-TEST-8 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# [Orders] Stock deducted: Synthetic Adamax (10 mg) 9 → 8 (order HTTP-TEST-9)
+# [Orders] Stock deducted: BAC Wasser 3ml 99 → 98 (order HTTP-TEST-9)
+# [Customers] Linked order HTTP-TEST-9 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: HTTP receipt domains: ordinary legacy create/status remains valid; ordinary and Precision receipts/hashes cannot be cross-read or replayed
+ok 15 - HTTP receipt domains: ordinary legacy create/status remains valid; ordinary and Precision receipts/hashes cannot be cross-read or replayed
+  ---
+  duration_ms: 337.560195
+  type: 'test'
+  ...
+# Subtest: HTTP principal cannot select manual/P4P/V2/admin/customer/stock override; body claims never become capabilities
+ok 16 - HTTP principal cannot select manual/P4P/V2/admin/customer/stock override; body claims never become capabilities
+  ---
+  duration_ms: 263.271644
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic Adamax (10 mg) 10 → 8 (order HTTP-TEST-10)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 20 → 18 (order HTTP-TEST-10)
+# [Orders] Stock deducted: Synthetic Adamax (10 mg) 10 → 8 (order HTTP-TEST-11)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 20 → 18 (order HTTP-TEST-11)
+# [Customers] Linked order HTTP-TEST-11 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: HTTP rollback: failure inserting the descriptive bottle component rolls back order, receipt, customer and already-planned vial/BAC10 stock; same key is retryable
+ok 17 - HTTP rollback: failure inserting the descriptive bottle component rolls back order, receipt, customer and already-planned vial/BAC10 stock; same key is retryable
+  ---
+  duration_ms: 263.253602
+  type: 'test'
+  ...
+# Subtest: HTTP stale authoritative quote rejects before writes after catalog price changes
+ok 18 - HTTP stale authoritative quote rejects before writes after catalog price changes
+  ---
+  duration_ms: 209.44645
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic Adamax (10 mg) 10 → 9 (order HTTP-TEST-12)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 20 → 19 (order HTTP-TEST-12)
+# [Customers] Linked order HTTP-TEST-12 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: HTTP real general promo: quote does not consume a use; create/receipt/replay retain the same canonical code benefit exactly once
+ok 19 - HTTP real general promo: quote does not consume a use; create/receipt/replay retain the same canonical code benefit exactly once
+  ---
+  duration_ms: 264.718716
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic Adamax (10 mg) 10 → 9 (order HTTP-TEST-13)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 20 → 19 (order HTTP-TEST-13)
+# [Customers] Linked order HTTP-TEST-13 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: HTTP real expired promo: Precision quote drops only the expired code; receipt fingerprint still proves the original submitted intent
+ok 20 - HTTP real expired promo: Precision quote drops only the expired code; receipt fingerprint still proves the original submitted intent
+  ---
+  duration_ms: 223.808899
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic Adamax (10 mg) 10 → 9 (order HTTP-TEST-14)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 20 → 19 (order HTTP-TEST-14)
+# [Customers] Linked order HTTP-TEST-14 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: HTTP real KWK credit parity: authenticated owner overrides browser owner; read-only quote, debit/cache/order/receipt commit once
+ok 21 - HTTP real KWK credit parity: authenticated owner overrides browser owner; read-only quote, debit/cache/order/receipt commit once
+  ---
+  duration_ms: 264.43496
+  type: 'test'
+  ...
+# [Orders] Partner zugeordnet: HTTP-OWN9 (Eigenbestellung); Guthaben wird erst nach Zahlung gebucht.
+# [Orders] Stock deducted: Synthetic Adamax (10 mg) 10 → 9 (order HTTP-TEST-15)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 20 → 19 (order HTTP-TEST-15)
+# [Customers] Linked order HTTP-TEST-15 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: HTTP actual signed partner session traverses gateway without WaWi auth; quote/create/credit/receipt parity and replay no double debit
+ok 22 - HTTP actual signed partner session traverses gateway without WaWi auth; quote/create/credit/receipt parity and replay no double debit
+  ---
+  duration_ms: 276.29201
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic Adamax (10 mg) 10 → 9 (order HTTP-TEST-16)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 20 → 19 (order HTTP-TEST-16)
+# [Customers] Linked order HTTP-TEST-16 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# [Orders] Stock deducted: Synthetic Adamax (10 mg) 9 → 8 (order HTTP-TEST-17)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 19 → 18 (order HTTP-TEST-17)
+# [Customers] Linked order HTTP-TEST-17 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# {
+#   "checks": [
+#     "checkout no horizontal overflow desktop",
+#     "commerce same-origin loopback desktop",
+#     "agreed POST method order.quote desktop",
+#     "confirmed set contents retained desktop",
+#     "commerce same-origin loopback desktop",
+#     "agreed POST method order.create desktop",
+#     "cart cleared only after committed receipt desktop",
+#     "actual committed receipt opens confirmation desktop",
+#     "confirmation shows persisted reference or safe payment recovery desktop",
+#     "confirmation no horizontal overflow desktop",
+#     "one create request despite reload desktop",
+#     "checkout no horizontal overflow mobile-lost-response-refresh",
+#     "commerce same-origin loopback mobile-lost-response-refresh",
+#     "agreed POST method order.quote mobile-lost-response-refresh",
+#     "confirmed set contents retained mobile-lost-response-refresh",
+#     "commerce same-origin loopback mobile-lost-response-refresh",
+#     "agreed POST method order.create mobile-lost-response-refresh",
+#     "actual create committed before dropped response mobile-lost-response-refresh",
+#     "commerce same-origin loopback mobile-lost-response-refresh",
+#     "agreed POST method order.checkoutReceipt mobile-lost-response-refresh",
+#     "real create response lost mobile-lost-response-refresh",
+#     "uncertain intent durably stored mobile-lost-response-refresh",
+#     "unknown outcome blocks duplicate order mobile-lost-response-refresh",
+#     "commerce same-origin loopback mobile-lost-response-refresh",
+#     "agreed POST method order.checkoutReceipt mobile-lost-response-refresh",
+#     "cart cleared only after committed receipt mobile-lost-response-refresh",
+#     "actual committed receipt opens confirmation mobile-lost-response-refresh",
+#     "confirmation shows persisted reference or safe payment recovery mobile-lost-response-refresh",
+#     "confirmation no horizontal overflow mobile-lost-response-refresh",
+#     "one create request despite reload mobile-lost-response-refresh",
+#     "no uncaught browser errors"
+#   ],
+#   "pageErrors": [],
+#   "externalBlocked": 5,
+#   "commerceCalls": [
+#     {
+#       "case": "desktop",
+#       "procedure": "order.quote",
+#       "method": "POST"
+#     },
+#     {
+#       "case": "desktop",
+#       "procedure": "order.create",
+#       "method": "POST"
+#     },
+#     {
+#       "case": "mobile-lost-response-refresh",
+#       "procedure": "order.quote",
+#       "method": "POST"
+#     },
+#     {
+#       "case": "mobile-lost-response-refresh",
+#       "procedure": "order.create",
+#       "method": "POST"
+#     },
+#     {
+#       "case": "mobile-lost-response-refresh",
+#       "procedure": "order.checkoutReceipt",
+#       "method": "POST"
+#     },
+#     {
+#       "case": "mobile-lost-response-refresh",
+#       "procedure": "order.checkoutReceipt",
+#       "method": "POST"
+#     }
+#   ],
+#   "passed": true
+# }
+# Subtest: OPTIONAL actual browser UI desktop/mobile commits two synthetic Adamax kits through the same real gateway/PG
+ok 23 - OPTIONAL actual browser UI desktop/mobile commits two synthetic Adamax kits through the same real gateway/PG
+  ---
+  duration_ms: 7315.854278
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic Adamax (10 mg) 10 → 9 (order HTTP-TEST-18)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 20 → 19 (order HTTP-TEST-18)
+# [CustomerDataChange] Confirmed order snapshot recorded in order HTTP-TEST-18; profile unchanged
+# [Customers] Linked order HTTP-TEST-18 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: HTTP actual fourth scoped customer confirmation preserves quote read-only and consumes proof on locked create
+ok 24 - HTTP actual fourth scoped customer confirmation preserves quote read-only and consumes proof on locked create
+  ---
+  duration_ms: 285.953436
+  type: 'test'
+  ...
+1..24
+# tests 24
+# suites 0
+# pass 24
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 15324.954931

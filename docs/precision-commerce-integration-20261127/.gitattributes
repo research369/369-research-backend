@@ -1,0 +1,2 @@
+# Preserve exact tool logs, including intentional whitespace fixtures.
+*.log -whitespace

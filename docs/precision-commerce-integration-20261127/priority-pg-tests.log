@@ -1,0 +1,469 @@
+Actual Drizzle schema exported (142 statements)
+psql:/tmp/369-precision-integrity.u1MOUe/schema.sql:1124: NOTICE:  identifier "personal_promo_expiry_reminders_origin_order_id_orders_order_id_fk" will be truncated to "personal_promo_expiry_reminders_origin_order_id_orders_order_id"
+[Isolated] Fresh PostgreSQL, synthetic schema, loopback-only network.
+TAP version 13
+# [Database] Connected to PostgreSQL
+# [CustomerOrderBlocks] Schema ready
+# [Goodies] Katalog, Ausgabenjournal und deaktivierte Checkout-Vorbereitung bereit
+# [AdminChangeLog] Schema ready
+# [CustomerDataChange] Confirmation and immutable history schema ready
+# [Orders] Stock deducted: BAC Wasser 3ml 100 → 99 (order TEST-1)
+# [Customers] Linked order TEST-1 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: ACTUAL Smart Sub: quote and create retain selected 20-mg price, consume 2x10-mg and replay without a second deduction
+ok 1 - ACTUAL Smart Sub: quote and create retain selected 20-mg price, consume 2x10-mg and replay without a second deduction
+  ---
+  duration_ms: 354.041306
+  type: 'test'
+  ...
+# Subtest: ACTUAL Smart Sub: disabled switch or insufficient combined smaller/larger demand fails before order writes
+ok 2 - ACTUAL Smart Sub: disabled switch or insufficient combined smaller/larger demand fails before order writes
+  ---
+  duration_ms: 116.057493
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic (10 mg) 1 → 0 (order TEST-2)
+# [Orders] Stock deducted: BAC Wasser 3ml 100 → 98 (order TEST-2)
+# [Customers] Linked order TEST-2 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: ACTUAL Smart Sub: sufficient combined smaller/larger demand deducts each underlying unit only once
+ok 3 - ACTUAL Smart Sub: sufficient combined smaller/larger demand deducts each underlying unit only once
+  ---
+  duration_ms: 147.0989
+  type: 'test'
+  ...
+# [Customers] Linked order TEST-3 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: ACTUAL Smart Sub: Plug&Play uses equivalent smaller stock without granting an extra BAC gift
+ok 4 - ACTUAL Smart Sub: Plug&Play uses equivalent smaller stock without granting an extra BAC gift
+  ---
+  duration_ms: 157.196732
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic (10 mg) 10 → 9 (order TEST-4)
+# [Orders] Stock deducted: BAC Wasser 3ml 100 → 99 (order TEST-4)
+# [Customers] Linked order TEST-4 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: actual router: identical-key concurrent requests commit one receipt/order/stock movement
+ok 5 - actual router: identical-key concurrent requests commit one receipt/order/stock movement
+  ---
+  duration_ms: 181.583056
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic (10 mg) 10 → 9 (order TEST-5)
+# [Orders] Stock deducted: BAC Wasser 3ml 100 → 99 (order TEST-5)
+# [Customers] Linked order TEST-5 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: actual router: different payload with same key conflicts and exposes no status PII
+ok 6 - actual router: different payload with same key conflicts and exposes no status PII
+  ---
+  duration_ms: 168.020175
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic (10 mg) 10 → 9 (order TEST-6)
+# [Orders] Stock deducted: BAC Wasser 3ml 100 → 99 (order TEST-6)
+# [Orders] Stock deducted: Synthetic (10 mg) 10 → 9 (order TEST-7)
+# [Orders] Stock deducted: BAC Wasser 3ml 100 → 99 (order TEST-7)
+# [Customers] Linked order TEST-7 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: actual router: item insert failure rolls back receipt, order and stock; same key remains retryable
+ok 7 - actual router: item insert failure rolls back receipt, order and stock; same key remains retryable
+  ---
+  duration_ms: 201.936818
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic (10 mg) 10 → 9 (order TEST-8)
+# [Orders] Stock deducted: BAC Wasser 3ml 100 → 99 (order TEST-8)
+# [Customers] Linked order TEST-8 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: actual router: CRM failure after commit returns success and durable repair task, replay no retry
+ok 8 - actual router: CRM failure after commit returns success and durable repair task, replay no retry
+  ---
+  duration_ms: 158.049616
+  type: 'test'
+  ...
+# Subtest: actual task: payment instruction failure never rejects commit, mail unknown never auto-retries
+ok 9 - actual task: payment instruction failure never rejects commit, mail unknown never auto-retries
+  ---
+  duration_ms: 88.159817
+  type: 'test'
+  ...
+# Subtest: actual router: negative/fractional quantity rejected; duplicate demand rolls back instead of partial sale
+ok 10 - actual router: negative/fractional quantity rejected; duplicate demand rolls back instead of partial sale
+  ---
+  duration_ms: 102.83395
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic (10 mg) 10 → 9 (order TEST-9)
+# [Orders] Stock deducted: BAC Wasser 3ml 100 → 99 (order TEST-9)
+# [Customers] Linked order TEST-9 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: actual public router: client accessory type cannot bypass catalog peptide inventory
+ok 11 - actual public router: client accessory type cannot bypass catalog peptide inventory
+  ---
+  duration_ms: 143.969989
+  type: 'test'
+  ...
+# Subtest: actual router: public no-key cannot create even with a confirmed quote
+ok 12 - actual router: public no-key cannot create even with a confirmed quote
+  ---
+  duration_ms: 114.818583
+  type: 'test'
+  ...
+# Subtest: actual router: cancellation returns exact replacement and BAC movements once under race
+ok 13 - actual router: cancellation returns exact replacement and BAC movements once under race
+  ---
+  duration_ms: 138.816755
+  type: 'test'
+  ...
+# Subtest: actual service: later error rolls status/stock/return mappings back together
+ok 14 - actual service: later error rolls status/stock/return mappings back together
+  ---
+  duration_ms: 113.69682
+  type: 'test'
+  ...
+# Subtest: actual router: unproven history and unlinked prior positive return fail closed
+ok 15 - actual router: unproven history and unlinked prior positive return fail closed
+  ---
+  duration_ms: 123.590372
+  type: 'test'
+  ...
+# Subtest: actual router: shipped cancellation no-restock allowed but automatic return/delete blocked
+ok 16 - actual router: shipped cancellation no-restock allowed but automatic return/delete blocked
+  ---
+  duration_ms: 122.8072
+  type: 'test'
+  ...
+# Subtest: actual router: delete financial/invoice-linked orders blocked without losing items
+ok 17 - actual router: delete financial/invoice-linked orders blocked without losing items
+  ---
+  duration_ms: 125.073349
+  type: 'test'
+  ...
+# Subtest: actual router: delete restock fails atomically if final header deletion fails; retry one return/audit
+ok 18 - actual router: delete restock fails atomically if final header deletion fails; retry one return/audit
+  ---
+  duration_ms: 142.782378
+  type: 'test'
+  ...
+# Subtest: actual router: no-restock delete also rolls back item removal when header fails
+ok 19 - actual router: no-restock delete also rolls back item removal when header fails
+  ---
+  duration_ms: 113.441019
+  type: 'test'
+  ...
+# Subtest: actual router: edit item failure rolls financial header and positions back; paid edits guarded
+ok 20 - actual router: edit item failure rolls financial header and positions back; paid edits guarded
+  ---
+  duration_ms: 133.094795
+  type: 'test'
+  ...
+# Subtest: actual router: positive local correction never becomes an automatic second return
+ok 21 - actual router: positive local correction never becomes an automatic second return
+  ---
+  duration_ms: 120.73212
+  type: 'test'
+  ...
+# Subtest: actual router: status-only cancellation does not silently restock and persists financial repair
+ok 22 - actual router: status-only cancellation does not silently restock and persists financial repair
+  ---
+  duration_ms: 122.888326
+  type: 'test'
+  ...
+# [Orders] Updated order RETURN – 58.00 EUR – 1 items
+# Subtest: actual router: successful explicit article edit includes removed positions in same-tx stock plan
+ok 23 - actual router: successful explicit article edit includes removed positions in same-tx stock plan
+  ---
+  duration_ms: 151.743357
+  type: 'test'
+  ...
+# Subtest: actual router: cancellation with original returns cannot reopen and reship without review
+ok 24 - actual router: cancellation with original returns cannot reopen and reship without review
+  ---
+  duration_ms: 131.310577
+  type: 'test'
+  ...
+# [Orders] Updated order RETURN – 58.00 EUR – 1 items
+# [Orders] Updated order RETURN – 78.00 EUR – 1 items
+# Subtest: actual router: repeated explicit item edits recognize already returned originals
+ok 25 - actual router: repeated explicit item edits recognize already returned originals
+  ---
+  duration_ms: 169.414822
+  type: 'test'
+  ...
+# Subtest: actual finance adapter: second ledger failure rolls back first ledger and status with caller transaction
+ok 26 - actual finance adapter: second ledger failure rolls back first ledger and status with caller transaction
+  ---
+  duration_ms: 122.911941
+  type: 'test'
+  ...
+# Subtest: actual finance adapter: shared adapter writes and order status commit together on success
+ok 27 - actual finance adapter: shared adapter writes and order status commit together on success
+  ---
+  duration_ms: 126.457714
+  type: 'test'
+  ...
+# Subtest: ACTUAL Order.cancel: second real KWK ledger failure rolls Partner, order, stock and caches back; positive retry/racing replay commits once
+ok 28 - ACTUAL Order.cancel: second real KWK ledger failure rolls Partner, order, stock and caches back; positive retry/racing replay commits once
+  ---
+  duration_ms: 201.893404
+  type: 'test'
+  ...
+# Subtest: ACTUAL Order.cancel: cache failure after Partner and KWK writes rolls all state back
+ok 29 - ACTUAL Order.cancel: cache failure after Partner and KWK writes rolls all state back
+  ---
+  duration_ms: 157.159652
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic (10 mg) 10 → 9 (order TEST-10)
+# [Orders] Stock deducted: BAC Wasser 3ml 100 → 99 (order TEST-10)
+# [Customers] Linked order TEST-10 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: ACTUAL checkout: productive auth ignores browser owner; owner/debit/cache commit together and receipt replay no double debit
+ok 30 - ACTUAL checkout: productive auth ignores browser owner; owner/debit/cache commit together and receipt replay no double debit
+  ---
+  duration_ms: 221.390008
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic (10 mg) 10 → 9 (order TEST-11)
+# [Orders] Stock deducted: BAC Wasser 3ml 100 → 99 (order TEST-11)
+# Subtest: ACTUAL checkout: post-debit item failure rolls owner/order/receipt/debit/cache and stock back
+ok 31 - ACTUAL checkout: post-debit item failure rolls owner/order/receipt/debit/cache and stock back
+  ---
+  duration_ms: 185.16362
+  type: 'test'
+  ...
+# Subtest: ACTUAL checkout: demo/revoked/deactivated sessions denied before any order or stock writes
+ok 32 - ACTUAL checkout: demo/revoked/deactivated sessions denied before any order or stock writes
+  ---
+  duration_ms: 154.476264
+  type: 'test'
+  ...
+# Subtest: ACTUAL checkout: revocation after initial auth is rechecked after owner lock and rolls transaction back
+ok 33 - ACTUAL checkout: revocation after initial auth is rechecked after owner lock and rolls transaction back
+  ---
+  duration_ms: 169.047462
+  type: 'test'
+  ...
+# Subtest: ACTUAL preview: trusted synthetic KWK preview cannot write owner/order/ledger/stock
+ok 34 - ACTUAL preview: trusted synthetic KWK preview cannot write owner/order/ledger/stock
+  ---
+  duration_ms: 151.090353
+  type: 'test'
+  ...
+# Subtest: ACTUAL legacy redeem wrapper: NULL owner fails closed without retroclaim or debit
+ok 35 - ACTUAL legacy redeem wrapper: NULL owner fails closed without retroclaim or debit
+  ---
+  duration_ms: 147.478814
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic (10 mg) 10 → 9 (order TEST-14)
+# [Orders] Stock deducted: BAC Wasser 3ml 100 → 99 (order TEST-14)
+# [CustomerDataChange] Confirmed order snapshot recorded in order TEST-14; profile unchanged
+# [Customers] Linked order TEST-14 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: ACTUAL checkout retry: renewed customer confirmation returns existing receipt once; changed address still conflicts
+ok 36 - ACTUAL checkout retry: renewed customer confirmation returns existing receipt once; changed address still conflicts
+  ---
+  duration_ms: 243.653243
+  type: 'test'
+  ...
+# Subtest: ACTUAL order.update: paid/partner/KWK/invoice/shipped/cancelled no-ops preserve every row, ID, flag, timestamp and audit count
+ok 37 - ACTUAL order.update: paid/partner/KWK/invoice/shipped/cancelled no-ops preserve every row, ID, flag, timestamp and audit count
+  ---
+  duration_ms: 274.782553
+  type: 'test'
+  ...
+# Subtest: ACTUAL order.update: legacy missing IDs, item and breakdown reordering, omitted breakdown and subcent normalization are no-op; IDs bind actual rows
+ok 38 - ACTUAL order.update: legacy missing IDs, item and breakdown reordering, omitted breakdown and subcent normalization are no-op; IDs bind actual rows
+  ---
+  duration_ms: 283.036965
+  type: 'test'
+  ...
+# [Orders] Updated order AMOUNTS – 0.00 EUR – 1 items
+# Subtest: ACTUAL order.update: all amounts finite/nonnegative before no-op or stock writes, no one-cent tolerance; valid zero and decimal arithmetic
+ok 39 - ACTUAL order.update: all amounts finite/nonnegative before no-op or stock writes, no one-cent tolerance; valid zero and decimal arithmetic
+  ---
+  duration_ms: 244.368466
+  type: 'test'
+  ...
+# [Orders] Updated order PARTNER-EDIT – 39.00 EUR – 1 items
+# [Orders] Updated order PARTNER-EDIT – 49.00 EUR – 1 items
+# [Orders] Updated order LEGACY-EDIT – 39.00 EUR – 1 items
+# [Orders] Updated order KWK-INTENT – 39.00 EUR – 1 items
+# Subtest: ACTUAL order.update: unpaid unbooked metadata allows base-neutral edits; canonical snapshot commission sync, legacy missing terms explained, credit intent preserved
+ok 40 - ACTUAL order.update: unpaid unbooked metadata allows base-neutral edits; canonical snapshot commission sync, legacy missing terms explained, credit intent preserved
+  ---
+  duration_ms: 213.7255
+  type: 'test'
+  ...
+# Subtest: ACTUAL order.update: real paid/partner/KWK/referral/external invoice and shipped/cancelled changes conflict with actionable copy; no writes
+ok 41 - ACTUAL order.update: real paid/partner/KWK/referral/external invoice and shipped/cancelled changes conflict with actionable copy; no writes
+  ---
+  duration_ms: 278.731462
+  type: 'test'
+  ...
+# [Orders] Updated order STABLE – 48.00 EUR – 1 items
+# Subtest: ACTUAL order.update: successful ordinary monetary edit keeps item IDs and all flags; replacement-stock rollback is atomic
+ok 42 - ACTUAL order.update: successful ordinary monetary edit keeps item IDs and all flags; replacement-stock rollback is atomic
+  ---
+  duration_ms: 258.999506
+  type: 'test'
+  ...
+# Subtest: ACTUAL order.update: concurrent note-only addNote and paid no-op never overwrite notes or financials; auth precedes no-op
+ok 43 - ACTUAL order.update: concurrent note-only addNote and paid no-op never overwrite notes or financials; auth precedes no-op
+  ---
+  duration_ms: 164.819984
+  type: 'test'
+  ...
+# Subtest: ACTUAL order.update: duplicate identical legacy rows compare as a multiset; no-op never fires write triggers; one-cent true delta is never rounded away
+ok 44 - ACTUAL order.update: duplicate identical legacy rows compare as a multiset; no-op never fires write triggers; one-cent true delta is never rounded away
+  ---
+  duration_ms: 270.906565
+  type: 'test'
+  ...
+# [Orders] Updated order METADATA-ITEM – 38.00 EUR – 1 items
+# Subtest: ACTUAL order.update: unbooked metadata item edit with explicit ID preserves flags and ID with exact stock replacement; requested KWK base unchanged
+ok 45 - ACTUAL order.update: unbooked metadata item edit with explicit ID preserves flags and ID with exact stock replacement; requested KWK base unchanged
+  ---
+  duration_ms: 187.411118
+  type: 'test'
+  ...
+# [Orders] Updated order DERIVED-DISCOUNT – 39.00 EUR – 1 items
+# Subtest: ACTUAL order.update: derived partner discount, explicit override and protected credit breakdown need granular review; zero paid true edit still conflicts
+ok 46 - ACTUAL order.update: derived partner discount, explicit override and protected credit breakdown need granular review; zero paid true edit still conflicts
+  ---
+  duration_ms: 198.314152
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic (10 mg) 10 → 6 (order TEST-15)
+# [Orders] Stock deducted: Synthetic DIY Nasenspray Zubehörset 6 → 4 (order TEST-15)
+# [Orders] Stock deducted: BAC Wasser 3ml 100 → 96 (order TEST-15)
+# [Customers] Linked order TEST-15 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: NOV25 actual PG: separate set plus vial quote/receipt/persisted items have same prices/counts/stock, no kit autoposition; replay once
+ok 47 - NOV25 actual PG: separate set plus vial quote/receipt/persisted items have same prices/counts/stock, no kit autoposition; replay once
+  ---
+  duration_ms: 227.999756
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic DIY Nasenspray Zubehörset 4 → 0 (order TEST-16)
+# [Customers] Linked order TEST-16 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: NOV25 actual PG: standalone set gets no BAC/quantity discount/SmartSub, stock shortage fails closed without unpacking
+ok 48 - NOV25 actual PG: standalone set gets no BAC/quantity discount/SmartSub, stock shortage fails closed without unpacking
+  ---
+  duration_ms: 222.209463
+  type: 'test'
+  ...
+# Subtest: NOV25 actual PG retired request {"isNasalSpray":true} quote/create reject before writes
+ok 49 - NOV25 actual PG retired request {"isNasalSpray":true} quote/create reject before writes
+  ---
+  duration_ms: 188.069717
+  type: 'test'
+  ...
+# Subtest: NOV25 actual PG retired request {"isNasalDiySet":true} quote/create reject before writes
+ok 50 - NOV25 actual PG retired request {"isNasalDiySet":true} quote/create reject before writes
+  ---
+  duration_ms: 184.209147
+  type: 'test'
+  ...
+# Subtest: NOV25 actual PG retired request {"isNasalSpray":true,"isNasalDiySet":true} quote/create reject before writes
+ok 51 - NOV25 actual PG retired request {"isNasalSpray":true,"isNasalDiySet":true} quote/create reject before writes
+  ---
+  duration_ms: 196.20539
+  type: 'test'
+  ...
+# Subtest: NOV25 actual PG retired request {"variant":"[Nasenspray]"} quote/create reject before writes
+ok 52 - NOV25 actual PG retired request {"variant":"[Nasenspray]"} quote/create reject before writes
+  ---
+  duration_ms: 190.972728
+  type: 'test'
+  ...
+# Subtest: NOV25 actual PG retired request {"variant":"DIY-Set"} quote/create reject before writes
+ok 53 - NOV25 actual PG retired request {"variant":"DIY-Set"} quote/create reject before writes
+  ---
+  duration_ms: 193.571775
+  type: 'test'
+  ...
+# Subtest: NOV25 actual PG prepared nasal primary not remapped to vials
+ok 54 - NOV25 actual PG prepared nasal primary not remapped to vials
+  ---
+  duration_ms: 209.622028
+  type: 'test'
+  ...
+# Subtest: NOV25 actual PG prepared nasal name not remapped to vials
+ok 55 - NOV25 actual PG prepared nasal name not remapped to vials
+  ---
+  duration_ms: 200.85609
+  type: 'test'
+  ...
+# Subtest: NOV25 actual PG prepared nasal hidden-child not remapped to vials
+ok 56 - NOV25 actual PG prepared nasal hidden-child not remapped to vials
+  ---
+  duration_ms: 204.360837
+  type: 'test'
+  ...
+# Subtest: NOV25 actual PG catalog set price changed after quote conflicts; final lock detects prepared conversion before order number/stock
+ok 57 - NOV25 actual PG catalog set price changed after quote conflicts; final lock detects prepared conversion before order number/stock
+  ---
+  duration_ms: 238.602436
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic DIY Nasenspray Zubehörset 6 → 5 (order TEST-17)
+# [Orders] Stock deducted: BAC Wasser 3ml 100 → 99 (order TEST-17)
+# [Customers] Linked order TEST-17 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: NOV25 actual PG secondary nasal tags preserve SmartSub and BAC with separate set, no cold note
+ok 58 - NOV25 actual PG secondary nasal tags preserve SmartSub and BAC with separate set, no cold note
+  ---
+  duration_ms: 250.971322
+  type: 'test'
+  ...
+# [Orders] Stock deducted: Synthetic (10 mg) 10 → 6 (order TEST-18)
+# [Orders] Stock deducted: BAC Wasser 3ml 100 → 96 (order TEST-18)
+# [Customers] Linked order TEST-18 to existing customer \#999001 (Synthetic Owner)
+# [Email] Error sending order confirmation: Error: RESEND_API_KEY nicht konfiguriert
+#     at sendAndArchiveCrmEmail (/home/ubuntu/369-commerce-integration-20261127/backend/server/crmCommunicationService.ts:113:32)
+#     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+# Subtest: NOV25 actual PG exclusive main campaign retains 36.9%, blocks benefit stacking and suppresses tiers/2for3, no cold surcharge
+ok 59 - NOV25 actual PG exclusive main campaign retains 36.9%, blocks benefit stacking and suppresses tiers/2for3, no cold surcharge
+  ---
+  duration_ms: 252.631337
+  type: 'test'
+  ...
+1..59
+# tests 59
+# suites 0
+# pass 59
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 12361.395725

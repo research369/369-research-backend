@@ -1,0 +1,57 @@
+[
+  {
+    "path": ".gitattributes",
+    "bytes": 89,
+    "sha256": "7cd5e68810c7af05ae8273f978adc470e53b9501cad193a99c11ec07d6102a9f"
+  },
+  {
+    "path": "COMMERCE-INTEGRATION-ABNAHME-20261127.md",
+    "bytes": 16134,
+    "sha256": "03186d5538efd4a1c46c29173aa7db56b79533e69f5b629a41f755585b963829"
+  },
+  {
+    "path": "backend-contract.json",
+    "bytes": 2578,
+    "sha256": "2bcfaf6598645ae95b94da38744ed22cfe82921a5e347120d305b9606bcaa9df"
+  },
+  {
+    "path": "backend-expanded-tests.log",
+    "bytes": 63962,
+    "sha256": "8f08a97da607c0fc596273ad923ab34d5c179591d932119d6c8e9f9bfa60b656"
+  },
+  {
+    "path": "backend-final-types.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "backend-test-contract.json",
+    "bytes": 1636,
+    "sha256": "d769a7d9bd2bc0e3b7fc8e97ef339db3af93ec4d7638db47dd07454e3c466fe0"
+  },
+  {
+    "path": "frontend-contract.json",
+    "bytes": 2134,
+    "sha256": "d0b22eb14357bd96f30579b744cefa4e0e26355b4bc3dc6ba8dce49aed68b49b"
+  },
+  {
+    "path": "http-browser-pg-tests.log",
+    "bytes": 21042,
+    "sha256": "ee7c341dd5da894c907663c4d5eee5176404ed50ec0a3f1ac79b5974027f280d"
+  },
+  {
+    "path": "precision-pg-tests.log",
+    "bytes": 4613,
+    "sha256": "a69213c67c4fb33cbddd5b7631089235644404af51cfbaf553224bd4cec4efce"
+  },
+  {
+    "path": "priority-pg-tests.log",
+    "bytes": 25275,
+    "sha256": "e2adccde244b7121029d64c80d09397fa5701196972aa3c4fa5c147f53d55d66"
+  },
+  {
+    "path": "test-summary.json",
+    "bytes": 1007,
+    "sha256": "a27de07de671d59d60c615ebbc649bfde90f80095d9d4767483a705c11f409c6"
+  }
+]

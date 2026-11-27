@@ -6,6 +6,9 @@ import type { CheckoutOrderItem } from "./freeBacWaterService.js";
 import { calculateCheckoutV2AutomaticGiftLines, type CheckoutV2Promotion2for3 } from "./checkoutV2AutomaticBenefits.js";
 import { resolveSubstitution, extractDosageMg, isSubstitutionEligible, type SubstitutionResult } from "./substitutionService.js";
 import { resolveSubstitutionProductFamily } from "./orderItemIdentity.js";
+import { precisionFormat, precisionBac10 } from "./precisionCommercePolicy.js";
+import { PRECISION_COMMERCE_POLICY } from "./precisionCommercePrincipal.js";
+import { NASAL_DIY_SET_SURCHARGE } from "./nasalDiySetConfig.js";
 
 export type MainshopCatalogArticle = KwkCatalogArticle & { id: number; category: string | null; categories: unknown; stock?: number | null };
 export type MainshopLine = CheckoutOrderItem & { bundleId?: number; bundleGroup?: string; canonicalProductId?: string; canonicalVariantId?: string };
@@ -84,7 +87,11 @@ function assertNoPreparedNasal(selection: ResolvedSelection): void {
 }
 // Existing shop Plug&Play exclusions, now evaluated exclusively on canonical identities/categories.
 const plugExcluded = new Set(["369-retinal-shot", "369-deep-collagen-mask", "perfect-skin-bundle", "selank", "semax", "oxytocin", "adamax", "semax-selank", "melanotan-1", "melanotan-2", "dsip", "snap-8", "snap8", "peptidpen-case", "pen-kartusche-5er", "pen-nadeln-10er"]);
-function canonicalFormat(line: MainshopLine, selection: ResolvedSelection) {
+function canonicalFormat(line: MainshopLine, selection: ResolvedSelection, precision = false) {
+  if (precision) {
+    assertNoPreparedNasal(selection);
+    return precisionFormat(line, selection.parent, selection.article);
+  }
   assertNoRetiredNasalFormat(line);
   assertNoPreparedNasal(selection);
   const { parent, article } = selection;
@@ -103,7 +110,7 @@ function selectionPrice(selection: ResolvedSelection, format: ReturnType<typeof 
   const { article, configured } = selection;
   const base = !bundle && article.salePrice !== null && article.salePrice !== undefined && Number(article.salePrice) > 0
     ? priceValue(article.salePrice) : configured ? priceValue(configured.price) : priceValue(article.sellingPrice);
-  return { base, surcharge: (format.isPlugPlay ? PLUGPLAY_SURCHARGE : 0) };
+  return { base, surcharge: (format.isPlugPlay ? PLUGPLAY_SURCHARGE : 0) + (format.isNasalDiySet ? NASAL_DIY_SET_SURCHARGE : 0) };
 }
 function isPen(a: MainshopCatalogArticle): boolean {
   return [norm(a.sku), norm(a.shopProductId)].some(id => ["369pen", "forscherpen", "peptidpen-case"].includes(id));
@@ -111,19 +118,19 @@ function isPen(a: MainshopCatalogArticle): boolean {
 function quantityEligible(a: MainshopCatalogArticle): boolean { return isPen(a) || (!nonVial(a) && ![norm(a.sku), norm(a.shopProductId)].some(id => ["bac-wasser", "bac-wasser-3ml", "bac-3ml"].includes(id))); }
 function canonicalType(a: MainshopCatalogArticle): string { return nonVial(a) ? "accessory" : "peptide"; }
 /** The only bundle authority is the active WaWi definition and its complete composition. */
-export function canonicalizeMainshopLines(input: MainshopLine[], catalog: MainshopCatalogArticle[], bundles: MainshopBundle[], components: MainshopBundleComponent[], promotion2for3: CheckoutV2Promotion2for3 = { enabled: false, mode: "all", products: [] }): { items: MainshopLine[]; quantityUnits: number; quantityEligible: boolean[] } {
-  input.forEach(assertNoRetiredNasalFormat);
+export function canonicalizeMainshopLines(input: MainshopLine[], catalog: MainshopCatalogArticle[], bundles: MainshopBundle[], components: MainshopBundleComponent[], promotion2for3: CheckoutV2Promotion2for3 = { enabled: false, mode: "all", products: [] }, precision = false): { items: MainshopLine[]; quantityUnits: number; quantityEligible: boolean[] } {
+  if (!precision) input.forEach(assertNoRetiredNasalFormat);
   const raw = input.filter(i => !(i.isFreeGift && norm(i.shopProductId) === "bac-wasser-3ml" && i.bundleId === undefined));
   const claimedGifts = raw.filter(i => i.isFreeGift && i.bundleId === undefined);
   const paid = raw.filter(i => !i.isFreeGift || i.bundleId !== undefined);
   if (!paid.length) throw Error(claimedGifts.length ? "CHECKOUT_UNTRUSTED_GIFT" : "CHECKOUT_EMPTY_CART");
   const selections = paid.map(i => resolveSelection(i, catalog));
-  const prices = selections.map((s, n) => selectionPrice(s, canonicalFormat(paid[n], s), paid[n].bundleId !== undefined));
+  const prices = selections.map((s, n) => selectionPrice(s, canonicalFormat(paid[n], s, precision), paid[n].bundleId !== undefined));
   const items: MainshopLine[] = paid.map((i, n) => {
     if (!Number.isSafeInteger(i.quantity) || i.quantity <= 0) throw Error("CHECKOUT_QUANTITY_INVALID");
     if ((i.bundleId === undefined) !== (i.bundleGroup === undefined)) throw Error("CHECKOUT_BUNDLE_IDENTITY_REQUIRED");
     const s = selections[n];
-    return { ...i, ...canonicalFormat(i, s), name: s.article.name, type: canonicalType(s.parent), dosage: s.selectedDosage.replace(/(\d)(mg|iu|ml|mcg)$/, "$1 $2") || undefined, shopProductId: s.article.sku, canonicalProductId: s.parent.shopProductId || s.parent.sku, canonicalVariantId: s.variantId, variant: i.bundleId === undefined ? undefined : i.variant, isFreeGift: false, price: roundMoney(prices[n].base + prices[n].surcharge) };
+    return { ...i, ...canonicalFormat(i, s, precision), name: s.article.name, type: canonicalType(s.parent), dosage: s.selectedDosage.replace(/(\d)(mg|iu|ml|mcg)$/, "$1 $2") || undefined, shopProductId: s.article.sku, canonicalProductId: s.parent.shopProductId || s.parent.sku, canonicalVariantId: s.variantId, variant: i.bundleId === undefined ? undefined : i.variant, isFreeGift: false, price: roundMoney(prices[n].base + prices[n].surcharge) };
   });
   let quantityUnits = 0;
   const eligible = selections.map(s => quantityEligible(s.parent) && (s.article === s.parent || quantityEligible(s.article)));
@@ -172,7 +179,7 @@ export function canonicalizeMainshopLines(input: MainshopLine[], catalog: Mainsh
   const claimedCounts = new Map<string, number>();
   for (const gift of claimedGifts) {
     const resolved = resolveSelection(gift, catalog);
-    canonicalFormat(gift, resolved);
+    canonicalFormat(gift, resolved, precision);
     if (gift.isPlugPlay || gift.isNasalSpray || gift.isNasalDiySet) throw Error("CHECKOUT_UNTRUSTED_GIFT");
     const key = `${norm(resolved.article.sku)}:${resolved.selectedDosage}`;
     claimedCounts.set(key, (claimedCounts.get(key) || 0) + gift.quantity);
@@ -182,17 +189,25 @@ export function canonicalizeMainshopLines(input: MainshopLine[], catalog: Mainsh
     if (count !== allowed || !allowed) throw Error("CHECKOUT_UNTRUSTED_GIFT");
   }
   items.push(...gifts); eligible.push(...gifts.map(() => false));
+  if (precision) {
+    const count = items.filter(i => i.isNasalDiySet).reduce((sum, i) => sum + i.quantity, 0);
+    if (count) {
+      const bac = precisionBac10(catalog);
+      items.push({name: "DIY Nasenspray-Set · BAC Wasser 10 ml", dosage: "10 ml", variant: "10 ml · enthalten", shopProductId: bac.sku, canonicalProductId: "bac-wasser", type: "accessory", quantity: count, price: 0, isFreeGift: true, isPlugPlay: false, isNasalSpray: false, isNasalDiySet: false});
+      eligible.push(false);
+    }
+  }
   return { items, quantityUnits, quantityEligible: eligible };
 }
 /** Pure shared fulfillment plan, checked before quote/create and under inventory locks.
  * Canonical customer selections/prices stay unchanged; only existing Smart-Sub components may fulfill them. */
-export function assertMainshopStock(items: MainshopLine[], catalog: MainshopCatalogArticle[], substitutionEnabled = false): Map<string, SubstitutionResult> {
+export function assertMainshopStock(items: MainshopLine[], catalog: MainshopCatalogArticle[], substitutionEnabled = false, precision = false): Map<string, SubstitutionResult> {
   const demand = new Map<string, number>();
   const add = (sku: string, count: number) => demand.set(norm(sku), (demand.get(norm(sku)) || 0) + count);
   for (const item of items) {
     if (!item.shopProductId) throw Error("CHECKOUT_STOCK_IDENTITY_REQUIRED");
     add(item.shopProductId, item.quantity);
-    assertNoRetiredNasalFormat(item);
+    if (!precision) assertNoRetiredNasalFormat(item);
     const selected = catalog.find(a => norm(a.sku) === norm(item.shopProductId));
     if (selected && preparedNasal(selected)) throw Error("CHECKOUT_PREPARED_NASAL_NOT_SELLABLE");
   }
@@ -285,16 +300,21 @@ export function mainshopPromoDiscount(items: MainshopLine[], remainingValues: nu
   return roundMoney(promo.discountType === "fixed" ? Math.min(Math.max(0, promo.fixedAmount), eligible) : eligible * Math.min(100, Math.max(0, promo.percentage)) / 100);
 }
 /** Restrict hash/locks to the actual selected families and tracked components, not the whole shop. */
-export function mainshopCatalogScope(input: MainshopLine[], catalog: MainshopCatalogArticle[]): MainshopCatalogArticle[] {
+export function mainshopCatalogScope(input: MainshopLine[], catalog: MainshopCatalogArticle[], precision = false): MainshopCatalogArticle[] {
   const selections = input.filter(i => !(i.isFreeGift && norm(i.shopProductId) === "bac-wasser-3ml" && i.bundleId === undefined)).map(i => resolveSelection(i, catalog));
   const families = new Set(selections.map(s => norm(s.parent.shopProductId)).filter(Boolean));
   const skus = new Set(selections.flatMap(s => [norm(s.parent.sku), norm(s.article.sku)]));
+  if (precision && input.some(i => i.isNasalDiySet || i.isNasalSpray)) {
+    precisionBac10(catalog);
+    families.add("bac-wasser");
+  }
   return catalog.filter(a => families.has(norm(a.shopProductId)) || skus.has(norm(a.sku)) || norm(a.shopProductId) === "bac-wasser-3ml").sort((a, b) => norm(a.sku).localeCompare(norm(b.sku)));
 }
-export function mainshopPolicySnapshot(input: MainshopLine[], catalog: MainshopCatalogArticle[], bundles: MainshopBundle[], components: MainshopBundleComponent[]) {
+export function mainshopPolicySnapshot(input: MainshopLine[], catalog: MainshopCatalogArticle[], bundles: MainshopBundle[], components: MainshopBundleComponent[], precision = false) {
   const ids = new Set(input.map(i => i.bundleId).filter(v => v !== undefined));
   return {
-    catalog: mainshopCatalogScope(input, catalog).map(a => ({ sku: a.sku, shopProductId: a.shopProductId, name: a.name, sellingPrice: a.sellingPrice, salePrice: a.salePrice, variants: a.variants, isActive: a.isActive, shopVisible: a.shopVisible, category: a.category, categories: a.categories })),
+    ...(precision ? {storeIdentity: "precision-shop", policy: PRECISION_COMMERCE_POLICY} : {}),
+    catalog: mainshopCatalogScope(input, catalog, precision).map(a => ({ sku: a.sku, shopProductId: a.shopProductId, name: a.name, sellingPrice: a.sellingPrice, salePrice: a.salePrice, variants: a.variants, isActive: a.isActive, shopVisible: a.shopVisible, category: a.category, categories: a.categories })),
     bundles: bundles.filter(b => ids.has(b.id)).map(b => ({ id: b.id, name: b.name, discountPercent: b.discountPercent, isActive: b.isActive, allowsPlugPlay: b.allowsPlugPlay, allowsNasalSpray: b.allowsNasalSpray })).sort((a, b) => a.id - b.id),
     components: components.filter(c => ids.has(c.bundleId)).map(c => ({ bundleId: c.bundleId, articleSku: c.articleSku, quantity: c.quantity, isFreeGift: c.isFreeGift, fixedDosageMg: c.fixedDosageMg })).sort((a, b) => `${a.bundleId}:${a.articleSku}`.localeCompare(`${b.bundleId}:${b.articleSku}`)),
   };

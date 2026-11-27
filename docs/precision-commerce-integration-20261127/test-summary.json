@@ -1,0 +1,39 @@
+{
+  "frontend": {
+    "vitestPassed": 879,
+    "nativePassed": 216,
+    "netlifySecurityPassed": 224,
+    "typecheckPassed": true,
+    "viteTypecheckPassed": true,
+    "defaultOffBuildPassed": true,
+    "isolatedFeatureOnBuildPassed": true
+  },
+  "backend": {
+    "expandedOfflinePassed": 258,
+    "offlinePgSkippedThenRunSeparately": 8,
+    "historicalActualPgPassed": 59,
+    "precisionActualPgPassed": 8,
+    "actualHttpAndBrowserPgPassed": 24,
+    "typecheckPassed": true
+  },
+  "browser": {
+    "desktopPassed": true,
+    "mobileLostResponseRefreshPassed": true,
+    "orders": 2,
+    "receipts": 2,
+    "adamaxStockBefore": 10,
+    "adamaxStockAfter": 8,
+    "bac10StockBefore": 20,
+    "bac10StockAfter": 18,
+    "bac3StockAfter": 100,
+    "commercePostsMocked": false
+  },
+  "release": {
+    "productionDeployed": false,
+    "mainMerged": false,
+    "paymentProviderSelected": false,
+    "realMailDelivered": false,
+    "dhlLabelCreated": false,
+    "externalStagingIntegrationDeployed": false
+  }
+}

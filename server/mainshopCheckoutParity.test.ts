@@ -678,3 +678,94 @@ test("NOV25 actual handler all current 369 forms use ordinary shipping even at c
   assert.equal(q.shipping, 8); assert.equal(q.items.length, 1); assert.equal(q.subtotal, 115);
   assert.equal(fetches, 0); assert.equal(writes.length, 0);
 });
+
+// Precision gateway exercises the actual shared handlers at the same driver boundary.
+const precisionGatewayKey = "synthetic-precision-gateway-0000000000000000000000";
+const precisionCaller = (authorization?: string) => {
+  process.env.PRECISION_COMMERCE_ENABLED = "true";
+  process.env.PRECISION_COMMERCE_GATEWAY_KEY = precisionGatewayKey;
+  return orderRouter.createCaller({req:{headers:{"x-369-precision-commerce-key":precisionGatewayKey,...(authorization?{authorization}:{})}},res:{},user:null} as any);
+};
+const precisionFixture = () => {
+  data.articles[0].shop_product_id="semax";
+  data.articles.push({...article(4,"BAC-10ML","bac-wasser","5","Zubehör","Synthetic BAC Wasser (10 ml)"),variants:[],stock:10});
+  return {items:[{...payload().items[0],shopProductId:"semax",quantity:1,isNasalSpray:true,isNasalDiySet:true,isPlugPlay:false}]};
+};
+async function precisionQuote(extra: Row = {}, authorization?: string) {
+  const result=await precisionCaller(authorization).quote(payload(extra) as any);
+  assert.equal(writes.length,0);assert.equal(committed,0);assert.equal(fetches,0);return result.quote;
+}
+test("PRECISION actual quote/create/receipt: +7, one BAC10, exact flags and untracked contents",async()=>{
+  const extra=precisionFixture(),q=await precisionQuote(extra);
+  assert.equal(q.subtotal,107);assert.equal(q.shipping,8);assert.equal(q.items.length,2);assert.equal(q.items[1].shopProductId,"BAC-10ML");
+  const submitted:Row=payload({...extra,expectedQuoteHash:q.hash,checkoutIdempotencyKey:"a".repeat(64)});
+  const out=await precisionCaller().create(submitted as any);assert("total" in out);assert.equal(out.total,115);assert.equal(data.orders.length,1);assert.equal(data.order_items.length,4);assert.equal(data.stock_history.length,2);
+  assert.equal(data.articles[0].stock,999);assert.equal(data.articles[2].stock,1000);assert.equal(data.articles[3].stock,9);
+  const nasal=data.order_items.find(i=>i.type==="peptide")!;assert.equal(nasal.is_nasal_spray,true);assert.equal(nasal.is_nasal_diy_set,true);assert.equal(nasal.is_plug_play,false);
+  assert.equal(data.order_items.filter(i=>i.name.includes("BAC Wasser")).length,1);
+  const fingerprint=checkoutFingerprint((await import("./orderRouter.js")).createOrderSchema.parse(submitted));
+  const recovery=await precisionCaller().checkoutReceipt({checkoutIdempotencyKey:submitted.checkoutIdempotencyKey,payloadFingerprint:fingerprint});
+  assert.equal(recovery.state,"committed");if(recovery.state==="committed"){assert.equal(recovery.receipt.orderId,out.orderId);assert.equal(recovery.receipt.quote.hash,q.hash);assert(recovery.receipt.customer);assert.equal(recovery.receipt.paymentInstructions,null);}
+  const writeCount=writes.length;data.articles[0].selling_price="900";const replay=await precisionCaller().create({...submitted,expectedQuoteHash:"b".repeat(64)} as any);assert.equal(replay.orderId,out.orderId);assert.equal(writes.length,writeCount);
+  await assert.rejects(caller().create(submitted as any),/CHECKOUT_INTENT_CONFLICT/);
+  await assert.rejects(caller().checkoutReceipt({checkoutIdempotencyKey:submitted.checkoutIdempotencyKey,payloadFingerprint:fingerprint}),/SCOPE_REQUIRED/);
+  assert.deepEqual(await precisionCaller().checkoutReceipt({checkoutIdempotencyKey:submitted.checkoutIdempotencyKey,payloadFingerprint:"f".repeat(64)}),{state:"not_found"});
+});
+test("PRECISION actual purchased BAC10 + kit stock journal aggregates exactly once",async()=>{
+  const extra: Row=precisionFixture();extra.items.push({name:"paid BAC",shopProductId:"bac-wasser",dosage:"10 ml",quantity:2,price:1,type:"peptide"});
+  const q=await precisionQuote(extra);assert.equal(q.subtotal,117);assert.equal(q.items.length,3);
+  await precisionCaller().create(payload({...extra,expectedQuoteHash:q.hash,checkoutIdempotencyKey:"a".repeat(64)}) as any);
+  assert.equal(data.articles[3].stock,7);assert.equal(data.stock_history.filter(i=>i.article_id===4).length,1);assert.equal(data.stock_history.find(i=>i.article_id===4)?.quantity_change,-3);assert.equal(data.articles[2].stock,1000);
+});
+test("PRECISION actual aggregate BAC10 shortage cannot quote or substitute BAC3",async()=>{
+  const extra:Row=precisionFixture();extra.items.push({name:"BAC",shopProductId:"bac-wasser",dosage:"10 ml",quantity:1,price:1,type:"accessory"});data.articles[3].stock=1;data.substitution_config[0].enabled=true;
+  await assert.rejects(precisionCaller().quote(payload(extra) as any),/STOCK_DEMAND_NOT_COVERED/);assert.equal(writes.length,0);assert.equal(data.orders.length,0);
+});
+test("PRECISION actual locked BAC price and stock changes invalidate before order writes",async()=>{
+  const extra=precisionFixture(),q=await precisionQuote(extra);beforeWriteTransaction=()=>{data.articles[3].selling_price="8";};
+  await assert.rejects(precisionCaller().create(payload({...extra,expectedQuoteHash:q.hash,checkoutIdempotencyKey:"a".repeat(64)}) as any),/QUOTE_CHANGED/);assert.equal(data.orders.length,0);assert.equal(data.stock_history.length,0);
+  beforeWriteTransaction=null;data.articles[3].selling_price="5";const q2=await precisionQuote(extra);beforeWriteTransaction=()=>{data.articles[3].stock=0;};
+  await assert.rejects(precisionCaller().create(payload({...extra,expectedQuoteHash:q2.hash,checkoutIdempotencyKey:"a".repeat(64)}) as any),/STOCK_DEMAND_NOT_COVERED/);assert.equal(data.orders.length,0);
+});
+test("PRECISION actual item rollback restores stock/receipt/order and retry commits once",async()=>{
+  const extra=precisionFixture(),q=await precisionQuote(extra),submitted=payload({...extra,expectedQuoteHash:q.hash,checkoutIdempotencyKey:"a".repeat(64)});failItem=true;
+  await assert.rejects(precisionCaller().create(submitted as any),/Failed query|INJECTED_ITEM_FAILURE/);assert.equal(data.orders.length,0);assert.equal(data.stock_history.length,0);assert.equal(data.priority_checkout_receipts.length,0);assert.equal(data.articles[3].stock,10);assert.equal(data.articles[0].stock,1000);
+  failItem=false;const out=await precisionCaller().create(submitted as any);assert(out.success);assert.equal(data.orders.length,1);assert.equal(data.articles[3].stock,9);
+});
+test("PRECISION actual expired promo drops gracefully with stable quote/create",async()=>{
+  const extra=precisionFixture();promo("Synthetic | {}",10);data.promo_codes[0].valid_until=new Date("2000-01-01");
+  const q=await precisionQuote({...extra,discountCode:"PROMO"});assert.equal(q.discount,0);assert.equal((q as any).discountCode,null);assert.equal((q as any).droppedPromotionCode,true);
+  const out=await precisionCaller().create(payload({...extra,discountCode:"PROMO",expectedQuoteHash:q.hash,checkoutIdempotencyKey:"a".repeat(64)}) as any);assert("total" in out);assert.equal(out.total,115);
+  await assert.rejects(caller().quote(payload({...extra,discountCode:"PROMO"}) as any),/AKTIONSCODE_UNGUELTIG/);
+});
+test("PRECISION actual tiers/global/restricted promo use the same residual parity",async()=>{
+  const extra=precisionFixture();extra.items[0].quantity=4;global(10);promo('Synthetic | {"restrict":["semax"]}',20);
+  const q=await precisionQuote({...extra,discountCode:"PROMO"});assert.equal(q.subtotal,428);assert.equal(q.discount,150.66);assert.equal(q.items.find(i=>i.shopProductId==="BAC-10ML")?.quantity,4);
+});
+test("PRECISION actual forged manual/admin/store and legacy nasal-only reject before writes",async()=>{
+  const extra=precisionFixture();
+  for(const overrides of [{storeKey:"peps4pets"},{orderSource:"wawi_manual"},{existingCustomerId:1},{items:[{...extra.items[0],legacyNasalOnly:true}]}]) await assert.rejects(precisionCaller().create(payload({...extra,...overrides}) as any),/SCOPE_INVALID|WaWi|WAWI|Berechtigung|reserved/);
+  await assert.rejects(precisionCaller().quote(payload({...extra,precisionShopPrincipal:{storeIdentity:"precision-shop"}}) as any));assert.equal(writes.length,0);
+});
+
+test("PRECISION actual authenticated partner discount/credit retains session and ledger parity",async()=>{
+  const extra=precisionFixture(),auth=selfOwner();
+  const q=await precisionQuote({...extra,partnerNumber:"OWN-9",creditUsed:20},auth);
+  assert.equal(q.partnerDiscount,10.7);assert.equal(q.creditUsed,20);assert.equal(q.total,84.3);
+  const submitted=payload({...extra,partnerNumber:"OWN-9",creditUsed:20,expectedQuoteHash:q.hash,checkoutIdempotencyKey:"a".repeat(64)});
+  const out=await precisionCaller(auth).create(submitted as any);assert("total" in out);assert.equal(out.total,q.total);assert.equal(data.partner_transactions.length,1);assert.equal(data.partners[0].credit_balance,"80.00");
+  const replay=await precisionCaller(auth).create(submitted as any);assert.equal(replay.orderId,out.orderId);assert.equal(data.partner_transactions.length,1);
+});
+test("PRECISION actual KWK productive credit retains auth and ledger parity, demo/revoked denied",async()=>{
+  const extra=precisionFixture();kwkAccount();
+  const q=await precisionQuote({...extra,kwkCreditUsed:20,kwkCreditToken:createKwkToken(7)});assert.equal(q.total,95);
+  const submitted=payload({...extra,kwkCreditUsed:20,kwkCreditToken:createKwkToken(7),expectedQuoteHash:q.hash,checkoutIdempotencyKey:"a".repeat(64)});
+  const out=await precisionCaller().create(submitted as any);assert("total" in out);assert.equal(out.total,95);assert.equal(data.kwk_ledger.length,1);
+  await precisionCaller().create(submitted as any);assert.equal(data.kwk_ledger.length,1);
+  await assert.rejects(precisionCaller().quote(payload({...extra,kwkCreditUsed:20,kwkCreditToken:createKwkDemoToken(7)}) as any),/AUTHENTIFIZIERUNG_ERFORDERLICH/);
+});
+test("PRECISION actual KWK referral and public code discounts share canonical residual logic",async()=>{
+  const extra=precisionFixture();kwkAccount();
+  const q=await precisionQuote({...extra,kwkCode:"KWK-7"});assert.equal(q.kwkDiscount,10.7);assert.equal(q.total,104.3);
+  creator();const q2=await precisionQuote({...extra,partnerCode:"CREATOR"});assert.equal(q2.partnerDiscount,10.7);assert.equal(q2.total,104.3);
+});

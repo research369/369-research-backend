@@ -1,6 +1,7 @@
 import {trackCustomerCreation} from './customerCreationMaintenance.js';
 import { recordAdminMutation } from "./adminChangeLogService.js";
 import { initTRPC, TRPCError } from "@trpc/server";
+import { resolvePrecisionShopPrincipal, type PrecisionShopPrincipal } from "./precisionCommercePrincipal.js";
 import type {
   TRPCProcedureBuilder,
   TRPCRootObject,
@@ -13,6 +14,8 @@ import type { Request, Response } from "express";
 export interface Context {
   /** Internal diagnostic principal only. Never accepted in a public request. */
   operationsPreview?: {partnerId?:number;kwkCreditAccountId?:number};
+  /** Revalidated from server gateway credentials by public middleware; never browser body. */
+  precisionShopPrincipal?: PrecisionShopPrincipal;
   jarvyOrder?: import('./jarvyOrderContract.js').JarvyOrderContext;
   screenshotOrder?: import('./screenshotOrderContract.js').ScreenshotOrderContext;
   req: Request;
@@ -51,7 +54,10 @@ const t = initTRPC.context<Context>().create({
 
 export const router: Root["router"] = t.router;
 const tracked=t.procedure.use(t.middleware(({path,type,next})=>trackCustomerCreation(path,type,next)));
-export const publicProcedure: Root["procedure"] = tracked;
+export const publicProcedure: Root["procedure"] = tracked.use(t.middleware(({ctx,next}) => {
+  const precisionShopPrincipal = resolvePrecisionShopPrincipal(ctx.req);
+  return next({ctx: {...ctx, precisionShopPrincipal}});
+}));
 export const middleware: Root["middleware"] = t.middleware;
 
 const isAuthed = middleware(({ ctx, next }) => {

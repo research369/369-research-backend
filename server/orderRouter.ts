@@ -1,4 +1,7 @@
 import { TRPCError } from "@trpc/server";
+import { resolvePrecisionShopPrincipal, precisionReceiptFingerprint, PRECISION_COMMERCE_POLICY } from "./precisionCommercePrincipal.js";
+import { PRECISION_UNTRACKED_KIT_COMPONENTS } from "./precisionCommercePolicy.js";
+import { customerDataChangeRouter } from "./customerDataChangeRouter.js";
 import { canonicalizeMainshopLines, quantityPricing, allocateMoney, mainshopPromoDiscount, quoteHash, mainshopBusinessIntent, assertMainshopStock, type MainshopCatalogArticle, mainshopPolicySnapshot as buildMainshopPolicySnapshot, mainshopCatalogScope, mainshopBenefitCategories } from "./mainshopCanonicalPricing.js";
 import { checkoutShippingItems, is369CustomerCheckout } from "./mainshopCheckoutIntegration.js";
 import { readPersistedOrderMessageData, snapshotFromPersistedOrder } from "./orderDiscountMessageService.js";
@@ -170,6 +173,8 @@ const discountBreakdownEntrySchema = z.object({
 });
 
 export const createOrderSchema = z.object({
+  precisionShopPrincipal: z.never().optional(),
+  precisionCommerceScope: z.never().optional(),
   orderId: z.string().optional(), // now generated server-side via DB sequence
   // Der öffentliche Shop bleibt der Standard. Der WaWi-Herkunftsmarker wird
   // ausschließlich für eine bereits authentifizierte interne Sitzung akzeptiert.
@@ -200,6 +205,7 @@ export const createOrderSchema = z.object({
     isNasalSpray: z.boolean().optional(),
     // Legacy/manual-only format. New regular 369 checkout rejects true; accessories are separate catalogue lines.
     isNasalDiySet: z.boolean().optional(),
+    legacyNasalOnly: z.boolean().optional(),
     isPlugPlay: z.boolean().optional(),   // Plug&Play Patrone (Aufpreis wird serverseitig ermittelt)
     isFreeGift: z.boolean().optional(),   // Servergenerierte Gratisposition; Bestand wird ebenfalls geprüft und gebucht.
   })),
@@ -292,7 +298,11 @@ export async function createOrderFromTrustedInput(
       // Reject foreign public-code terms before lookup, pricing or any writes.
       assertNoMixedPartnerOrderInput(input);
       assertManualSaleRole(input.orderSource, ctx.user);
-      const originalBusinessIntent = mainshopBusinessIntent(input);
+      // Revalidate here too: direct trusted adapters cannot fabricate this principal.
+      const precisionPrincipal = resolvePrecisionShopPrincipal(ctx.req);
+      const isPrecisionShop = Boolean(precisionPrincipal);
+      if (isPrecisionShop && (input.storeKey !== "369research" || input.orderSource !== "shop" || ctx.user || ctx.operationsPreview || ctx.jarvyOrder || ctx.screenshotOrder || input.stockOverride || input.existingCustomerId || input.items.some(i => i.legacyNasalOnly))) throw new TRPCError({code: "FORBIDDEN", message: "PRECISION_CHECKOUT_SCOPE_INVALID"});
+      const originalBusinessIntent = { ...mainshopBusinessIntent(input), ...(isPrecisionShop ? {storeIdentity: "precision-shop", policy: PRECISION_COMMERCE_POLICY} : {}) };
       const originalMainshopItems = structuredClone(input.items);
       const isPublic369Create = !options.quoteOnly && input.storeKey === '369research' && input.orderSource === 'shop' && !ctx.operationsPreview && !ctx.jarvyOrder;
       if (isPublic369Create && !input.checkoutIdempotencyKey) throw Error('CHECKOUT_INTENT_KEY_REQUIRED');
@@ -302,7 +312,8 @@ export async function createOrderFromTrustedInput(
       if (!db) throw new Error("Database not available");
       const normalCheckoutKey = !options.quoteOnly && input.storeKey === '369research' && !ctx.jarvyOrder ? input.checkoutIdempotencyKey : undefined;
       if (normalCheckoutKey && !/^[a-f0-9]{64}$/.test(normalCheckoutKey)) throw Error('CHECKOUT_INTENT_KEY_INVALID');
-      const normalFingerprint = normalCheckoutKey ? checkoutFingerprint(input) : undefined;
+      const payloadFingerprint = normalCheckoutKey ? checkoutFingerprint(input) : undefined;
+      const normalFingerprint = payloadFingerprint ? isPrecisionShop ? precisionReceiptFingerprint(payloadFingerprint) : payloadFingerprint : undefined;
       if (normalCheckoutKey) {
         const receipt = await readCheckoutReceipt(db,normalCheckoutKey,normalFingerprint!);
         if (receipt) return receipt;
@@ -391,6 +402,7 @@ export async function createOrderFromTrustedInput(
       // discounted by the partner code. The browser cannot choose a rate.
       let resolvedPromoCode: PromoDefinition | null = null;
       let resolvedPromoCodeRecord: { id: number; code: string; minimumOrder: number } | null = null;
+      let droppedPromotionCode = false;
       const normalizedPromotionCode = input.discountCode?.trim().toUpperCase() || "";
       if (normalizedPromotionCode) {
         if (resolvedPublicPartnerCode && normalizedPromotionCode === resolvedPublicPartnerCode.partnerCode.replace(/\s+/g, "").toUpperCase()) {
@@ -402,6 +414,10 @@ export async function createOrderFromTrustedInput(
         if (!promo) throw new Error("AKTIONSCODE_UNGUELTIG");
 
         const now = new Date();
+        if (isPrecisionShop && isPromoCodeExpired(promo, now)) {
+          input.discountCode = null;
+          droppedPromotionCode = true;
+        } else {
         if ((promo.validFrom && now < promo.validFrom)
           || isPromoCodeExpired(promo, now)
           || ((promo.maxUses || 0) > 0 && promo.currentUses >= (promo.maxUses || 0))) {
@@ -419,6 +435,7 @@ export async function createOrderFromTrustedInput(
           minimumOrder: Number(promo.minOrder || 0),
         };
         input.discountCode = promo.code;
+        }
       }
 
       // A partner number identifies an authenticated self-order. Its monetary
@@ -557,7 +574,7 @@ export async function createOrderFromTrustedInput(
         const canonicalBundles = isRegularMainshopPricing ? await db.select().from(bundles) : [];
         const canonicalComponents = isRegularMainshopPricing ? await db.select().from(bundleItems) : [];
         if (isRegularMainshopPricing) {
-          mainshopPolicySnapshot = buildMainshopPolicySnapshot(originalMainshopItems, catalog, canonicalBundles, canonicalComponents);
+          mainshopPolicySnapshot = buildMainshopPolicySnapshot(originalMainshopItems, catalog, canonicalBundles, canonicalComponents, isPrecisionShop);
           mainshopSettingsSnapshot = await db.select({ key: shopSettings.key, value: shopSettings.value }).from(shopSettings).where(inArray(shopSettings.key, ["global_automatic_discount", "promo_2for3_enabled", "promo_2for3_expires_at", "promo_2for3_mode", "promo_2for3_products"])).orderBy(shopSettings.key);
         }
         if (!isRegularMainshopPricing) {
@@ -574,7 +591,7 @@ export async function createOrderFromTrustedInput(
           authorizePublicGiftLines(input.items, catalog, multiBuy, strictExclusiveCampaign);
         }
         const canonical = isRegularMainshopPricing
-          ? canonicalizeMainshopLines(input.items, catalog, canonicalBundles, canonicalComponents, strictExclusiveCampaign ? { enabled: false, mode: "all", products: [] } : mainshopPromotion2for3)
+          ? canonicalizeMainshopLines(input.items, catalog, canonicalBundles, canonicalComponents, strictExclusiveCampaign ? { enabled: false, mode: "all", products: [] } : mainshopPromotion2for3, isPrecisionShop)
           : null;
         const repriced = canonical ? { items: canonical.items, subtotal: roundMoney(canonical.items.reduce((sum, i) => sum + i.price * i.quantity, 0)) } : repricePublicCheckoutItems(input.items, catalog);
         input.items = repriced.items;
@@ -594,7 +611,7 @@ export async function createOrderFromTrustedInput(
             });
             quantity = quantityPricing(input.items, [...canonical.quantityEligible, ...input.items.slice(canonical.items.length).map(() => false)], canonical.quantityUnits);
             if (strictExclusiveCampaign) quantity = { percentage: 0, units: 0, amount: 0, lineValues: input.items.map(i => roundMoney(i.price * i.quantity)) };
-            assertMainshopStock(input.items, catalog, mainshopSubstitutionEnabled);
+            assertMainshopStock(input.items, catalog, mainshopSubstitutionEnabled, isPrecisionShop);
           }
         }
       }
@@ -1034,6 +1051,7 @@ export async function createOrderFromTrustedInput(
         shippingCountry: input.shippingCountry, total: input.total,
         partnerDiscount: input.partnerDiscount || 0, creditUsed: input.creditUsed || 0,
         kwkDiscount: input.kwkDiscount || 0, kwkCreditUsed: input.kwkCreditUsed || 0,
+        ...(isPrecisionShop ? {storeIdentity: "precision-shop", policy: PRECISION_COMMERCE_POLICY, discountCode: input.discountCode, droppedPromotionCode, kitComposition: ["1 × 10-ml-Aufziehspritze mit Kanüle", "1 × BAC Wasser 10 ml", "1 × leere Nasensprayflasche"]} : {}),
       };
       const optionalKwkPrincipal = isRegularMainshopPricing && input.kwkCreditToken && !kwkCreditAccountId ? await getAuthenticatedKwkFromToken(input.kwkCreditToken) : null;
       // Safe server identities only. Hash input is never returned or logged; credentials are excluded.
@@ -1047,7 +1065,7 @@ export async function createOrderFromTrustedInput(
         if (await findActiveCheckoutBlock(input.customer)) throw Error(CUSTOMER_ORDER_BLOCKED_CODE);
         if (kwkReferralAccount) await assertKwkNewCustomer(db, input.customer);
         if (authoritativeKwkCredit > 0 && kwkCreditAccountId) await assertKwkCreditAvailable(db, kwkCreditAccountId, authoritativeKwkCredit);
-        return { quote: authoritativeQuote, addressValidation: await validateGermanAddress(input.customer) };
+        return { quote: authoritativeQuote, addressValidation: await validateGermanAddress(input.customer), ...(isPrecisionShop ? {customerDataChangeConfirmation: {requiresConfirmation: checkoutCustomerDataChangeResolution?.kind === "matched" && checkoutCustomerDataChangeResolution.requiresConfirmation, confirmationToken: null, changedFields: checkoutCustomerDataChangeResolution?.kind === "matched" ? checkoutCustomerDataChangeResolution.changedFields : []}} : {}) };
       }
       if (isMainshopCustomer && input.storeKey === "369research" && !ctx.operationsPreview && !ctx.jarvyOrder) {
         if (!input.expectedQuoteHash) throw new TRPCError({ code: "CONFLICT", message: "CHECKOUT_QUOTE_REQUIRED" });
@@ -1354,7 +1372,7 @@ export async function createOrderFromTrustedInput(
       }
       if (isRegularMainshopPricing) {
         // Lock only published selected families and their tracked components, then verify the confirmed snapshot.
-        const scopedSkus = mainshopCatalogScope(originalMainshopItems, mainshopCatalog).map(a => a.sku);
+        const scopedSkus = mainshopCatalogScope(originalMainshopItems, mainshopCatalog, isPrecisionShop).map(a => a.sku);
         await db.select({ id: articles.id }).from(articles).where(inArray(articles.sku, scopedSkus)).orderBy(articles.id).for('update');
         const requestedBundleIds = [...new Set(originalMainshopItems.map(i => i.bundleId).filter((id): id is number => id !== undefined))];
         if (requestedBundleIds.length) {
@@ -1363,7 +1381,7 @@ export async function createOrderFromTrustedInput(
         }
         const freshSettings = await db.select({ key: shopSettings.key, value: shopSettings.value }).from(shopSettings).where(inArray(shopSettings.key, ["global_automatic_discount", "promo_2for3_enabled", "promo_2for3_expires_at", "promo_2for3_mode", "promo_2for3_products"])).orderBy(shopSettings.key).for('share');
         const freshCatalog = await db.select().from(articles);
-        const freshPolicy = buildMainshopPolicySnapshot(originalMainshopItems, freshCatalog, await db.select().from(bundles), await db.select().from(bundleItems));
+        const freshPolicy = buildMainshopPolicySnapshot(originalMainshopItems, freshCatalog, await db.select().from(bundles), await db.select().from(bundleItems), isPrecisionShop);
         if (quoteHash(freshPolicy) !== quoteHash(mainshopPolicySnapshot) || quoteHash(freshSettings) !== quoteHash(mainshopSettingsSnapshot)) throw new TRPCError({ code: "CONFLICT", message: "CHECKOUT_QUOTE_CHANGED" });
         if (resolvedPromoCodeRecord) {
           const [freshPromo] = await db.select().from(promoCodes).where(eq(promoCodes.id, resolvedPromoCodeRecord.id)).for('update');
@@ -1380,7 +1398,7 @@ export async function createOrderFromTrustedInput(
           const rows = result?.rows ?? result ?? [];
           return rows[0]?.enabled === true || rows[0]?.enabled === 1;
         }).catch(() => false);
-        assertMainshopStock(input.items, freshCatalog, mainshopSubstitutionEnabled);
+        assertMainshopStock(input.items, freshCatalog, mainshopSubstitutionEnabled, isPrecisionShop);
         await allocateCanonicalOrderId();
         await persistConfirmedAddress();
       }
@@ -1562,7 +1580,7 @@ export async function createOrderFromTrustedInput(
 
       // Map: item-Index → SubstitutionResult (für späteren Bestandsabzug)
       const substitutionMap = new Map<number, import('./substitutionService.js').SubstitutionResult>();
-      const mainshopSubstitutions = isRegularMainshopPricing ? assertMainshopStock(input.items, allArticlesForCheck, substitutionActive) : null;
+      const mainshopSubstitutions = isRegularMainshopPricing ? assertMainshopStock(input.items, allArticlesForCheck, substitutionActive, isPrecisionShop) : null;
 
       for (let itemIdx = 0; itemIdx < stockRelevantItems.length; itemIdx++) {
         const item = stockRelevantItems[itemIdx];
@@ -1690,7 +1708,7 @@ export async function createOrderFromTrustedInput(
         }
       }
       if (isRegularMainshopPricing) {
-        const lockedSubstitutions = assertMainshopStock(input.items, allArticlesForCheck, substitutionActive);
+        const lockedSubstitutions = assertMainshopStock(input.items, allArticlesForCheck, substitutionActive, isPrecisionShop);
         // Never deduct a stale/different plan. Selected families are already
         // locked above, so an unexpected change must abort, not switch stock.
         if (quoteHash([...lockedSubstitutions]) !== quoteHash([...mainshopSubstitutions!])) throw Error('ORDER_STOCK_PLAN_CHANGED');
@@ -1871,12 +1889,12 @@ export async function createOrderFromTrustedInput(
           type: item.type,
           price: item.price.toFixed(2),
           quantity: item.quantity,
-          ...(ctx.screenshotOrder ? {articleId: item.isFreeGift ? null : allArticlesForCheck.find(a=>a.sku===item.shopProductId)?.id ?? null} : {}),
+          ...(ctx.screenshotOrder || isPrecisionShop ? {articleId: ctx.screenshotOrder && item.isFreeGift ? null : allArticlesForCheck.find(a=>a.sku===item.shopProductId)?.id ?? null} : {}),
           // Nasenspray- und Plug&Play-Flag speichern (für WaWi-Anzeige)
-          isNasalSpray: isRegularMainshopPricing ? false : ctx.screenshotOrder ? item.isNasalSpray === true : item.isNasalSpray === true ||
+          isNasalSpray: isPrecisionShop ? item.isNasalSpray === true : isRegularMainshopPricing ? false : ctx.screenshotOrder ? item.isNasalSpray === true : item.isNasalSpray === true ||
             item.name.toLowerCase().includes('[nasenspray]') ||
             item.name.toLowerCase().includes('nasenspray'),
-          isNasalDiySet: !isRegularMainshopPricing && item.isNasalDiySet === true,
+          isNasalDiySet: (isPrecisionShop || !isRegularMainshopPricing) && item.isNasalDiySet === true,
           isPlugPlay: ctx.screenshotOrder ? item.isPlugPlay === true : item.isPlugPlay === true ||
             item.name.toLowerCase().includes('[plug&play') ||
             item.name.toLowerCase().includes('plug&play patrone'),
@@ -1890,6 +1908,15 @@ export async function createOrderFromTrustedInput(
           await db.insert(orderItems).values({ orderId, name:line.name, dosage:null, variant:line.variant,
             type:'accessory', price:'0.00', quantity:line.quantity, articleId:line.articleId,
             isNasalDiySet:line.isNasalDiySet });
+        }
+      }
+
+      if (isPrecisionShop) {
+        // BAC10 already participates in the same aggregate stock plan and paid/gift
+        // journal. The remaining confirmed contents are descriptive, not new SKUs.
+        const kitCount = input.items.filter(i => i.isNasalDiySet).reduce((sum, i) => sum + i.quantity, 0);
+        for (const component of kitCount ? PRECISION_UNTRACKED_KIT_COMPONENTS : []) {
+          await db.insert(orderItems).values({orderId, name: component.name, dosage: null, variant: component.variant, type: "accessory", price: "0.00", quantity: kitCount, articleId: null, isNasalDiySet: true});
         }
       }
 
@@ -2157,6 +2184,7 @@ export async function createOrderFromTrustedInput(
         ...(!ctx.screenshotOrder ? {orderSnapshot: persistedMessage.orderSnapshot} : {}),
         success:true,orderId,paymentInstructions:null,externalOrderReference:externalOrderReference || undefined,
         ...(isRegularMainshopPricing ? { quote: authoritativeQuote } : {}),
+        ...(isPrecisionShop ? {precisionCommerce: {storeIdentity: "precision-shop", policy: PRECISION_COMMERCE_POLICY}, customer: persistedMessage.emailData.customer, date: input.date, paymentMethod: input.paymentMethod} : {}),
         subtotal:input.subtotal,discount:input.discount,kwkDiscount:input.kwkDiscount || 0,
         kwkCreditUsed:input.kwkCreditUsed || 0,shipping:input.shipping,total:input.total,
       };
@@ -2239,7 +2267,7 @@ export const orderRouter = router({
     return withReadOnlyDatabase(async () => {
       const result = await createOrderFromTrustedInput(input, ctx, { quoteOnly: true });
       if (!("quote" in result) || !result.quote || !("hash" in result.quote) || !("addressValidation" in result)) throw Error("CHECKOUT_QUOTE_RESULT_INVALID");
-      return { quote: result.quote, addressValidation: result.addressValidation };
+      return { quote: result.quote, addressValidation: result.addressValidation, ...("customerDataChangeConfirmation" in result ? {customerDataChangeConfirmation: result.customerDataChangeConfirmation} : {}) };
     });
   }),
   // PUBLIC: Historical checkout route. Checkout V2 uses the server-only adapter above.
@@ -2251,6 +2279,30 @@ export const orderRouter = router({
       }
       return createOrderFromTrustedInput(input, ctx);
     }),
+
+  /** A separate explicit confirmation write, never part of read-only quote.
+   * Reuses the existing contact-match/token service; no prior PII is returned and
+   * no customer/order/stock row changes until the existing locked create consumes it. */
+  checkoutCustomerConfirmation: publicProcedure.input(createOrderSchema.innerType().pick({customer: true, storeKey: true, orderSource: true})).mutation(async ({input, ctx}) => {
+    if (!ctx.precisionShopPrincipal || input.storeKey !== "369research" || input.orderSource !== "shop" || ctx.user || ctx.operationsPreview || ctx.jarvyOrder || ctx.screenshotOrder) throw new TRPCError({code: "FORBIDDEN", message: "PRECISION_CHECKOUT_SCOPE_REQUIRED"});
+    return customerDataChangeRouter.createCaller(ctx).previewCheckoutChange({customer: input.customer});
+  }),
+
+  /** Precision recovery is proof-bound, read-only, and never a create retry.
+   * Original random intent key + original client payload fingerprint prove ownership;
+   * server scope binding prevents reading an ordinary or other-store receipt. */
+  checkoutReceipt: publicProcedure.input(z.object({
+    checkoutIdempotencyKey: z.string().regex(/^[a-f0-9]{64}$/),
+    payloadFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  })).mutation(async ({input, ctx}) => {
+    if (!ctx.precisionShopPrincipal || ctx.user || ctx.operationsPreview || ctx.jarvyOrder || ctx.screenshotOrder) throw new TRPCError({code: "FORBIDDEN", message: "PRECISION_CHECKOUT_SCOPE_REQUIRED"});
+    return withReadOnlyDatabase(async () => {
+      const db = await getDb(); if (!db) throw Error("Database not available");
+      const [row] = resultRows(await db.execute(sql`SELECT payload_fingerprint, response FROM priority_checkout_receipts WHERE intent_key=${input.checkoutIdempotencyKey}`));
+      if (!row || row.payload_fingerprint !== precisionReceiptFingerprint(input.payloadFingerprint) || row.response?.precisionCommerce?.storeIdentity !== "precision-shop" || row.response?.precisionCommerce?.policy !== PRECISION_COMMERCE_POLICY) return {state: "not_found" as const};
+      return {state: "committed" as const, receipt: row.response};
+    });
+  }),
 
   // ADMIN: List all orders with items
   list: scopedOperationsReadProcedure

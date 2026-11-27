@@ -1,0 +1,1689 @@
+TAP version 13
+# Subtest: fixed ready nasal product cannot be disguised by public name or DIY flags
+ok 1 - fixed ready nasal product cannot be disguised by public name or DIY flags
+  ---
+  duration_ms: 4.993993
+  type: 'test'
+  ...
+# Subtest: fixed cartridge remains cold but its 115 catalogue price is not charged as 130
+ok 2 - fixed cartridge remains cold but its 115 catalogue price is not charged as 130
+  ---
+  duration_ms: 0.966495
+  type: 'test'
+  ...
+# Subtest: ordinary vial remains 100 plus legitimate Plug&Play option 15 plus shipping 15
+ok 3 - ordinary vial remains 100 plus legitimate Plug&Play option 15 plus shipping 15
+  ---
+  duration_ms: 0.934387
+  type: 'test'
+  ...
+# Subtest: mixed-cart authoritative sum charges both product forms correctly and cold shipping only once
+ok 4 - mixed-cart authoritative sum charges both product forms correctly and cold shipping only once
+  ---
+  duration_ms: 1.52324
+  type: 'test'
+  ...
+# Subtest: recognized legacy cartridge variant or bracketed name authorizes the same paid vial option
+ok 5 - recognized legacy cartridge variant or bracketed name authorizes the same paid vial option
+  ---
+  duration_ms: 1.15561
+  type: 'test'
+  ...
+# Subtest: Plug&Play Pen and its color variant are 30 with base shipping and no cooling
+ok 6 - Plug&Play Pen and its color variant are 30 with base shipping and no cooling
+  ---
+  duration_ms: 0.464995
+  type: 'test'
+  ...
+# Subtest: accessories and capsules cannot acquire cartridge or nasal options from public text/flags
+ok 7 - accessories and capsules cannot acquire cartridge or nasal options from public text/flags
+  ---
+  duration_ms: 0.745115
+  type: 'test'
+  ...
+# Subtest: a Plug&Play Pen variant is not a legacy vial preparation request
+ok 8 - a Plug&Play Pen variant is not a legacy vial preparation request
+  ---
+  duration_ms: 0.320959
+  type: 'test'
+  ...
+# Subtest: normal vial and fixed DIY set remain non-cold without extra option pricing
+ok 9 - normal vial and fixed DIY set remain non-cold without extra option pricing
+  ---
+  duration_ms: 1.10061
+  type: 'test'
+  ...
+# Subtest: DIY nasal option is allowed only on a catalogue-confirmed eligible vial
+ok 10 - DIY nasal option is allowed only on a catalogue-confirmed eligible vial
+  ---
+  duration_ms: 1.224781
+  type: 'test'
+  ...
+# Subtest: an unvalidated nasal form flag alone does not prepare an ordinary vial
+ok 11 - an unvalidated nasal form flag alone does not prepare an ordinary vial
+  ---
+  duration_ms: 0.509606
+  type: 'test'
+  ...
+# Subtest: Plug&Play exclusions and narrow KLOW vial-bundle exception match product options
+ok 12 - Plug&Play exclusions and narrow KLOW vial-bundle exception match product options
+  ---
+  duration_ms: 0.328992
+  type: 'test'
+  ...
+# Subtest: category arrays prohibit options even when primary category appears vial-like
+ok 13 - category arrays prohibit options even when primary category appears vial-like
+  ---
+  duration_ms: 0.277708
+  type: 'test'
+  ...
+# Subtest: normalization preserves catalogue sale/dosage pricing, custom text and quantity
+ok 14 - normalization preserves catalogue sale/dosage pricing, custom text and quantity
+  ---
+  duration_ms: 0.868096
+  type: 'test'
+  ...
+# Subtest: neither projection mutates source line names, variants, prices or flags
+ok 15 - neither projection mutates source line names, variants, prices or flags
+  ---
+  duration_ms: 0.403225
+  type: 'test'
+  ...
+# Subtest: unknown/inactive public references are not authorized by option normalization
+ok 16 - unknown/inactive public references are not authorized by option normalization
+  ---
+  duration_ms: 0.836481
+  type: 'test'
+  ...
+# Subtest: bronchogen: secondary Nasensprays tag and unvalidated nasal flags never select a spray
+ok 17 - bronchogen: secondary Nasensprays tag and unvalidated nasal flags never select a spray
+  ---
+  duration_ms: 0.705016
+  type: 'test'
+  ...
+# Subtest: cardiogen: secondary Nasensprays tag and unvalidated nasal flags never select a spray
+ok 18 - cardiogen: secondary Nasensprays tag and unvalidated nasal flags never select a spray
+  ---
+  duration_ms: 0.707199
+  type: 'test'
+  ...
+# Subtest: cartalax: secondary Nasensprays tag and unvalidated nasal flags never select a spray
+ok 19 - cartalax: secondary Nasensprays tag and unvalidated nasal flags never select a spray
+  ---
+  duration_ms: 0.396177
+  type: 'test'
+  ...
+# Subtest: semax: secondary Nasensprays tag and unvalidated nasal flags never select a spray
+ok 20 - semax: secondary Nasensprays tag and unvalidated nasal flags never select a spray
+  ---
+  duration_ms: 0.326349
+  type: 'test'
+  ...
+# Subtest: selank: secondary Nasensprays tag and unvalidated nasal flags never select a spray
+ok 21 - selank: secondary Nasensprays tag and unvalidated nasal flags never select a spray
+  ---
+  duration_ms: 0.253396
+  type: 'test'
+  ...
+# Subtest: semax: explicitly chosen allowlisted DIY remains +7, unprepared and non-cold despite nasal tag
+ok 22 - semax: explicitly chosen allowlisted DIY remains +7, unprepared and non-cold despite nasal tag
+  ---
+  duration_ms: 0.396726
+  type: 'test'
+  ...
+# Subtest: selank: explicitly chosen allowlisted DIY remains +7, unprepared and non-cold despite nasal tag
+ok 23 - selank: explicitly chosen allowlisted DIY remains +7, unprepared and non-cold despite nasal tag
+  ---
+  duration_ms: 0.184349
+  type: 'test'
+  ...
+# Subtest: actual catalogue nasal name or primary nasal form remains cold and cannot be relabelled DIY
+ok 24 - actual catalogue nasal name or primary nasal form remains cold and cannot be relabelled DIY
+  ---
+  duration_ms: 0.356414
+  type: 'test'
+  ...
+# Subtest: secondary nasal tag preserves an existing eligible explicitly selected Plug&Play option
+ok 25 - secondary nasal tag preserves an existing eligible explicitly selected Plug&Play option
+  ---
+  duration_ms: 0.29302
+  type: 'test'
+  ...
+# Subtest: all other non-vial secondary category exclusions remain intact beside a nasal tag
+ok 26 - all other non-vial secondary category exclusions remain intact beside a nasal tag
+  ---
+  duration_ms: 0.348979
+  type: 'test'
+  ...
+# Subtest: pens, empty bottles and fixed DIY products with secondary nasal tag still do not require cooling
+ok 27 - pens, empty bottles and fixed DIY products with secondary nasal tag still do not require cooling
+  ---
+  duration_ms: 0.419217
+  type: 'test'
+  ...
+# Subtest: a unique e-mail match requires an explicit confirmation before a changed address is adopted
+ok 28 - a unique e-mail match requires an explicit confirmation before a changed address is adopted
+  ---
+  duration_ms: 2.98358
+  type: 'test'
+  ...
+# Subtest: a matching name alone can never attach or change an existing customer
+ok 29 - a matching name alone can never attach or change an existing customer
+  ---
+  duration_ms: 0.269479
+  type: 'test'
+  ...
+# Subtest: e-mail and phone pointing to different customers create a conflict instead of selecting either record
+ok 30 - e-mail and phone pointing to different customers create a conflict instead of selecting either record
+  ---
+  duration_ms: 0.258647
+  type: 'test'
+  ...
+# Subtest: a duplicated contact is ambiguous and never selects an arbitrary customer profile
+ok 31 - a duplicated contact is ambiguous and never selects an arbitrary customer profile
+  ---
+  duration_ms: 0.307215
+  type: 'test'
+  ...
+# Subtest: the German local and international form of the same phone normalize consistently
+ok 32 - the German local and international form of the same phone normalize consistently
+  ---
+  duration_ms: 0.435808
+  type: 'test'
+  ...
+# Subtest: genuinely omitted optional fields retain established data only on an unchanged address
+ok 33 - genuinely omitted optional fields retain established data only on an unchanged address
+  ---
+  duration_ms: 0.356282
+  type: 'test'
+  ...
+# Subtest: explicit empty company and post number are never replaced by old address fields
+ok 34 - explicit empty company and post number are never replaced by old address fields
+  ---
+  duration_ms: 0.534108
+  type: 'test'
+  ...
+# Subtest: switching Spanish to German address cannot inherit omitted old address supplements
+ok 35 - switching Spanish to German address cannot inherit omitted old address supplements
+  ---
+  duration_ms: 0.512544
+  type: 'test'
+  ...
+# Subtest: explicit company remains exactly the newly submitted company even on address change
+ok 36 - explicit company remains exactly the newly submitted company even on address change
+  ---
+  duration_ms: 0.847026
+  type: 'test'
+  ...
+# Subtest: removes a browser-generated BAC gift from a cosmetic-only order
+ok 37 - removes a browser-generated BAC gift from a cosmetic-only order
+  ---
+  duration_ms: 2.386923
+  type: 'test'
+  ...
+# Subtest: adds BAC only for actual qualifying peptide vials in a mixed basket
+ok 38 - adds BAC only for actual qualifying peptide vials in a mixed basket
+  ---
+  duration_ms: 0.445572
+  type: 'test'
+  ...
+# Subtest: keeps the per-vial BAC entitlement for a peptide bundle below the single-vial threshold
+ok 39 - keeps the per-vial BAC entitlement for a peptide bundle below the single-vial threshold
+  ---
+  duration_ms: 0.452326
+  type: 'test'
+  ...
+# Subtest: never gives a BeautyLine bundle component a BAC gift
+ok 40 - never gives a BeautyLine bundle component a BAC gift
+  ---
+  duration_ms: 0.256276
+  type: 'test'
+  ...
+# Subtest: never replaces a paid BAC product line
+ok 41 - never replaces a paid BAC product line
+  ---
+  duration_ms: 0.289762
+  type: 'test'
+  ...
+# Subtest: general promo and KWK stack sequentially while shipping stays untouched
+ok 42 - general promo and KWK stack sequentially while shipping stays untouched
+  ---
+  duration_ms: 2.324283
+  type: 'test'
+  ...
+# Subtest: restricted promo only discounts eligible products before KWK
+ok 43 - restricted promo only discounts eligible products before KWK
+  ---
+  duration_ms: 0.426831
+  type: 'test'
+  ...
+# Subtest: KWK credit is a payment instrument and cannot reduce shipping
+ok 44 - KWK credit is a payment instrument and cannot reduce shipping
+  ---
+  duration_ms: 0.385214
+  type: 'test'
+  ...
+# Subtest: global automatic discount, promo and KWK referral stack in the declared order
+ok 45 - global automatic discount, promo and KWK referral stack in the declared order
+  ---
+  duration_ms: 0.230889
+  type: 'test'
+  ...
+# Subtest: promo metadata and phone normalization are deterministic
+ok 46 - promo metadata and phone normalization are deterministic
+  ---
+  duration_ms: 0.806983
+  type: 'test'
+  ...
+# Subtest: catalog prices and option surcharges are authoritative
+ok 47 - catalog prices and option surcharges are authoritative
+  ---
+  duration_ms: 0.955335
+  type: 'test'
+  ...
+# Subtest: shipping comes from the delivery country and is never discounted by KWK
+ok 48 - shipping comes from the delivery country and is never discounted by KWK
+  ---
+  duration_ms: 0.564894
+  type: 'test'
+  ...
+# Subtest: cold-chain shipping is added once per order for required or manual WaWi selections
+ok 49 - cold-chain shipping is added once per order for required or manual WaWi selections
+  ---
+  duration_ms: 0.205757
+  type: 'test'
+  ...
+# Subtest: finished nasal sprays always require cold-chain shipping, including legacy bundle variants
+ok 50 - finished nasal sprays always require cold-chain shipping, including legacy bundle variants
+  ---
+  duration_ms: 1.006799
+  type: 'test'
+  ...
+# Subtest: campaign cold shipping is configurable, once per shipment, without changing item option pricing
+ok 51 - campaign cold shipping is configurable, once per shipment, without changing item option pricing
+  ---
+  duration_ms: 1.086169
+  type: 'test'
+  ...
+# Subtest: free base shipping never changes noncold or standard regional shipping fees
+ok 52 - free base shipping never changes noncold or standard regional shipping fees
+  ---
+  duration_ms: 0.474931
+  type: 'test'
+  ...
+# Subtest: legacy cooled cartridge/nasal detection excludes pens and DIY sets
+ok 53 - legacy cooled cartridge/nasal detection excludes pens and DIY sets
+  ---
+  duration_ms: 0.297237
+  type: 'test'
+  ...
+# Subtest: new 369 customer scope excludes P4P and authenticated manual WaWi
+ok 54 - new 369 customer scope excludes P4P and authenticated manual WaWi
+  ---
+  duration_ms: 1.219808
+  type: 'test'
+  ...
+# Subtest: 369 no-cooling shipping retains main P4P/WaWi cold surcharge once per order
+ok 55 - 369 no-cooling shipping retains main P4P/WaWi cold surcharge once per order
+  ---
+  duration_ms: 0.536791
+  type: 'test'
+  ...
+# Subtest: browser quantity amount cannot survive the authoritative audit-breakdown filter
+ok 56 - browser quantity amount cannot survive the authoritative audit-breakdown filter
+  ---
+  duration_ms: 0.253864
+  type: 'test'
+  ...
+# Subtest: 369 matched catalog vial receives BAC regardless of price; P4P and old callers retain threshold
+ok 57 - 369 matched catalog vial receives BAC regardless of price; P4P and old callers retain threshold
+  ---
+  duration_ms: 2.213372
+  type: 'test'
+  ...
+# Subtest: 369 BAC entitlement fails closed for missing identity/categories and excludes non-vial formats
+ok 58 - 369 BAC entitlement fails closed for missing identity/categories and excludes non-vial formats
+  ---
+  duration_ms: 0.587328
+  type: 'test'
+  ...
+# [Database] Connected to PostgreSQL
+# [Orders] Stock deducted: PEP-5MG 5 mg 1000 → 996 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: BAC Wasser 3ml 1000 → 996 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Orders] Stock deducted: PEP-5MG 5 mg 1000 → 996 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: BAC Wasser 3ml 1000 → 996 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: PEP-5MG 5 mg 1000 → 996 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: BAC Wasser 3ml 1000 → 996 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Orders] Stock deducted: PEP-5MG 5 mg 1000 → 996 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: BAC Wasser 3ml 1000 → 996 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Orders] Stock deducted: PEP-5MG 5 mg 1000 → 996 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: BAC Wasser 3ml 6 → 4 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: BAC Wasser 3ml 4 → 0 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Orders] Partner zugeordnet: OWN-9 (Eigenbestellung); Guthaben wird erst nach Zahlung gebucht.
+# [Orders] Stock deducted: PEP-5MG 5 mg 1000 → 996 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: BAC Wasser 3ml 1000 → 996 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Orders] Stock deducted: PEP-5MG 5 mg 1000 → 996 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: BAC Wasser 3ml 1000 → 996 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Orders] Stock deducted: Canonical 10 mg 1000 → 996 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: BAC Wasser 3ml 1000 → 996 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Orders] Stock deducted: Canonical 10 mg 1000 → 996 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: BAC Wasser 3ml 1000 → 996 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Orders] Stock deducted: PEP-5MG 5 mg 1000 → 994 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: BAC Wasser 3ml 1000 → 996 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Orders] Stock deducted: BAC Wasser 3ml 1000 → 999 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Orders] Stock deducted: BAC Wasser 3ml 1000 → 999 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Orders] Stock deducted: Canonical (50 mg) 3 → 2 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: BAC Wasser 3ml 1000 → 998 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Orders] Stock deducted: Canonical (50 mg) 1 → 0 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: BAC Wasser 3ml 1000 → 998 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Orders] Stock deducted: BAC Wasser 3ml 1000 → 998 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Orders] Stock deducted: BAC Wasser 3ml 2 → 1 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: BAC Wasser 3ml 1 → 0 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Orders] Stock deducted: BAC Wasser 3ml 1000 → 998 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Orders] Stock deducted: BAC Wasser 3ml 1000 → 999 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Orders] Stock deducted: BAC Wasser 3ml 1000 → 999 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: BAC Wasser 3ml 1000 → 999 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Orders] Stock deducted: Canonical (100 mg) 1 → 0 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: BAC Wasser 3ml 1000 → 999 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Orders] Stock deducted: PEP-5MG 5 mg 1000 → 996 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: Synthetic DIY Nasenspray Zubehörset 1000 → 998 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: BAC Wasser 3ml 1000 → 996 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Orders] Stock deducted: PEP-5MG 5 mg 1000 → 999 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 10 → 9 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Orders] Stock deducted: PEP-5MG 5 mg 1000 → 999 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 10 → 7 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Orders] Stock deducted: PEP-5MG 5 mg 1000 → 999 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 10 → 9 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: PEP-5MG 5 mg 1000 → 999 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 10 → 9 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Orders] Stock deducted: PEP-5MG 5 mg 1000 → 999 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 10 → 9 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Orders] Partner zugeordnet: OWN-9 (Eigenbestellung); Guthaben wird erst nach Zahlung gebucht.
+# [Orders] Stock deducted: PEP-5MG 5 mg 1000 → 999 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 10 → 9 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# [Orders] Stock deducted: PEP-5MG 5 mg 1000 → 999 (order 369-OFFLINE-1)
+# [Orders] Stock deducted: Synthetic BAC Wasser (10 ml) 10 → 9 (order 369-OFFLINE-1)
+# [Customers] Created new customer \#1210 (Ada Synthetic) for order 369-OFFLINE-1
+# Subtest: real quote handler: tier 1 => 0%
+ok 59 - real quote handler: tier 1 => 0%
+  ---
+  duration_ms: 54.246946
+  type: 'test'
+  ...
+# Subtest: real quote handler: tier 3 => 0%
+ok 60 - real quote handler: tier 3 => 0%
+  ---
+  duration_ms: 7.17575
+  type: 'test'
+  ...
+# Subtest: real quote handler: tier 4 => 10%
+ok 61 - real quote handler: tier 4 => 10%
+  ---
+  duration_ms: 6.435238
+  type: 'test'
+  ...
+# Subtest: real quote handler: tier 7 => 10%
+ok 62 - real quote handler: tier 7 => 10%
+  ---
+  duration_ms: 6.150153
+  type: 'test'
+  ...
+# Subtest: real quote handler: tier 8 => 20%
+ok 63 - real quote handler: tier 8 => 20%
+  ---
+  duration_ms: 7.248876
+  type: 'test'
+  ...
+# Subtest: real quote handler: tier 12 => 20%
+ok 64 - real quote handler: tier 12 => 20%
+  ---
+  duration_ms: 5.901286
+  type: 'test'
+  ...
+# Subtest: real quote handler: tier 13 => 25%
+ok 65 - real quote handler: tier 13 => 25%
+  ---
+  duration_ms: 5.301577
+  type: 'test'
+  ...
+# Subtest: real quote handler: tier 19 => 25%
+ok 66 - real quote handler: tier 19 => 25%
+  ---
+  duration_ms: 9.109675
+  type: 'test'
+  ...
+# Subtest: real quote handler: tier 20 => 30%
+ok 67 - real quote handler: tier 20 => 30%
+  ---
+  duration_ms: 9.019113
+  type: 'test'
+  ...
+# Subtest: real quote handler: tier 35 => 30%
+ok 68 - real quote handler: tier 35 => 30%
+  ---
+  duration_ms: 6.057573
+  type: 'test'
+  ...
+# Subtest: real quote handler: tier 36 => 35%
+ok 69 - real quote handler: tier 36 => 35%
+  ---
+  duration_ms: 7.461985
+  type: 'test'
+  ...
+# Subtest: real quote handler: tier 37 => 35%
+ok 70 - real quote handler: tier 37 => 35%
+  ---
+  duration_ms: 4.873138
+  type: 'test'
+  ...
+# Subtest: real quote and regular CREATE persist identical canonical prices, gifts and receipt
+ok 71 - real quote and regular CREATE persist identical canonical prices, gifts and receipt
+  ---
+  duration_ms: 41.506793
+  type: 'test'
+  ...
+# Subtest: regular create fails changed/missing quote before any writes
+ok 72 - regular create fails changed/missing quote before any writes
+  ---
+  duration_ms: 16.727896
+  type: 'test'
+  ...
+# Subtest: real restricted promo uses acc's actual residual value
+ok 73 - real restricted promo uses acc's actual residual value
+  ---
+  duration_ms: 6.565949
+  type: 'test'
+  ...
+# Subtest: real restricted promo uses pep's actual residual value
+ok 74 - real restricted promo uses pep's actual residual value
+  ---
+  duration_ms: 4.622194
+  type: 'test'
+  ...
+# Subtest: actual sale remains quantity eligible; 15 euro format surcharge and no cold shipping
+ok 75 - actual sale remains quantity eligible; 15 euro format surcharge and no cold shipping
+  ---
+  duration_ms: 4.390222
+  type: 'test'
+  ...
+# Subtest: BAC/accessories excluded regardless of forged type; native 369PEN counts
+ok 76 - BAC/accessories excluded regardless of forged type; native 369PEN counts
+  ---
+  duration_ms: 4.495644
+  type: 'test'
+  ...
+# Subtest: complete reduced actual WaWi bundle counts ONE and receives no second quantity reduction
+ok 77 - complete reduced actual WaWi bundle counts ONE and receives no second quantity reduction
+  ---
+  duration_ms: 5.27368
+  type: 'test'
+  ...
+# Subtest: client Bundle label cannot claim reduced bundle or alter quantity eligibility
+ok 78 - client Bundle label cannot claim reduced bundle or alter quantity eligibility
+  ---
+  duration_ms: 4.82288
+  type: 'test'
+  ...
+# Subtest: actual bundle rejects missing composition
+ok 79 - actual bundle rejects missing composition
+  ---
+  duration_ms: 26.463586
+  type: 'test'
+  ...
+# Subtest: actual bundle rejects unknown composition
+ok 80 - actual bundle rejects unknown composition
+  ---
+  duration_ms: 4.19981
+  type: 'test'
+  ...
+# Subtest: actual bundle rejects unequal composition
+ok 81 - actual bundle rejects unequal composition
+  ---
+  duration_ms: 5.582855
+  type: 'test'
+  ...
+# Subtest: actual bundle rejects wrongsku composition
+ok 82 - actual bundle rejects wrongsku composition
+  ---
+  duration_ms: 3.344974
+  type: 'test'
+  ...
+# Subtest: actual bundle rejects wrongdose composition
+ok 83 - actual bundle rejects wrongdose composition
+  ---
+  duration_ms: 3.552527
+  type: 'test'
+  ...
+# Subtest: actual bundle rejects format composition
+ok 84 - actual bundle rejects format composition
+  ---
+  duration_ms: 4.060353
+  type: 'test'
+  ...
+# Subtest: new quote never impersonates peps4pets
+ok 85 - new quote never impersonates peps4pets
+  ---
+  duration_ms: 1.408784
+  type: 'test'
+  ...
+# Subtest: new quote never impersonates wawi_manual
+ok 86 - new quote never impersonates wawi_manual
+  ---
+  duration_ms: 2.055888
+  type: 'test'
+  ...
+# Subtest: new quote never impersonates checkout-v2
+ok 87 - new quote never impersonates checkout-v2
+  ---
+  duration_ms: 0.791123
+  type: 'test'
+  ...
+# Subtest: real quote canonical shipping DE
+ok 88 - real quote canonical shipping DE
+  ---
+  duration_ms: 4.551957
+  type: 'test'
+  ...
+# Subtest: real quote canonical shipping FR
+ok 89 - real quote canonical shipping FR
+  ---
+  duration_ms: 3.894803
+  type: 'test'
+  ...
+# Subtest: real quote canonical shipping CH
+ok 90 - real quote canonical shipping CH
+  ---
+  duration_ms: 3.787986
+  type: 'test'
+  ...
+# Subtest: global nonstack preserves promo, removes BOTH global advantages; promo frees shipping
+ok 91 - global nonstack preserves promo, removes BOTH global advantages; promo frees shipping
+  ---
+  duration_ms: 4.531591
+  type: 'test'
+  ...
+# Subtest: central global free shipping threshold keeps PRE-discount merchandise policy
+ok 92 - central global free shipping threshold keeps PRE-discount merchandise policy
+  ---
+  duration_ms: 3.93116
+  type: 'test'
+  ...
+# Subtest: real promo rejects expired before any write
+ok 93 - real promo rejects expired before any write
+  ---
+  duration_ms: 2.435203
+  type: 'test'
+  ...
+# Subtest: real promo rejects future before any write
+ok 94 - real promo rejects future before any write
+  ---
+  duration_ms: 2.102445
+  type: 'test'
+  ...
+# Subtest: real promo rejects minimum before any write
+ok 95 - real promo rejects minimum before any write
+  ---
+  duration_ms: 4.370111
+  type: 'test'
+  ...
+# Subtest: real promo rejects exhausted before any write
+ok 96 - real promo rejects exhausted before any write
+  ---
+  duration_ms: 2.002307
+  type: 'test'
+  ...
+# Subtest: arbitrary free gift and unknown variant cannot become free paid products
+ok 97 - arbitrary free gift and unknown variant cannot become free paid products
+  ---
+  duration_ms: 5.667033
+  type: 'test'
+  ...
+# Subtest: exact cent allocation and quote fingerprint transport refresh
+ok 98 - exact cent allocation and quote fingerprint transport refresh
+  ---
+  duration_ms: 1.26694
+  type: 'test'
+  ...
+# Subtest: native reusable creator code stacks AFTER quantity/global/restricted promo on actual residual
+ok 99 - native reusable creator code stacks AFTER quantity/global/restricted promo on actual residual
+  ---
+  duration_ms: 5.369525
+  type: 'test'
+  ...
+# Subtest: native first paid code policy suppresses repeat discount but not valid attribution
+ok 100 - native first paid code policy suppresses repeat discount but not valid attribution
+  ---
+  duration_ms: 3.992052
+  type: 'test'
+  ...
+# Subtest: native own-email partner policy rejects unrelated benefit without trusting browser amount
+ok 101 - native own-email partner policy rejects unrelated benefit without trusting browser amount
+  ---
+  duration_ms: 8.734347
+  type: 'test'
+  ...
+# Subtest: native partner-number is not an auth credential and mixed public-code credit is rejected
+ok 102 - native partner-number is not an auth credential and mixed public-code credit is rejected
+  ---
+  duration_ms: 3.809927
+  type: 'test'
+  ...
+# Subtest: native authenticated selforder shop credit follows quantity/global/self discount and retains credit
+ok 103 - native authenticated selforder shop credit follows quantity/global/self discount and retains credit
+  ---
+  duration_ms: 9.333901
+  type: 'test'
+  ...
+# Subtest: native payout Creator selforder converts customer plus commission discount, credit excluded
+ok 104 - native payout Creator selforder converts customer plus commission discount, credit excluded
+  ---
+  duration_ms: 8.103229
+  type: 'test'
+  ...
+# Subtest: native revoked selforder session and requested credit over balance fail closed
+ok 105 - native revoked selforder session and requested credit over balance fail closed
+  ---
+  duration_ms: 6.271206
+  type: 'test'
+  ...
+# Subtest: native KWK first-customer referral uses actual residual after quantity/global/promo
+ok 106 - native KWK first-customer referral uses actual residual after quantity/global/promo
+  ---
+  duration_ms: 6.856359
+  type: 'test'
+  ...
+# Subtest: native KWK existing customer and self-referral reject before writes
+ok 107 - native KWK existing customer and self-referral reject before writes
+  ---
+  duration_ms: 8.46491
+  type: 'test'
+  ...
+# Subtest: native KWK credit requires active productive session; browser account id is ignored
+ok 108 - native KWK credit requires active productive session; browser account id is ignored
+  ---
+  duration_ms: 18.961871
+  type: 'test'
+  ...
+# Subtest: native KWK partner combination and referral-plus-credit stay excluded
+ok 109 - native KWK partner combination and referral-plus-credit stay excluded
+  ---
+  duration_ms: 7.685291
+  type: 'test'
+  ...
+# Subtest: regular actual create rolls stock/order/receipt back on item failure; same intent retryable
+ok 110 - regular actual create rolls stock/order/receipt back on item failure; same intent retryable
+  ---
+  duration_ms: 47.002664
+  type: 'test'
+  ...
+# Subtest: regular actual create postcommit response-task failure still returns success and durable receipt
+ok 111 - regular actual create postcommit response-task failure still returns success and durable receipt
+  ---
+  duration_ms: 19.364703
+  type: 'test'
+  ...
+# Subtest: regular actual stock groups paid and gift BAC demand in same transaction
+ok 112 - regular actual stock groups paid and gift BAC demand in same transaction
+  ---
+  duration_ms: 33.048767
+  type: 'test'
+  ...
+# Subtest: regular CREATE native partner credit/commission snapshot/debit commit together
+ok 113 - regular CREATE native partner credit/commission snapshot/debit commit together
+  ---
+  duration_ms: 41.922179
+  type: 'test'
+  ...
+# Subtest: regular CREATE native KWK productive owner/debit/cache stays atomic and ignores browser id
+ok 114 - regular CREATE native KWK productive owner/debit/cache stays atomic and ignores browser id
+  ---
+  duration_ms: 21.761981
+  type: 'test'
+  ...
+# Subtest: actual canonical catalog rejects inactive rather than trusting type/name
+ok 115 - actual canonical catalog rejects inactive rather than trusting type/name
+  ---
+  duration_ms: 2.693333
+  type: 'test'
+  ...
+# Subtest: actual canonical catalog rejects noidentity rather than trusting type/name
+ok 116 - actual canonical catalog rejects noidentity rather than trusting type/name
+  ---
+  duration_ms: 2.490695
+  type: 'test'
+  ...
+# Subtest: actual canonical catalog rejects nocategory rather than trusting type/name
+ok 117 - actual canonical catalog rejects nocategory rather than trusting type/name
+  ---
+  duration_ms: 2.556272
+  type: 'test'
+  ...
+# Subtest: real cheap qualifying vial gets BAC independent of price; forged client gift quantity removed
+ok 118 - real cheap qualifying vial gets BAC independent of price; forged client gift quantity removed
+  ---
+  duration_ms: 3.696678
+  type: 'test'
+  ...
+# Subtest: real fixed restricted code capped at actual eligible residual, never borrows other merchandise
+ok 119 - real fixed restricted code capped at actual eligible residual, never borrows other merchandise
+  ---
+  duration_ms: 4.128284
+  type: 'test'
+  ...
+# Subtest: actual handler fractional-cent stack conserves subtotal, breakdown and payable total
+ok 120 - actual handler fractional-cent stack conserves subtotal, breakdown and payable total
+  ---
+  duration_ms: 4.081047
+  type: 'test'
+  ...
+# Subtest: H1 hash binds customer address, delivery, payment and zero-value/full code intent
+ok 121 - H1 hash binds customer address, delivery, payment and zero-value/full code intent
+  ---
+  duration_ms: 33.337603
+  type: 'test'
+  ...
+# Subtest: H1 hash binds actual server principal but tolerates refreshed credentials/proofs/key/date
+ok 122 - H1 hash binds actual server principal but tolerates refreshed credentials/proofs/key/date
+  ---
+  duration_ms: 19.984974
+  type: 'test'
+  ...
+# Subtest: H3 missing/invalid idempotency key fails before database reads, number or write
+ok 123 - H3 missing/invalid idempotency key fails before database reads, number or write
+  ---
+  duration_ms: 5.208332
+  type: 'test'
+  ...
+# Subtest: H2 exact selected hidden 10mg inventory retains 100 price, never 5mg sale; reverse=false
+ok 124 - H2 exact selected hidden 10mg inventory retains 100 price, never 5mg sale; reverse=false
+  ---
+  duration_ms: 16.402219
+  type: 'test'
+  ...
+# Subtest: H2 exact selected hidden 10mg inventory retains 100 price, never 5mg sale; reverse=true
+ok 125 - H2 exact selected hidden 10mg inventory retains 100 price, never 5mg sale; reverse=true
+  ---
+  duration_ms: 19.091064
+  type: 'test'
+  ...
+# Subtest: H2 exact SKU cannot broaden into other dosage or unrelated configured inventory
+ok 126 - H2 exact SKU cannot broaden into other dosage or unrelated configured inventory
+  ---
+  duration_ms: 5.330041
+  type: 'test'
+  ...
+# Subtest: H2 canonical configured price works without optional SKU, no missing inventory fallback
+ok 127 - H2 canonical configured price works without optional SKU, no missing inventory fallback
+  ---
+  duration_ms: 5.820637
+  type: 'test'
+  ...
+# Subtest: H5 unsupported/exclusive format {"isPlugPlay":true,"isNasalSpray":true}
+ok 128 - H5 unsupported/exclusive format {"isPlugPlay":true,"isNasalSpray":true}
+  ---
+  duration_ms: 2.902134
+  type: 'test'
+  ...
+# Subtest: H5 unsupported/exclusive format {"isPlugPlay":true,"isNasalDiySet":true}
+ok 129 - H5 unsupported/exclusive format {"isPlugPlay":true,"isNasalDiySet":true}
+  ---
+  duration_ms: 2.748842
+  type: 'test'
+  ...
+# Subtest: H5 unsupported/exclusive format {"isNasalSpray":true}
+ok 130 - H5 unsupported/exclusive format {"isNasalSpray":true}
+  ---
+  duration_ms: 2.689993
+  type: 'test'
+  ...
+# Subtest: H5 unsupported/exclusive format {"isNasalDiySet":true}
+ok 131 - H5 unsupported/exclusive format {"isNasalDiySet":true}
+  ---
+  duration_ms: 2.815732
+  type: 'test'
+  ...
+# Subtest: H5 hidden standalone and hidden family parent fail; visible parent permits exact proved child
+ok 132 - H5 hidden standalone and hidden family parent fail; visible parent permits exact proved child
+  ---
+  duration_ms: 6.007381
+  type: 'test'
+  ...
+# Subtest: H5 canonical Nasensprays cannot be forged to PlugPlay or BAC vial
+ok 133 - H5 canonical Nasensprays cannot be forged to PlugPlay or BAC vial
+  ---
+  duration_ms: 5.869507
+  type: 'test'
+  ...
+# Subtest: H5 canonical Tabletten cannot be forged to PlugPlay or BAC vial
+ok 134 - H5 canonical Tabletten cannot be forged to PlugPlay or BAC vial
+  ---
+  duration_ms: 5.904216
+  type: 'test'
+  ...
+# Subtest: H5 canonical Kapseln / Tabletten cannot be forged to PlugPlay or BAC vial
+ok 135 - H5 canonical Kapseln / Tabletten cannot be forged to PlugPlay or BAC vial
+  ---
+  duration_ms: 5.77801
+  type: 'test'
+  ...
+# Subtest: H5 canonical Fertigpens cannot be forged to PlugPlay or BAC vial
+ok 136 - H5 canonical Fertigpens cannot be forged to PlugPlay or BAC vial
+  ---
+  duration_ms: 5.65283
+  type: 'test'
+  ...
+# Subtest: H5 canonical Zubehör cannot be forged to PlugPlay or BAC vial
+ok 137 - H5 canonical Zubehör cannot be forged to PlugPlay or BAC vial
+  ---
+  duration_ms: 5.797366
+  type: 'test'
+  ...
+# Subtest: H5 former canonical DIY format is retired even for previously eligible family
+ok 138 - H5 former canonical DIY format is retired even for previously eligible family
+  ---
+  duration_ms: 2.89447
+  type: 'test'
+  ...
+# Subtest: H6 restriction=pep-10mg dose=5 mg exact canonical matching
+ok 139 - H6 restriction=pep-10mg dose=5 mg exact canonical matching
+  ---
+  duration_ms: 3.631265
+  type: 'test'
+  ...
+# Subtest: H6 restriction=pep-10mg dose=10 mg exact canonical matching
+ok 140 - H6 restriction=pep-10mg dose=10 mg exact canonical matching
+  ---
+  duration_ms: 3.447515
+  type: 'test'
+  ...
+# Subtest: H6 restriction=PEP-10MG dose=10 mg exact canonical matching
+ok 141 - H6 restriction=PEP-10MG dose=10 mg exact canonical matching
+  ---
+  duration_ms: 6.108872
+  type: 'test'
+  ...
+# Subtest: H6 restriction=PeP dose=5 mg exact canonical matching
+ok 142 - H6 restriction=PeP dose=5 mg exact canonical matching
+  ---
+  duration_ms: 3.889962
+  type: 'test'
+  ...
+# Subtest: H6 restriction=pep-other dose=5 mg exact canonical matching
+ok 143 - H6 restriction=pep-other dose=5 mg exact canonical matching
+  ---
+  duration_ms: 3.656939
+  type: 'test'
+  ...
+# Subtest: shared quote stock preflight aggregates paid/free BAC and rejects missing tracked kit stock
+ok 144 - shared quote stock preflight aggregates paid/free BAC and rejects missing tracked kit stock
+  ---
+  duration_ms: 3.427141
+  type: 'test'
+  ...
+# Subtest: bundle full configured base ignores sale and adds approved format surcharge AFTER bundle reduction
+ok 145 - bundle full configured base ignores sale and adds approved format surcharge AFTER bundle reduction
+  ---
+  duration_ms: 3.695413
+  type: 'test'
+  ...
+# Subtest: existing 2for3 config derives exact same-selection gift, no browser authority, inventory aggregated
+ok 146 - existing 2for3 config derives exact same-selection gift, no browser authority, inventory aggregated
+  ---
+  duration_ms: 22.996755
+  type: 'test'
+  ...
+# Subtest: existing 2for3 policy excludes exclude without broadening
+ok 147 - existing 2for3 policy excludes exclude without broadening
+  ---
+  duration_ms: 3.907349
+  type: 'test'
+  ...
+# Subtest: existing 2for3 policy excludes expired without broadening
+ok 148 - existing 2for3 policy excludes expired without broadening
+  ---
+  duration_ms: 3.568871
+  type: 'test'
+  ...
+# Subtest: existing 2for3 policy excludes invalid without broadening
+ok 149 - existing 2for3 policy excludes invalid without broadening
+  ---
+  duration_ms: 3.675376
+  type: 'test'
+  ...
+# Subtest: existing 2for3 policy excludes plug without broadening
+ok 150 - existing 2for3 policy excludes plug without broadening
+  ---
+  duration_ms: 3.251155
+  type: 'test'
+  ...
+# Subtest: actual CREATE rejects price change between preflight and transaction before order number or writes
+ok 151 - actual CREATE rejects price change between preflight and transaction before order number or writes
+  ---
+  duration_ms: 11.097221
+  type: 'test'
+  ...
+# Subtest: actual CREATE rejects bundle change between preflight and transaction before order number or writes
+ok 152 - actual CREATE rejects bundle change between preflight and transaction before order number or writes
+  ---
+  duration_ms: 18.177329
+  type: 'test'
+  ...
+# Subtest: actual CREATE rejects global change between preflight and transaction before order number or writes
+ok 153 - actual CREATE rejects global change between preflight and transaction before order number or writes
+  ---
+  duration_ms: 10.148581
+  type: 'test'
+  ...
+# Subtest: actual CREATE rejects promo change between preflight and transaction before order number or writes
+ok 154 - actual CREATE rejects promo change between preflight and transaction before order number or writes
+  ---
+  duration_ms: 10.265236
+  type: 'test'
+  ...
+# Subtest: H4 scope boundary explicitly preserves legacy shared-product P4P; NOT a verified-origin security fix
+ok 155 - H4 scope boundary explicitly preserves legacy shared-product P4P; NOT a verified-origin security fix
+  ---
+  duration_ms: 6.567574
+  type: 'test'
+  ...
+# Subtest: Smart-Sub enabled=true: quote and CREATE 100mg from 2x50mg keep confirmed SKU, dosage, price and free BAC
+ok 156 - Smart-Sub enabled=true: quote and CREATE 100mg from 2x50mg keep confirmed SKU, dosage, price and free BAC
+  ---
+  duration_ms: 18.858862
+  type: 'test'
+  ...
+# Subtest: Smart-Sub enabled=1: quote and CREATE 100mg from 2x50mg keep confirmed SKU, dosage, price and free BAC
+ok 157 - Smart-Sub enabled=1: quote and CREATE 100mg from 2x50mg keep confirmed SKU, dosage, price and free BAC
+  ---
+  duration_ms: 20.15722
+  type: 'test'
+  ...
+# Subtest: Smart-Sub false: quote and CREATE fail closed without direct stock
+ok 158 - Smart-Sub false: quote and CREATE fail closed without direct stock
+  ---
+  duration_ms: 9.459433
+  type: 'test'
+  ...
+# Subtest: Smart-Sub 0: quote and CREATE fail closed without direct stock
+ok 159 - Smart-Sub 0: quote and CREATE fail closed without direct stock
+  ---
+  duration_ms: 9.809455
+  type: 'test'
+  ...
+# Subtest: Smart-Sub true: quote and CREATE fail closed without direct stock
+ok 160 - Smart-Sub true: quote and CREATE fail closed without direct stock
+  ---
+  duration_ms: 9.455503
+  type: 'test'
+  ...
+# Subtest: Smart-Sub missing: quote and CREATE fail closed without direct stock
+ok 161 - Smart-Sub missing: quote and CREATE fail closed without direct stock
+  ---
+  duration_ms: 9.339291
+  type: 'test'
+  ...
+# Subtest: Smart-Sub error: quote and CREATE fail closed without direct stock
+ok 162 - Smart-Sub error: quote and CREATE fail closed without direct stock
+  ---
+  duration_ms: 9.370579
+  type: 'test'
+  ...
+# Subtest: Smart-Sub quantity: no invented stock or inexact dosage fulfillment
+ok 163 - Smart-Sub quantity: no invented stock or inexact dosage fulfillment
+  ---
+  duration_ms: 9.705626
+  type: 'test'
+  ...
+# Subtest: Smart-Sub nonexact: no invented stock or inexact dosage fulfillment
+ok 164 - Smart-Sub nonexact: no invented stock or inexact dosage fulfillment
+  ---
+  duration_ms: 9.745987
+  type: 'test'
+  ...
+# Subtest: Smart-Sub inactive: no invented stock or inexact dosage fulfillment
+ok 165 - Smart-Sub inactive: no invented stock or inexact dosage fulfillment
+  ---
+  duration_ms: 11.3581
+  type: 'test'
+  ...
+# Subtest: Smart-Sub excluded-component: no invented stock or inexact dosage fulfillment
+ok 166 - Smart-Sub excluded-component: no invented stock or inexact dosage fulfillment
+  ---
+  duration_ms: 9.476452
+  type: 'test'
+  ...
+# Subtest: Smart-Sub invalid-stock: no invented stock or inexact dosage fulfillment
+ok 167 - Smart-Sub invalid-stock: no invented stock or inexact dosage fulfillment
+  ---
+  duration_ms: 9.734279
+  type: 'test'
+  ...
+# Subtest: Smart-Sub shared smaller/larger demand reserves direct smaller SKU first, reverse=false
+ok 168 - Smart-Sub shared smaller/larger demand reserves direct smaller SKU first, reverse=false
+  ---
+  duration_ms: 24.41464
+  type: 'test'
+  ...
+# Subtest: Smart-Sub shared smaller/larger demand reserves direct smaller SKU first, reverse=true
+ok 169 - Smart-Sub shared smaller/larger demand reserves direct smaller SKU first, reverse=true
+  ---
+  duration_ms: 26.719764
+  type: 'test'
+  ...
+# Subtest: Smart-Sub 20mg plus 30mg share five 10mg components, never reuse four
+ok 170 - Smart-Sub 20mg plus 30mg share five 10mg components, never reuse four
+  ---
+  duration_ms: 25.367956
+  type: 'test'
+  ...
+# Subtest: Smart-Sub Kapseln / Tabletten never substitutes even with exact smaller dosage available
+ok 171 - Smart-Sub Kapseln / Tabletten never substitutes even with exact smaller dosage available
+  ---
+  duration_ms: 9.308334
+  type: 'test'
+  ...
+# Subtest: Smart-Sub Tabletten never substitutes even with exact smaller dosage available
+ok 172 - Smart-Sub Tabletten never substitutes even with exact smaller dosage available
+  ---
+  duration_ms: 8.99819
+  type: 'test'
+  ...
+# Subtest: Smart-Sub Kapseln never substitutes even with exact smaller dosage available
+ok 173 - Smart-Sub Kapseln never substitutes even with exact smaller dosage available
+  ---
+  duration_ms: 11.85114
+  type: 'test'
+  ...
+# Subtest: Smart-Sub Zubehör never substitutes even with exact smaller dosage available
+ok 174 - Smart-Sub Zubehör never substitutes even with exact smaller dosage available
+  ---
+  duration_ms: 9.834613
+  type: 'test'
+  ...
+# Subtest: Smart-Sub 369 BeautyLine never substitutes even with exact smaller dosage available
+ok 175 - Smart-Sub 369 BeautyLine never substitutes even with exact smaller dosage available
+  ---
+  duration_ms: 8.894096
+  type: 'test'
+  ...
+# Subtest: Smart-Sub keeps aggregate paid plus free BAC mandatory
+ok 176 - Smart-Sub keeps aggregate paid plus free BAC mandatory
+  ---
+  duration_ms: 23.621384
+  type: 'test'
+  ...
+# Subtest: Smart-Sub never revives retired DIY format or auto-components
+ok 177 - Smart-Sub never revives retired DIY format or auto-components
+  ---
+  duration_ms: 2.923295
+  type: 'test'
+  ...
+# Subtest: Smart-Sub CREATE repeats disabled under locks before number and writes
+ok 178 - Smart-Sub CREATE repeats disabled under locks before number and writes
+  ---
+  duration_ms: 9.983687
+  type: 'test'
+  ...
+# Subtest: Smart-Sub CREATE repeats component-stock under locks before number and writes
+ok 179 - Smart-Sub CREATE repeats component-stock under locks before number and writes
+  ---
+  duration_ms: 16.829667
+  type: 'test'
+  ...
+# Subtest: Smart-Sub PlugPlay preserves 15 surcharge and no free BAC, replay never deducts again
+ok 180 - Smart-Sub PlugPlay preserves 15 surcharge and no free BAC, replay never deducts again
+  ---
+  duration_ms: 15.535493
+  type: 'test'
+  ...
+# Subtest: Smart-Sub paid plus 2for3 selected-SKU gifts use one aggregate plan and one deduction
+ok 181 - Smart-Sub paid plus 2for3 selected-SKU gifts use one aggregate plan and one deduction
+  ---
+  duration_ms: 17.760114
+  type: 'test'
+  ...
+# Subtest: Smart-Sub retains existing exact backtracking rather than greedy inexact stock fallback
+ok 182 - Smart-Sub retains existing exact backtracking rather than greedy inexact stock fallback
+  ---
+  duration_ms: 16.346538
+  type: 'test'
+  ...
+# Subtest: Smart-Sub does not mix partial direct larger stock with smaller components
+ok 183 - Smart-Sub does not mix partial direct larger stock with smaller components
+  ---
+  duration_ms: 12.212181
+  type: 'test'
+  ...
+# Subtest: Smart-Sub item failure rolls replacement stock back and same intent stays retryable
+ok 184 - Smart-Sub item failure rolls replacement stock back and same intent stays retryable
+  ---
+  duration_ms: 28.833261
+  type: 'test'
+  ...
+# Subtest: Smart-Sub config read failure under transaction fails closed, directStock=false
+ok 185 - Smart-Sub config read failure under transaction fails closed, directStock=false
+  ---
+  duration_ms: 10.430548
+  type: 'test'
+  ...
+# Subtest: Smart-Sub config read failure under transaction fails closed, directStock=true
+ok 186 - Smart-Sub config read failure under transaction fails closed, directStock=true
+  ---
+  duration_ms: 15.847992
+  type: 'test'
+  ...
+# Subtest: Smart-Sub canonical oral parent excludes even a peptide-labelled hidden inventory child
+ok 187 - Smart-Sub canonical oral parent excludes even a peptide-labelled hidden inventory child
+  ---
+  duration_ms: 12.324282
+  type: 'test'
+  ...
+# Subtest: NOV25 actual handler separate accessory set plus tagged vial preserves quote/create/receipt rows and never auto-adds BAC10 kit
+ok 188 - NOV25 actual handler separate accessory set plus tagged vial preserves quote/create/receipt rows and never auto-adds BAC10 kit
+  ---
+  duration_ms: 17.929579
+  type: 'test'
+  ...
+# Subtest: NOV25 actual handler fresh set cannot inherit SmartSub, BAC, quantity or implicit components
+ok 189 - NOV25 actual handler fresh set cannot inherit SmartSub, BAC, quantity or implicit components
+  ---
+  duration_ms: 5.661955
+  type: 'test'
+  ...
+# Subtest: NOV25 actual handler locked revalidation protects set-price before stock writes
+ok 190 - NOV25 actual handler locked revalidation protects set-price before stock writes
+  ---
+  duration_ms: 9.506968
+  type: 'test'
+  ...
+# Subtest: NOV25 actual handler locked revalidation protects prepared-primary before stock writes
+ok 191 - NOV25 actual handler locked revalidation protects prepared-primary before stock writes
+  ---
+  duration_ms: 9.085822
+  type: 'test'
+  ...
+# Subtest: NOV25 actual handler locked revalidation protects prepared-name before stock writes
+ok 192 - NOV25 actual handler locked revalidation protects prepared-name before stock writes
+  ---
+  duration_ms: 9.628619
+  type: 'test'
+  ...
+# Subtest: NOV25 actual handler all current 369 forms use ordinary shipping even at cold-excluded island and stale requested-cooling flag
+ok 193 - NOV25 actual handler all current 369 forms use ordinary shipping even at cold-excluded island and stale requested-cooling flag
+  ---
+  duration_ms: 3.199542
+  type: 'test'
+  ...
+# Subtest: PRECISION actual quote/create/receipt: +7, one BAC10, exact flags and untracked contents
+ok 194 - PRECISION actual quote/create/receipt: +7, one BAC10, exact flags and untracked contents
+  ---
+  duration_ms: 26.658289
+  type: 'test'
+  ...
+# Subtest: PRECISION actual purchased BAC10 + kit stock journal aggregates exactly once
+ok 195 - PRECISION actual purchased BAC10 + kit stock journal aggregates exactly once
+  ---
+  duration_ms: 17.143733
+  type: 'test'
+  ...
+# Subtest: PRECISION actual aggregate BAC10 shortage cannot quote or substitute BAC3
+ok 196 - PRECISION actual aggregate BAC10 shortage cannot quote or substitute BAC3
+  ---
+  duration_ms: 3.45385
+  type: 'test'
+  ...
+# Subtest: PRECISION actual locked BAC price and stock changes invalidate before order writes
+ok 197 - PRECISION actual locked BAC price and stock changes invalidate before order writes
+  ---
+  duration_ms: 18.987915
+  type: 'test'
+  ...
+# Subtest: PRECISION actual item rollback restores stock/receipt/order and retry commits once
+ok 198 - PRECISION actual item rollback restores stock/receipt/order and retry commits once
+  ---
+  duration_ms: 31.046632
+  type: 'test'
+  ...
+# Subtest: PRECISION actual expired promo drops gracefully with stable quote/create
+ok 199 - PRECISION actual expired promo drops gracefully with stable quote/create
+  ---
+  duration_ms: 18.632083
+  type: 'test'
+  ...
+# Subtest: PRECISION actual tiers/global/restricted promo use the same residual parity
+ok 200 - PRECISION actual tiers/global/restricted promo use the same residual parity
+  ---
+  duration_ms: 3.986768
+  type: 'test'
+  ...
+# Subtest: PRECISION actual forged manual/admin/store and legacy nasal-only reject before writes
+ok 201 - PRECISION actual forged manual/admin/store and legacy nasal-only reject before writes
+  ---
+  duration_ms: 3.164909
+  type: 'test'
+  ...
+# Subtest: PRECISION actual authenticated partner discount/credit retains session and ledger parity
+ok 202 - PRECISION actual authenticated partner discount/credit retains session and ledger parity
+  ---
+  duration_ms: 27.775195
+  type: 'test'
+  ...
+# Subtest: PRECISION actual KWK productive credit retains auth and ledger parity, demo/revoked denied
+ok 203 - PRECISION actual KWK productive credit retains auth and ledger parity, demo/revoked denied
+  ---
+  duration_ms: 24.161309
+  type: 'test'
+  ...
+# Subtest: PRECISION actual KWK referral and public code discounts share canonical residual logic
+ok 204 - PRECISION actual KWK referral and public code discounts share canonical residual logic
+  ---
+  duration_ms: 7.268848
+  type: 'test'
+  ...
+# Subtest: PG precision quote is read-only; real create/receipt has +7 kit and one BAC10
+ok 205 - PG precision quote is read-only; real create/receipt has +7 kit and one BAC10 # SKIP
+  ---
+  duration_ms: 1.233544
+  type: 'test'
+  ...
+# Subtest: PG precision aggregate paid BAC10 + kit makes one journal entry
+ok 206 - PG precision aggregate paid BAC10 + kit makes one journal entry # SKIP
+  ---
+  duration_ms: 0.200086
+  type: 'test'
+  ...
+# Subtest: PG precision same-key race/replay creates exactly one order and journal
+ok 207 - PG precision same-key race/replay creates exactly one order and journal # SKIP
+  ---
+  duration_ms: 0.137882
+  type: 'test'
+  ...
+# Subtest: PG precision last BAC10 competing customers cannot oversell
+ok 208 - PG precision last BAC10 competing customers cannot oversell # SKIP
+  ---
+  duration_ms: 0.358334
+  type: 'test'
+  ...
+# Subtest: PG precision changed BAC10 price/identity/stock forces requote without partial writes
+ok 209 - PG precision changed BAC10 price/identity/stock forces requote without partial writes # SKIP
+  ---
+  duration_ms: 0.166905
+  type: 'test'
+  ...
+# Subtest: PG precision item failure rolls back all stock/order/receipt and retry works once
+ok 210 - PG precision item failure rolls back all stock/order/receipt and retry works once # SKIP
+  ---
+  duration_ms: 0.127757
+  type: 'test'
+  ...
+# Subtest: PG ordinary flow remains vial-only; precision cartridge +15 is whitelist-bound
+ok 211 - PG ordinary flow remains vial-only; precision cartridge +15 is whitelist-bound # SKIP
+  ---
+  duration_ms: 0.367229
+  type: 'test'
+  ...
+# Subtest: PG precision changed-customer quote never writes, separate confirmation is consumed on create
+ok 212 - PG precision changed-customer quote never writes, separate confirmation is consumed on create # SKIP
+  ---
+  duration_ms: 0.431968
+  type: 'test'
+  ...
+# Subtest: precision principal ignores Origin/Referer/store claims without a key
+ok 213 - precision principal ignores Origin/Referer/store claims without a key
+  ---
+  duration_ms: 1.992904
+  type: 'test'
+  ...
+# Subtest: enabled key produces frozen server-owned principal
+ok 214 - enabled key produces frozen server-owned principal
+  ---
+  duration_ms: 0.593202
+  type: 'test'
+  ...
+# Subtest: failclosed principal: wrong key
+ok 215 - failclosed principal: wrong key
+  ---
+  duration_ms: 0.791976
+  type: 'test'
+  ...
+# Subtest: failclosed principal: short key
+ok 216 - failclosed principal: short key
+  ---
+  duration_ms: 0.166937
+  type: 'test'
+  ...
+# Subtest: failclosed principal: array
+ok 217 - failclosed principal: array
+  ---
+  duration_ms: 0.189584
+  type: 'test'
+  ...
+# Subtest: failclosed principal: joined duplicate
+ok 218 - failclosed principal: joined duplicate
+  ---
+  duration_ms: 0.202441
+  type: 'test'
+  ...
+# Subtest: failclosed principal: whitespace
+ok 219 - failclosed principal: whitespace
+  ---
+  duration_ms: 0.148861
+  type: 'test'
+  ...
+# Subtest: failclosed principal: disabled
+ok 220 - failclosed principal: disabled
+  ---
+  duration_ms: 0.16587
+  type: 'test'
+  ...
+# Subtest: failclosed principal: missing enabled
+ok 221 - failclosed principal: missing enabled
+  ---
+  duration_ms: 0.872511
+  type: 'test'
+  ...
+# Subtest: failclosed principal: weak configured secret
+ok 222 - failclosed principal: weak configured secret
+  ---
+  duration_ms: 0.918747
+  type: 'test'
+  ...
+# Subtest: duplicate raw header and browser scope claims rejected
+ok 223 - duplicate raw header and browser scope claims rejected
+  ---
+  duration_ms: 0.559389
+  type: 'test'
+  ...
+# Subtest: scope fingerprint deterministic and different from original
+ok 224 - scope fingerprint deterministic and different from original
+  ---
+  duration_ms: 0.284035
+  type: 'test'
+  ...
+# Subtest: whitelists are exact 13 cartridge and 7 nasal families
+ok 225 - whitelists are exact 13 cartridge and 7 nasal families
+  ---
+  duration_ms: 0.16048
+  type: 'test'
+  ...
+# Subtest: canonical precision cartridge 3g-triple-g +15 and regular default unchanged
+ok 226 - canonical precision cartridge 3g-triple-g +15 and regular default unchanged
+  ---
+  duration_ms: 3.473838
+  type: 'test'
+  ...
+# Subtest: canonical precision cartridge tirzepatide +15 and regular default unchanged
+ok 227 - canonical precision cartridge tirzepatide +15 and regular default unchanged
+  ---
+  duration_ms: 0.918378
+  type: 'test'
+  ...
+# Subtest: canonical precision cartridge cagrilinitide +15 and regular default unchanged
+ok 228 - canonical precision cartridge cagrilinitide +15 and regular default unchanged
+  ---
+  duration_ms: 0.241826
+  type: 'test'
+  ...
+# Subtest: canonical precision cartridge eloralintide +15 and regular default unchanged
+ok 229 - canonical precision cartridge eloralintide +15 and regular default unchanged
+  ---
+  duration_ms: 0.23034
+  type: 'test'
+  ...
+# Subtest: canonical precision cartridge mots-c +15 and regular default unchanged
+ok 230 - canonical precision cartridge mots-c +15 and regular default unchanged
+  ---
+  duration_ms: 0.434602
+  type: 'test'
+  ...
+# Subtest: canonical precision cartridge ss-31 +15 and regular default unchanged
+ok 231 - canonical precision cartridge ss-31 +15 and regular default unchanged
+  ---
+  duration_ms: 0.378708
+  type: 'test'
+  ...
+# Subtest: canonical precision cartridge nad-plus +15 and regular default unchanged
+ok 232 - canonical precision cartridge nad-plus +15 and regular default unchanged
+  ---
+  duration_ms: 0.214405
+  type: 'test'
+  ...
+# Subtest: canonical precision cartridge 5-amino-1mq +15 and regular default unchanged
+ok 233 - canonical precision cartridge 5-amino-1mq +15 and regular default unchanged
+  ---
+  duration_ms: 0.182568
+  type: 'test'
+  ...
+# Subtest: canonical precision cartridge tb-500 +15 and regular default unchanged
+ok 234 - canonical precision cartridge tb-500 +15 and regular default unchanged
+  ---
+  duration_ms: 1.109135
+  type: 'test'
+  ...
+# Subtest: canonical precision cartridge ghk-cu +15 and regular default unchanged
+ok 235 - canonical precision cartridge ghk-cu +15 and regular default unchanged
+  ---
+  duration_ms: 0.299289
+  type: 'test'
+  ...
+# Subtest: canonical precision cartridge pt-141 +15 and regular default unchanged
+ok 236 - canonical precision cartridge pt-141 +15 and regular default unchanged
+  ---
+  duration_ms: 0.191651
+  type: 'test'
+  ...
+# Subtest: canonical precision cartridge tesamorelin +15 and regular default unchanged
+ok 237 - canonical precision cartridge tesamorelin +15 and regular default unchanged
+  ---
+  duration_ms: 0.150641
+  type: 'test'
+  ...
+# Subtest: canonical precision cartridge cjc-ipamorelin-kombi +15 and regular default unchanged
+ok 238 - canonical precision cartridge cjc-ipamorelin-kombi +15 and regular default unchanged
+  ---
+  duration_ms: 0.139975
+  type: 'test'
+  ...
+# Subtest: canonical precision nasal semax +7 with one BAC10
+ok 239 - canonical precision nasal semax +7 with one BAC10
+  ---
+  duration_ms: 0.768582
+  type: 'test'
+  ...
+# Subtest: canonical precision nasal selank +7 with one BAC10
+ok 240 - canonical precision nasal selank +7 with one BAC10
+  ---
+  duration_ms: 0.367073
+  type: 'test'
+  ...
+# Subtest: canonical precision nasal adamax +7 with one BAC10
+ok 241 - canonical precision nasal adamax +7 with one BAC10
+  ---
+  duration_ms: 0.196886
+  type: 'test'
+  ...
+# Subtest: canonical precision nasal oxytocin +7 with one BAC10
+ok 242 - canonical precision nasal oxytocin +7 with one BAC10
+  ---
+  duration_ms: 0.208858
+  type: 'test'
+  ...
+# Subtest: canonical precision nasal pt-141 +7 with one BAC10
+ok 243 - canonical precision nasal pt-141 +7 with one BAC10
+  ---
+  duration_ms: 0.192989
+  type: 'test'
+  ...
+# Subtest: canonical precision nasal kisspeptin-10 +7 with one BAC10
+ok 244 - canonical precision nasal kisspeptin-10 +7 with one BAC10
+  ---
+  duration_ms: 0.181354
+  type: 'test'
+  ...
+# Subtest: canonical precision nasal semax-selank +7 with one BAC10
+ok 245 - canonical precision nasal semax-selank +7 with one BAC10
+  ---
+  duration_ms: 0.180606
+  type: 'test'
+  ...
+# Subtest: contradictory/legacy precision format {"isNasalSpray":true}
+ok 246 - contradictory/legacy precision format {"isNasalSpray":true}
+  ---
+  duration_ms: 0.289188
+  type: 'test'
+  ...
+# Subtest: contradictory/legacy precision format {"isNasalDiySet":true}
+ok 247 - contradictory/legacy precision format {"isNasalDiySet":true}
+  ---
+  duration_ms: 0.33243
+  type: 'test'
+  ...
+# Subtest: contradictory/legacy precision format {"isPlugPlay":true,"isNasalSpray":true,"isNasalDiySet":true}
+ok 248 - contradictory/legacy precision format {"isPlugPlay":true,"isNasalSpray":true,"isNasalDiySet":true}
+  ---
+  duration_ms: 0.177744
+  type: 'test'
+  ...
+# Subtest: non-whitelisted cartridge klow-stack rejected even if real vial
+ok 249 - non-whitelisted cartridge klow-stack rejected even if real vial
+  ---
+  duration_ms: 0.258828
+  type: 'test'
+  ...
+# Subtest: non-whitelisted cartridge cagrilintide rejected even if real vial
+ok 250 - non-whitelisted cartridge cagrilintide rejected even if real vial
+  ---
+  duration_ms: 0.144693
+  type: 'test'
+  ...
+# Subtest: non-whitelisted cartridge snap-8 rejected even if real vial
+ok 251 - non-whitelisted cartridge snap-8 rejected even if real vial
+  ---
+  duration_ms: 0.12834
+  type: 'test'
+  ...
+# Subtest: non-whitelisted cartridge unknown rejected even if real vial
+ok 252 - non-whitelisted cartridge unknown rejected even if real vial
+  ---
+  duration_ms: 0.118739
+  type: 'test'
+  ...
+# Subtest: real prepared nasal cannot be relabeled or converted to kit/vial
+ok 253 - real prepared nasal cannot be relabeled or converted to kit/vial
+  ---
+  duration_ms: 0.307493
+  type: 'test'
+  ...
+# Subtest: canonical SKU-only selection allowed only through exact existing catalog publication
+ok 254 - canonical SKU-only selection allowed only through exact existing catalog publication
+  ---
+  duration_ms: 0.331634
+  type: 'test'
+  ...
+# Subtest: paid BAC10 plus kit BAC10 aggregate stock, no BAC3 replacement
+ok 255 - paid BAC10 plus kit BAC10 aggregate stock, no BAC3 replacement
+  ---
+  duration_ms: 0.909853
+  type: 'test'
+  ...
+# Subtest: missing/duplicate/inactive BAC10 fails closed, snapshot includes tracked identity and price
+ok 256 - missing/duplicate/inactive BAC10 fails closed, snapshot includes tracked identity and price
+  ---
+  duration_ms: 14.107171
+  type: 'test'
+  ...
+# Subtest: pure separate accessory set is one actual priced row, never a format, kit fee or implicit stock demand
+ok 257 - pure separate accessory set is one actual priced row, never a format, kit fee or implicit stock demand
+  ---
+  duration_ms: 5.784222
+  type: 'test'
+  ...
+# Subtest: pure accessory set is not quantity eligible and gets no automatic BAC, even above threshold
+ok 258 - pure accessory set is not quantity eligible and gets no automatic BAC, even above threshold
+  ---
+  duration_ms: 1.664404
+  type: 'test'
+  ...
+# Subtest: pure retired format {"isNasalSpray":true} rejects rather than sanitizing into a vial
+ok 259 - pure retired format {"isNasalSpray":true} rejects rather than sanitizing into a vial
+  ---
+  duration_ms: 0.261921
+  type: 'test'
+  ...
+# Subtest: pure retired format {"isNasalDiySet":true} rejects rather than sanitizing into a vial
+ok 260 - pure retired format {"isNasalDiySet":true} rejects rather than sanitizing into a vial
+  ---
+  duration_ms: 0.13766
+  type: 'test'
+  ...
+# Subtest: pure retired format {"isNasalSpray":true,"isPlugPlay":true} rejects rather than sanitizing into a vial
+ok 261 - pure retired format {"isNasalSpray":true,"isPlugPlay":true} rejects rather than sanitizing into a vial
+  ---
+  duration_ms: 0.181206
+  type: 'test'
+  ...
+# Subtest: pure retired format {"variant":"DIY-Set"} rejects rather than sanitizing into a vial
+ok 262 - pure retired format {"variant":"DIY-Set"} rejects rather than sanitizing into a vial
+  ---
+  duration_ms: 0.168053
+  type: 'test'
+  ...
+# Subtest: pure retired format {"variant":"[Nasenspray]"} rejects rather than sanitizing into a vial
+ok 263 - pure retired format {"variant":"[Nasenspray]"} rejects rather than sanitizing into a vial
+  ---
+  duration_ms: 0.127297
+  type: 'test'
+  ...
+# Subtest: pure prepared catalogue Nasensprays/Synthetic (10 mg) fails closed
+ok 264 - pure prepared catalogue Nasensprays/Synthetic (10 mg) fails closed
+  ---
+  duration_ms: 0.448149
+  type: 'test'
+  ...
+# Subtest: pure prepared catalogue Vials/Prepared Nasenspray (10 mg) fails closed
+ok 265 - pure prepared catalogue Vials/Prepared Nasenspray (10 mg) fails closed
+  ---
+  duration_ms: 0.808624
+  type: 'test'
+  ...
+# Subtest: pure secondary nasal tag is filter-only: retain vial quantity/BAC/SmartSub authority
+ok 266 - pure secondary nasal tag is filter-only: retain vial quantity/BAC/SmartSub authority
+  ---
+  duration_ms: 1.238877
+  type: 'test'
+  ...
+1..266
+# tests 266
+# suites 0
+# pass 258
+# fail 0
+# cancelled 0
+# skipped 8
+# todo 0
+# duration_ms 3192.296398
