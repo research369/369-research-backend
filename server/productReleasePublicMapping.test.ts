@@ -20,3 +20,18 @@ test('promotion exposes only selected new master metadata',()=>assert.deepEqual(
 test('legacy non-finalized product translation selection remains unchanged',()=>assert.deepEqual(publicMetadataSelection([{id:1,shopVisible:1,isActive:1,variants:[{price:40}]},{id:2,shopVisible:0,isActive:1,variants:null}]),{finalized:false,articleIds:[1,2]}));
 test('multiple released masters fail rather than leak mixed metadata',()=>assert.throws(()=>publicMetadataSelection([1,2].map(id=>({id,shopVisible:1,isActive:1,variants:[{publicationStatus:'finalized-draft'}]})))));
 test('publication marker is exact and unknown drafts do not gain finalized behavior',()=>{assert.equal(hasReleasedVariants([{priceStatus:'open'}]),false);assert.equal(hasReleasedVariants(null),false);assert.equal(hasReleasedVariants([{publicationStatus:'finalized-draft'}]),true)});
+test('new KPV strength never inherits the old master purity',()=>{
+ const master={id:108,name:'KPV (10 mg)',sku:'KPV-10MG',shopProductId:'kpv',stock:10,sellingPrice:'40.00',purity:'99%',variants:[{sku:'KPV-10MG',label:'10 mg',price:40,stock:10,inventoryArticleId:108,publicationStatus:'finalized-draft'},{sku:'KPV-30MG',label:'30 mg',price:89,stock:9,inventoryArticleId:262,publicationStatus:'finalized-draft'}]};
+ const output=getPublicShopVariants(master,[master,{id:262,sku:'KPV-30MG',stock:9,shopProductId:'kpv',purity:null}]);
+ assert.deepEqual(output.map(v=>[v.sku,v.purity,v.price,v.stock]),[['KPV-10MG','99%',40,10],['KPV-30MG',null,89,9]]);
+ assert.equal(master.purity,'99%');
+});
+test('unconfirmed released purity is explicitly unknown even with claimed master quality',()=>{
+ const master={id:263,name:'NEXUS 4 (24 mg)',sku:'NEXUS-4-24MG',shopProductId:'nexus-4',stock:10,sellingPrice:'145.00',purity:null,variants:[{sku:'NEXUS-4-24MG',label:'24 mg',price:145,stock:10,inventoryArticleId:263,publicationStatus:'finalized-draft'}]};
+ const output=getPublicShopVariants(master,[master]);
+ assert.equal(output.length,1);assert.equal(output[0].purity,null);assert.equal(Object.hasOwn(output[0],'purity'),true);
+});
+test('legacy variants retain absence of variant-specific purity for backward compatibility',()=>{
+ const master={id:1,name:'Legacy (10 mg)',sku:'LEGACY-10MG',shopProductId:'legacy',stock:4,sellingPrice:'40.00',variants:[{label:'10 mg',price:40,stock:4}]};
+ const output=getPublicShopVariants(master,[master]);assert.equal(output.length,1);assert.equal(Object.hasOwn(output[0],'purity'),false);
+});

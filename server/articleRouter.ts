@@ -26,6 +26,7 @@ type PublicShopVariant = {
   sku: string;
   hidden?: boolean;
   image?: string;
+  purity?: string | null;
 };
 
 export function hasReleasedVariants(variants: unknown): boolean {
@@ -195,7 +196,7 @@ export function getPublicShopVariants(
     category?: string | null;
     categories?: unknown;
   },
-  inventoryArticles: Array<{ id: number; sku: string; stock: number; shopProductId: string | null; name?: string; category?: string | null; categories?: unknown }> = [],
+  inventoryArticles: Array<{ id: number; sku: string; stock: number; shopProductId: string | null; name?: string; category?: string | null; categories?: unknown; purity?: string | null }> = [],
 ): PublicShopVariant[] {
   if (isReadyNasalArticle({ ...article, shopProductId: article.shopProductId ?? null })) return [];
   // The new blend never falls back to inferred name/SKU amounts or missing
@@ -244,6 +245,7 @@ export function getPublicShopVariants(
       sku: inventoryArticle?.sku ?? article.sku,
       ...(explicitlyHidden ? { hidden: true } : {}),
       ...(image ? { image } : {}),
+      ...(finalized ? { purity: inventoryArticle?.purity ?? null } : {}),
     }];
   });
 
@@ -948,6 +950,7 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
       name: articles.name,
       category: articles.category,
       categories: articles.categories,
+      purity: articles.purity,
     }).from(articles);
 
     // Group by shopProductId to aggregate variants
@@ -1007,6 +1010,7 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
       p.variants = Array.from(byDosage.values()).sort((a, b) => a.price - b.price);
       if (p.variants.length > 0) p.price = p.variants[0].price;
       if (releasedFamilies.has(p.id)) Object.assign(p, summarizeReleasedStock(p.variants));
+      if (releasedFamilies.has(p.id) && p.variants.some((v: PublicShopVariant) => v.purity === null)) p.purity = null;
       return p;
     });
   }),
@@ -1046,7 +1050,8 @@ Nur das JSON, kein Markdown, keine Erklärung.`;
         image: first.labelImageUrl || null,
         casNumber: first.casNumber || '',
         molecularWeight: first.molecularWeight || '',
-        purity: first.purity || (first.shopProductId === 'somatide' || (Array.isArray(first.variants) && first.variants.some(v => v?.publicationStatus === 'finalized-draft')) ? null : '99%'),
+        purity: hasReleasedVariants(first.variants) && variants.some(v => v.purity === null) ? null
+          : first.purity || (first.shopProductId === 'somatide' || hasReleasedVariants(first.variants) ? null : '99%'),
         ...(first.shopProductId === 'somatide' ? { composition: getPublicSingleBlendComposition(first, allArticles),
           masterArticleId: getPublicSingleBlendComposition(first, allArticles) ? first.id : null } : {}),
         badge: first.badge || null,
